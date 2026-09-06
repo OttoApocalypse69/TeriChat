@@ -91,4 +91,6 @@ access yet, no spending decisions yet (boxes 3, 4 untouched).
   live curl smoke (register→DM→send→history→outsider-403)
 - [x] Push + security posture — private `OttoApocalypse69/TeriChat`, branches
   pushed, PR #1 open, CI green, Actions token read-only, Dependabot on
-  (protection/rulesets/secret-scanning paywalled on Free — see report)
+- [x] PR #1 merged into `main`. Free plan: no server-side gates possible, so
+  `main` is protected by discipline only (branches + green CI + owner merge).
+  Ryan `CallMeRyanYT` invited as collaborator (push, not admin).
