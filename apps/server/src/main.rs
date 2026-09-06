@@ -6,6 +6,7 @@
 //! provides the real `PostgreSQL` for the next slice.
 
 #![forbid(unsafe_code)]
+mod config;
 
 use std::{net::SocketAddr, time::Duration};
 
