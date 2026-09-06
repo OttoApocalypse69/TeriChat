@@ -79,10 +79,7 @@ async fn ready_from_env(database_url: Option<String>) -> Result<Json<ReadyRespon
             database: "not_configured",
         })),
         Some(url) => {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .acquire_timeout(Duration::from_secs(2))
-                .connect(&url)
+            let pool = db_pool(&url)
                 .await
                 .map_err(|err| AppError::Unavailable(format!("database connect failed: {err}")))?;
             sqlx::query("SELECT 1")
@@ -96,6 +93,21 @@ async fn ready_from_env(database_url: Option<String>) -> Result<Json<ReadyRespon
             }))
         }
     }
+}
+
+/// Embedded, forward-only `SQLx` migrations from the workspace `migrations/`
+/// directory. The macro validates at compile time that the directory exists
+/// and parses, so a missing/broken migration fails the build — no database
+/// connection required.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+
+/// Single-connection pool helper shared by readiness and boot migration.
+async fn db_pool(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(2))
+        .connect(url)
+        .await
 }
 
 fn router() -> Router {
@@ -121,6 +133,21 @@ async fn main() {
         .init();
 
     let addr = bind_addr();
+
+    // Forward-only schema migration, applied once per boot when a database is
+    // configured. Without `DATABASE_URL` the baseline still boots bare.
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        let pool = db_pool(&url)
+            .await
+            .expect("connect database for migrations");
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("apply pending SQLx migrations");
+        pool.close().await;
+        tracing::info!("database migrations applied");
+    }
+
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind server address");
@@ -193,5 +220,50 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["status"], "ok");
         assert_eq!(json["database"], "not_configured");
+    }
+
+    #[test]
+    fn migrator_embeds_identity_migration() {
+        // Offline: the embedded migrator must resolve at least the identity
+        // migration. The `migrate!` macro already fails the build when the
+        // directory is missing or unparsable; this pins the expected content.
+        assert!(
+            !MIGRATOR.migrations.is_empty(),
+            "expected at least the identity migration"
+        );
+        let latest = MIGRATOR
+            .migrations
+            .iter()
+            .max_by_key(|m| m.version)
+            .unwrap();
+        assert!(
+            latest.description.contains("identity"),
+            "latest migration should be the identity foundation"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrations_apply_and_create_identity_tables() {
+        // Requires a live database: `DATABASE_URL=... cargo test`. Prints a
+        // skip (never a fake pass) when no database is configured, so plain
+        // `cargo test` stays offline-clean for CI without services.
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: migrations_apply_and_create_identity_tables (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        for table in ["users", "devices", "sessions"] {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .expect("query information_schema");
+            assert!(exists, "expected table `{table}` after migrations");
+        }
+        pool.close().await;
     }
 }

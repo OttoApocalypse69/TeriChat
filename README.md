@@ -31,6 +31,7 @@ docker compose config       # validate compose file
 
 ## Next unblocked work (Milestone A → B)
 
-1. First SQLx migration (users/devices/sessions shape per `02_SYSTEM_ARCHITECTURE.md`).
+1. ~~First SQLx migration~~ — done: `migrations/20260906202456_identity.sql`
+   (`users`/`devices`/`sessions` + `updated_at` trigger, applied on boot).
 2. Config loader that reads `.env` keys documented in `.env.example`.
 3. Auth slice: register/login/logout + Argon2id + revocation (Milestone B).
