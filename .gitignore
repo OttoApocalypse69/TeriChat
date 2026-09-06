@@ -1,0 +1,8 @@
+/target/
+.env
+!.env.example
+pgdata/
+*.orig
+*.rej
+.DS_Store
+Thumbs.db

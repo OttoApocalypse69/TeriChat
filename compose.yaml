@@ -1,0 +1,25 @@
+# Alpha 0 local dependencies. Baseline: PostgreSQL only.
+# NATS is intentionally deferred until the outbox-distribution slice needs it.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: terichat-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: terichat
+      POSTGRES_PASSWORD: terichat_dev_pw
+      POSTGRES_DB: terichat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U terichat -d terichat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
