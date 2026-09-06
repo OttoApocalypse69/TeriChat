@@ -7,11 +7,6 @@
 //!
 //! Password hashes are secrets: callers must never log them.
 
-// Temporary until the auth slice wires these helpers into a request path:
-// this is a binary crate, so `pub` items nothing uses yet read as dead code.
-// The unit tests below already exercise every item.
-#![allow(dead_code)]
-
 use std::fmt;
 
 use argon2::Argon2;

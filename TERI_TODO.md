@@ -64,3 +64,21 @@ Do not personally click through every harmless UI PR. Also do not approve crypto
 Final logo, exact boost prices, Kubernetes, marketplace economics, enterprise certifications, 4K HDR, and the .NET Colossus arms race. They are allowed to remain glorious future problems.
 
 **Tiny vocabulary reminder:** `main` = accepted code; Nightly/Beta/Stable = who gets a build; Staging/Production = where it runs; feature flags = which features are enabled. TeriCrypt is still TeriCrypt-4096™.
+
+---
+
+## Implementation progress (agent-maintained — Teri reads this, not the five boxes above)
+
+Local repo only: no GitHub repo, no Ryan access, no spending decisions yet (boxes 1, 3, 4 untouched).
+Pack IS in the local repo root with git history (`main` + `setup/baseline`).
+
+- [x] SETUP-001/002 — local repo initialized, spec pack committed (`77a1dd3`)
+- [x] SETUP-003 — Rust workspace + health/ready baseline, Compose PG, `.env.example` (`e18bce1`)
+- [x] Deps on machine — Rust 1.97.1, sqlx-cli 0.8.6 (= runtime), Docker + PG16 running
+- [x] First migration — `users`/`devices`/`sessions`, applied on boot (`f555be6`)
+- [x] Parallel wave 1 — `config.rs`, `password.rs` (Argon2id), CI `db-tests` job (merged `a345137`)
+- [x] Config boot wiring — `Config::from_env` drives port/log-filter/pool, bad `PORT` exits 1
+- [x] Milestone B auth — `auth.rs` + `/v1/auth/*`: register (201), login (token once),
+  logout (idempotent), device registry, bearer extractor, revocation; 23/23 tests
+  offline + DB-backed, live curl lifecycle verified (register→login→device→logout→401)
+- [ ] NEXT — Milestone C messaging: conversations, `MessageEnvelope`, outbox, WS gateway

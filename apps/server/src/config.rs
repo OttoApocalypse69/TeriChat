@@ -4,11 +4,6 @@
 //! process environment. [`Config::from_pairs`] offers the same semantics over
 //! an explicit set of pairs so unit tests never touch shared process state.
 
-#![allow(dead_code)]
-//! Focus: `mod config` is not yet wired into the boot path in `main.rs`
-//! (integration owns that follow-up), so nothing constructs `Config` in
-//! non-test builds. Revisit once the server reads its settings from here.
-
 use std::collections::HashMap;
 use std::fmt;
 

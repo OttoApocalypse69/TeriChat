@@ -33,9 +33,9 @@ docker compose config       # validate compose file
 
 1. ~~First SQLx migration~~ — done: `migrations/20260906202456_identity.sql`
    (`users`/`devices`/`sessions` + `updated_at` trigger, applied on boot).
-2. Config loader — module landed (`apps/server/src/config.rs`, tested);
-   still to wire into the boot path (port + log filter from `Config`).
-3. Auth slice — password hashing landed (`apps/server/src/password.rs`,
-   Argon2id/PHC, tested); still to build: user/device/session repo,
-   register/login/logout + revocation (Milestone B).
+2. Config loader — ~~module landed, wiring pending~~ wired: `Config::from_env`
+   drives port, log filter, and pool at boot; bad `PORT` exits 1 with a message.
+3. Auth slice — ~~hashing landed, repo/routes pending~~ done: `auth.rs` +
+   `/v1/auth/register|login|logout|devices`, bearer extractor, revocation.
+   Still ahead: Milestone C messaging (conversations, outbox, gateway).
 4. CI `db-tests` job runs migrations + DB-gated tests on every push/PR.
