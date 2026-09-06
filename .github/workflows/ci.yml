@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Build
+        run: cargo build --workspace
+
+  db-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: terichat
+          POSTGRES_PASSWORD: terichat_dev_pw
+          POSTGRES_DB: terichat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U terichat -d terichat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://terichat:terichat_dev_pw@localhost:5432/terichat
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+          components: rustfmt, clippy
+      # sqlx-cli pinned to 0.8.6 to match the sqlx 0.8 runtime (Cargo.lock: sqlx 0.8.6).
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --version 0.8.6 --no-default-features --features postgres
+      - name: Migrate
+        run: sqlx migrate run
+      - name: Tests (db)
+        run: DATABASE_URL=postgres://terichat:terichat_dev_pw@localhost:5432/terichat cargo test --workspace

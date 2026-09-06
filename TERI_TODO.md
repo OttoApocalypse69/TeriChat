@@ -64,3 +64,33 @@ Do not personally click through every harmless UI PR. Also do not approve crypto
 Final logo, exact boost prices, Kubernetes, marketplace economics, enterprise certifications, 4K HDR, and the .NET Colossus arms race. They are allowed to remain glorious future problems.
 
 **Tiny vocabulary reminder:** `main` = accepted code; Nightly/Beta/Stable = who gets a build; Staging/Production = where it runs; feature flags = which features are enabled. TeriCrypt is still TeriCrypt-4096™.
+
+---
+
+## Implementation progress (agent-maintained — Teri reads this, not the five boxes above)
+
+Remote: [OttoApocalypse69/TeriChat](https://github.com/OttoApocalypse69/TeriChat) (private).
+`main` + `setup/baseline` pushed; PR #1 open (backend A–C, CI green). No Ryan
+access yet, no spending decisions yet (boxes 3, 4 untouched).
+
+- [x] SETUP-001/002 — local repo initialized, spec pack committed (`77a1dd3`)
+- [x] SETUP-003 — Rust workspace + health/ready baseline, Compose PG, `.env.example` (`e18bce1`)
+- [x] Deps on machine — Rust 1.97.1, sqlx-cli 0.8.6 (= runtime), Docker + PG16 running
+- [x] First migration — `users`/`devices`/`sessions`, applied on boot (`f555be6`)
+- [x] Parallel wave 1 — `config.rs`, `password.rs` (Argon2id), CI `db-tests` job (merged `a345137`)
+- [x] Config boot wiring — `Config::from_env` drives port/log-filter/pool, bad `PORT` exits 1
+- [x] Milestone B auth — `auth.rs` + `/v1/auth/*`: register (201), login (token once),
+  logout (idempotent), device registry, bearer extractor, revocation; 23/23 tests
+  offline + DB-backed, live curl lifecycle verified (register→login→device→logout→401)
+- [x] Milestone C messaging — `conversations`/`participants`/`messages`/`outbox`
+  migration; `messaging.rs` (DM dedup, idempotent sequenced sends, history,
+  claim/mark outbox, resume); `gateway.rs` (`/v1/gateway`: identify, replay,
+  live fan-out, heartbeat echo); outbox worker; `/v1/conversations/*` +
+  `/v1/messages` routes; 26/26 tests offline + DB-backed (zero skips);
+  two-client WS test (exchange `bro` live, reconnect, resume, no dups);
+  live curl smoke (register→DM→send→history→outsider-403)
+- [x] Push + security posture — private `OttoApocalypse69/TeriChat`, branches
+  pushed, PR #1 open, CI green, Actions token read-only, Dependabot on
+- [x] PR #1 merged into `main`. Free plan: no server-side gates possible, so
+  `main` is protected by discipline only (branches + green CI + owner merge).
+  Ryan `CallMeRyanYT` invited as collaborator (push, not admin).
