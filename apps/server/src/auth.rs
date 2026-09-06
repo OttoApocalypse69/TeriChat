@@ -91,6 +91,11 @@ pub struct Device {
     pub user_id: Uuid,
     /// Human label (`""` when unset).
     pub label: String,
+    /// `Ed25519` identity key (always present).
+    pub identity_pubkey: Vec<u8>,
+    /// `X25519` agreement key for sealed envelopes. `None` for rows written
+    /// before the agreement-key migration.
+    pub agreement_pubkey: Option<Vec<u8>>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
 }
@@ -226,22 +231,28 @@ pub async fn user_id_by_handle(pool: &sqlx::PgPool, handle: &str) -> Result<Uuid
     id.ok_or(AuthError::InvalidInput("unknown peer handle".to_owned()))
 }
 
-/// Register an installation for an account with its identity public key.
+/// Raw device row shared by registration reads.
+type DeviceRow = (Uuid, Uuid, String, Vec<u8>, Option<Vec<u8>>, DateTime<Utc>);
+
+/// Register an installation for an account with its identity public key
+/// (`Ed25519`, 32 bytes) and agreement public key (`X25519`, 32 bytes).
 pub async fn register_device(
     pool: &sqlx::PgPool,
     user_id: Uuid,
     label: &str,
     identity_pubkey: [u8; 32],
+    agreement_pubkey: [u8; 32],
 ) -> Result<Device, AuthError> {
-    let row: (Uuid, Uuid, String, DateTime<Utc>) = sqlx::query_as(
-        r"INSERT INTO devices (id, user_id, label, identity_pubkey)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, user_id, label, created_at",
+    let row: DeviceRow = sqlx::query_as(
+        r"INSERT INTO devices (id, user_id, label, identity_pubkey, agreement_pubkey)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, user_id, label, identity_pubkey, agreement_pubkey, created_at",
     )
     .bind(Uuid::now_v7())
     .bind(user_id)
     .bind(label.trim())
     .bind(identity_pubkey.as_slice())
+    .bind(agreement_pubkey.as_slice())
     .fetch_one(pool)
     .await
     .map_err(AuthError::Database)?;
@@ -250,7 +261,9 @@ pub async fn register_device(
         id: row.0,
         user_id: row.1,
         label: row.2,
-        created_at: row.3,
+        identity_pubkey: row.3,
+        agreement_pubkey: row.4,
+        created_at: row.5,
     })
 }
 
@@ -481,11 +494,12 @@ mod tests {
         .await
         .expect("register user");
 
-        let device = register_device(&pool, user.id, "laptop", [7_u8; 32])
+        let device = register_device(&pool, user.id, "laptop", [7_u8; 32], [8_u8; 32])
             .await
             .expect("register device");
         assert_eq!(device.user_id, user.id);
         assert_eq!(device.label, "laptop");
+        assert_eq!(device.agreement_pubkey, Some(vec![8_u8; 32]));
 
         pool.close().await;
     }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/server"]
+members = ["apps/server", "crates/tericrypt"]
 resolver = "2"
 
 [workspace.package]

@@ -94,3 +94,8 @@ access yet, no spending decisions yet (boxes 3, 4 untouched).
 - [x] PR #1 merged into `main`. Free plan: no server-side gates possible, so
   `main` is protected by discipline only (branches + green CI + owner merge).
   Ryan `CallMeRyanYT` invited as collaborator (push, not admin).
+- [x] Milestone D PoC — `crates/tericrypt` (Ed25519/X25519/XChaCha20/HKDF,
+  8/8 tests), `docs/THREAT_MODEL.md`, device agreement keys (migration 0003,
+  endpoint carries both keys), sealed-DM E2E test (server stays blind);
+  27+8 tests, zero skips; fresh-DB boot verified. Gaps documented: no FS,
+  no deniability/groups/transparency yet — MLS follow-up.
