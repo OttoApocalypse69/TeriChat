@@ -37,5 +37,8 @@ docker compose config       # validate compose file
    drives port, log filter, and pool at boot; bad `PORT` exits 1 with a message.
 3. Auth slice — ~~hashing landed, repo/routes pending~~ done: `auth.rs` +
    `/v1/auth/register|login|logout|devices`, bearer extractor, revocation.
-   Still ahead: Milestone C messaging (conversations, outbox, gateway).
-4. CI `db-tests` job runs migrations + DB-gated tests on every push/PR.
+4. Messaging (Milestone C) — done: conversations/DM/groups, idempotent sends,
+   history, transactional outbox + worker, `/v1/gateway` WS
+   (identify/replay/live/heartbeat), `/v1/conversations/*`, `/v1/messages`.
+   Still ahead: TeriCrypt E2EE proof-of-concept (Milestone D), workspaces (E).
+5. CI `db-tests` job runs migrations + DB-gated tests on every push/PR.

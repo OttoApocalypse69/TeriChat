@@ -81,4 +81,10 @@ Pack IS in the local repo root with git history (`main` + `setup/baseline`).
 - [x] Milestone B auth — `auth.rs` + `/v1/auth/*`: register (201), login (token once),
   logout (idempotent), device registry, bearer extractor, revocation; 23/23 tests
   offline + DB-backed, live curl lifecycle verified (register→login→device→logout→401)
-- [ ] NEXT — Milestone C messaging: conversations, `MessageEnvelope`, outbox, WS gateway
+- [x] Milestone C messaging — `conversations`/`participants`/`messages`/`outbox`
+  migration; `messaging.rs` (DM dedup, idempotent sequenced sends, history,
+  claim/mark outbox, resume); `gateway.rs` (`/v1/gateway`: identify, replay,
+  live fan-out, heartbeat echo); outbox worker; `/v1/conversations/*` +
+  `/v1/messages` routes; 26/26 tests offline + DB-backed (zero skips);
+  two-client WS test (exchange `bro` live, reconnect, resume, no dups);
+  live curl smoke (register→DM→send→history→outsider-403)

@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,6 +24,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+futures-util = "0.3"
 # Explicit so `OsRng` in password.rs never depends on transitive feature
 # unification (password-hash/rand_core `getrandom`); see review on wt/password.
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -31,3 +32,4 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tokio-tungstenite = "0.26"

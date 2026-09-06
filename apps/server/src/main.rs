@@ -9,20 +9,24 @@
 
 mod auth;
 mod config;
+mod gateway;
+mod messaging;
 mod password;
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{
-    extract::{FromRequestParts, State},
+    extract::{FromRequestParts, Query, State},
     http::{header, request::Parts, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use tracing_subscriber::{fmt, EnvFilter};
 use uuid::Uuid;
 
@@ -46,6 +50,8 @@ enum AppError {
     BadRequest(String),
     /// Missing or rejected bearer credentials.
     Unauthorized,
+    /// Caller is not a conversation member (also covers missing rows).
+    Forbidden,
     /// A database-backed route called without a configured database.
     NoDatabase,
     /// Readiness dependency unavailable.
@@ -62,6 +68,11 @@ impl IntoResponse for AppError {
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
                 "invalid or missing credentials".to_owned(),
+            ),
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "not a conversation member".to_owned(),
             ),
             Self::NoDatabase => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -100,12 +111,31 @@ impl From<auth::AuthError> for AppError {
     }
 }
 
-/// Shared server state: the optional database pool. `None` means the
-/// probes-only boot (no `DATABASE_URL`).
+impl From<messaging::MessagingError> for AppError {
+    fn from(err: messaging::MessagingError) -> Self {
+        match err {
+            messaging::MessagingError::NotMember => Self::Forbidden,
+            messaging::MessagingError::EmptyCiphertext
+            | messaging::MessagingError::CiphertextTooLarge => Self::BadRequest(err.to_string()),
+            messaging::MessagingError::Database(_) => {
+                tracing::error!("messaging backend failure: {err}");
+                Self::Internal
+            }
+        }
+    }
+}
+
+/// Shared server state: the optional database pool plus the realtime fan-out
+/// hub. `pool: None` means the probes-only boot (no `DATABASE_URL`).
 #[derive(Clone)]
 struct AppState {
     pool: Option<sqlx::PgPool>,
+    hub: broadcast::Sender<messaging::OutboxEntry>,
 }
+
+/// Hub capacity: live burst buffer. Overflow drops to resume (`Lagged`
+/// receivers re-anchor from the database), never to data loss.
+const HUB_CAPACITY: usize = 1024;
 
 /// Liveness probe — never touches dependencies.
 #[derive(Debug, Serialize)]
@@ -197,6 +227,84 @@ struct RegisterDeviceBody {
     identity_pubkey: String,
 }
 
+/// `POST /v1/conversations/dm` request: open (or reopen) the DM with a peer.
+#[derive(Debug, Deserialize)]
+struct DmBody {
+    peer_handle: String,
+}
+
+/// `POST /v1/conversations` request: start a group conversation.
+#[derive(Debug, Deserialize)]
+struct GroupBody {
+    member_handles: Vec<String>,
+}
+
+/// Conversation view with member account ids.
+#[derive(Debug, Serialize)]
+struct ConversationBody {
+    id: Uuid,
+    kind: String,
+    members: Vec<Uuid>,
+}
+
+impl From<messaging::Conversation> for ConversationBody {
+    fn from(conversation: messaging::Conversation) -> Self {
+        Self {
+            id: conversation.id,
+            kind: conversation.kind,
+            members: conversation.members,
+        }
+    }
+}
+
+/// `POST /v1/messages` request. Envelope bytes travel base64-encoded;
+/// the server never decodes them into anything but opaque storage.
+#[derive(Debug, Deserialize)]
+struct SendBody {
+    conversation_id: Uuid,
+    client_msg_id: Uuid,
+    ciphertext_b64: String,
+    nonce_b64: Option<String>,
+}
+
+/// Stored message view. `deduped` reports an idempotent retry.
+#[derive(Debug, Serialize)]
+struct MessageBody {
+    id: Uuid,
+    conversation_id: Uuid,
+    sender_id: Uuid,
+    seq: i64,
+    ciphertext_b64: String,
+    nonce_b64: Option<String>,
+    client_msg_id: Uuid,
+    sent_at: DateTime<Utc>,
+    deduped: bool,
+}
+
+impl MessageBody {
+    fn new(message: &messaging::Message, deduped: bool) -> Self {
+        Self {
+            id: message.id,
+            conversation_id: message.conversation_id,
+            sender_id: message.sender_id,
+            seq: message.seq,
+            ciphertext_b64: STANDARD.encode(&message.ciphertext),
+            nonce_b64: message.nonce.as_deref().map(|bytes| STANDARD.encode(bytes)),
+            client_msg_id: message.client_msg_id,
+            sent_at: message.sent_at,
+            deduped,
+        }
+    }
+}
+
+/// `GET /v1/messages` query: history after `since_seq`, oldest first.
+#[derive(Debug, Deserialize)]
+struct HistoryParams {
+    conversation_id: Uuid,
+    since_seq: Option<i64>,
+    limit: Option<i64>,
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -285,6 +393,100 @@ async fn register_device(
     Ok((StatusCode::CREATED, Json(DeviceBody::from(device))))
 }
 
+async fn create_dm(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Json(body): Json<DmBody>,
+) -> Result<(StatusCode, Json<ConversationBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let peer = auth::user_id_by_handle(pool, &body.peer_handle).await?;
+    let conversation = messaging::find_or_create_dm(pool, bearer.user_id(), peer).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ConversationBody::from(conversation)),
+    ))
+}
+
+async fn create_group(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Json(body): Json<GroupBody>,
+) -> Result<(StatusCode, Json<ConversationBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    if body.member_handles.is_empty() {
+        return Err(AppError::BadRequest(
+            "group needs at least one member".to_owned(),
+        ));
+    }
+    let mut members = Vec::with_capacity(body.member_handles.len());
+    for handle in &body.member_handles {
+        members.push(auth::user_id_by_handle(pool, handle).await?);
+    }
+    let conversation =
+        messaging::create_conversation(pool, bearer.user_id(), "group", &members).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ConversationBody::from(conversation)),
+    ))
+}
+
+async fn send_message(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Json(body): Json<SendBody>,
+) -> Result<(StatusCode, Json<MessageBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Envelope bytes are opaque: decoded from transport encoding straight
+    // into storage, never inspected or logged.
+    let ciphertext = STANDARD
+        .decode(body.ciphertext_b64.trim())
+        .map_err(|_| AppError::BadRequest("ciphertext_b64 is not valid base64".to_owned()))?;
+    let nonce = body
+        .nonce_b64
+        .as_deref()
+        .map(|raw| {
+            STANDARD
+                .decode(raw.trim())
+                .map_err(|_| AppError::BadRequest("nonce_b64 is not valid base64".to_owned()))
+        })
+        .transpose()?;
+    let (message, created) = messaging::send_message(
+        pool,
+        bearer.user_id(),
+        body.conversation_id,
+        body.client_msg_id,
+        &ciphertext,
+        nonce.as_deref(),
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageBody::new(&message, !created)),
+    ))
+}
+
+async fn message_history(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Query(params): Query<HistoryParams>,
+) -> Result<Json<Vec<MessageBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let messages = messaging::message_history(
+        pool,
+        bearer.user_id(),
+        params.conversation_id,
+        params.since_seq.unwrap_or(0),
+        params.limit.unwrap_or(50),
+    )
+    .await?;
+    Ok(Json(
+        messages
+            .iter()
+            .map(|message| MessageBody::new(message, false))
+            .collect(),
+    ))
+}
+
 /// Authenticated request identity plus the raw bearer token, available only
 /// to handlers that need to hash it (logout). Handlers that only need the
 /// identity use [`Bearer::user_id`].
@@ -360,6 +562,10 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/logout", post(logout))
         .route("/v1/auth/devices", post(register_device))
+        .route("/v1/conversations/dm", post(create_dm))
+        .route("/v1/conversations", post(create_group))
+        .route("/v1/messages", post(send_message).get(message_history))
+        .route("/v1/gateway", get(gateway::gateway_handler))
         .with_state(state)
 }
 
@@ -393,12 +599,18 @@ async fn main() {
         }
     };
 
+    let (hub, _) = broadcast::channel(HUB_CAPACITY);
+    if let Some(pool) = &pool {
+        // At-least-once fan-out; the next boot re-claims anything unmarked.
+        tokio::spawn(messaging::outbox_worker(pool.clone(), hub.clone()));
+    }
+
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind server address");
     tracing::info!(%addr, "terichat-server listening");
-    axum::serve(listener, build_router(AppState { pool }))
+    axum::serve(listener, build_router(AppState { pool, hub }))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("serve axum router");
@@ -418,7 +630,8 @@ mod tests {
     use super::*;
 
     fn bare_state() -> AppState {
-        AppState { pool: None }
+        let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        AppState { pool: None, hub }
     }
 
     async fn body_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -517,22 +730,22 @@ mod tests {
 
     #[test]
     fn migrator_embeds_identity_migration() {
-        // Offline: the embedded migrator must resolve at least the identity
-        // migration. The `migrate!` macro already fails the build when the
-        // directory is missing or unparsable; this pins the expected content.
+        // Offline: the embedded migrator must resolve the known migrations.
+        // The `migrate!` macro already fails the build when the directory is
+        // missing or unparsable; this pins the expected content.
         assert!(
             !MIGRATOR.migrations.is_empty(),
             "expected at least the identity migration"
         );
-        let latest = MIGRATOR
-            .migrations
-            .iter()
-            .max_by_key(|m| m.version)
-            .unwrap();
-        assert!(
-            latest.description.contains("identity"),
-            "latest migration should be the identity foundation"
-        );
+        for expected in ["identity", "messaging"] {
+            assert!(
+                MIGRATOR
+                    .migrations
+                    .iter()
+                    .any(|migration| migration.description.contains(expected)),
+                "expected a {expected} migration"
+            );
+        }
     }
 
     #[tokio::test]
@@ -570,7 +783,10 @@ mod tests {
         };
         let pool = db_pool(&url).await.expect("connect test database");
         MIGRATOR.run(&pool).await.expect("apply migrations");
-        let state = AppState { pool: Some(pool) };
+        let state = AppState {
+            pool: Some(pool),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
 
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -672,5 +888,218 @@ mod tests {
         assert_eq!(body["error"]["code"], "unauthorized");
 
         state.pool.as_ref().unwrap().close().await;
+    }
+
+    /// Plain (non-TLS) client WebSocket used by the gateway tests.
+    type WsStream = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Register + log in two users and open their DM. Returns
+    /// `(alice_token, bob_token, bob_id, dm_id)`.
+    async fn ws_fixture(pool: &sqlx::PgPool, tag: &str) -> (String, String, Uuid, Uuid) {
+        let alice = auth::create_user(
+            pool,
+            &format!("wsalice{tag}"),
+            &format!("wsalice{tag}@example.com"),
+            "WsAlice",
+            "pw-alice-ws",
+        )
+        .await
+        .expect("register alice");
+        let bob = auth::create_user(
+            pool,
+            &format!("wsbob{tag}"),
+            &format!("wsbob{tag}@example.com"),
+            "WsBob",
+            "pw-bob-ws",
+        )
+        .await
+        .expect("register bob");
+        let alice_token = auth::login(pool, &alice.handle, "pw-alice-ws")
+            .await
+            .expect("login alice")
+            .token;
+        let bob_token = auth::login(pool, &bob.handle, "pw-bob-ws")
+            .await
+            .expect("login bob")
+            .token;
+        let dm = messaging::find_or_create_dm(pool, alice.id, bob.id)
+            .await
+            .expect("open dm");
+        (alice_token, bob_token, bob.id, dm.id)
+    }
+
+    /// Send one message through the HTTP route (oneshot consumes routers,
+    /// so each call builds a fresh one from shared state).
+    async fn http_send(
+        state: &AppState,
+        token: &str,
+        dm: Uuid,
+        plaintext_b64: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        post_json(
+            build_router(state.clone()),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": dm,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": plaintext_b64,
+            }),
+            Some(token),
+        )
+        .await
+    }
+
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    /// Send a JSON frame on a gateway test socket.
+    async fn ws_send(ws: &mut WsStream, value: serde_json::Value) {
+        ws.send(WsMessage::Text(value.to_string().into()))
+            .await
+            .expect("send ws frame");
+    }
+
+    /// Read the next text frame as JSON (15 s budget).
+    async fn ws_next(ws: &mut WsStream) -> serde_json::Value {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), ws.next())
+            .await
+            .expect("ws frame in time")
+            .expect("ws stream open");
+        match frame.expect("ws message ok") {
+            WsMessage::Text(text) => serde_json::from_str(&text).expect("json frame"),
+            other => panic!("expected text frame, got {other:?}"),
+        }
+    }
+
+    /// Identify and expect the next frame back.
+    async fn ws_identify(ws: &mut WsStream, resume_after: Option<Uuid>) -> serde_json::Value {
+        ws_send(
+            ws,
+            serde_json::json!({"op": "identify", "resume_after": resume_after}),
+        )
+        .await;
+        ws_next(ws).await
+    }
+
+    /// Connect, identify, and expect `ready`. Returns the live socket.
+    async fn connect_identified(
+        addr: &std::net::SocketAddr,
+        token: &str,
+        resume_after: Option<Uuid>,
+    ) -> WsStream {
+        use tokio_tungstenite::connect_async;
+        let (mut ws, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .expect("ws connect");
+        assert_eq!(ws_identify(&mut ws, resume_after).await["op"], "ready");
+        ws
+    }
+
+    /// Pull the event id out of an `event` frame.
+    fn event_id_of(frame: &serde_json::Value) -> Uuid {
+        frame["event"]["event_id"]
+            .as_str()
+            .expect("event id")
+            .parse()
+            .expect("event uuid")
+    }
+
+    /// Read one frame and assert it is the expected conversation event.
+    /// Returns the event id for resume chaining.
+    async fn expect_event(ws: &mut WsStream, seq: i64) -> Uuid {
+        let frame = ws_next(ws).await;
+        assert_eq!(frame["op"], "event");
+        assert_eq!(frame["event"]["payload"]["data"]["seq"], seq);
+        event_id_of(&frame)
+    }
+
+    /// Requires a live database; skips honestly without one. The Alpha 0
+    /// milestone: two clients exchange an encrypted DM over the realtime
+    /// gateway, reconnect, and resume without loss or duplicates. The first
+    /// encrypted message is `bro` — opaque to the server, decoded only by
+    /// this test.
+    #[tokio::test]
+    async fn two_clients_exchange_and_resume() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: two_clients_exchange_and_resume (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (alice_token, bob_token, bob_id, dm_id) = ws_fixture(&pool, &stamp).await;
+
+        let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: hub.clone(),
+        };
+        // HTTP posts only need the pool; each oneshot call builds its own router.
+        let http_state = AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state))
+                .await
+                .expect("serve test app");
+        });
+        let _worker = tokio::spawn(messaging::outbox_worker(pool.clone(), hub));
+
+        let _alice_ws = connect_identified(&addr, &alice_token, None).await;
+        let mut bob_ws = connect_identified(&addr, &bob_token, None).await;
+
+        // Alice sends `bro` through the HTTP route; Bob gets the live event.
+        let bro_b64 = STANDARD.encode(b"bro");
+        let (status, sent) = http_send(&http_state, &alice_token, dm_id, &bro_b64).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(sent["deduped"], false);
+        assert_eq!(sent["seq"], 1);
+
+        let event1_id = expect_event(&mut bob_ws, 1).await;
+
+        // Bob reads history: the opaque bytes decode to `bro` client-side.
+        let history = messaging::message_history(&pool, bob_id, dm_id, 0, 50)
+            .await
+            .expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].ciphertext, b"bro");
+
+        // Second message flows live too.
+        let second_b64 = STANDARD.encode(b"second");
+        let (status, _) = http_send(&http_state, &alice_token, dm_id, &second_b64).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let event2_id = expect_event(&mut bob_ws, 2).await;
+        assert_ne!(event1_id, event2_id);
+
+        // Bob drops, Alice sends a third, Bob resumes after the second:
+        // exactly one replayed event, no duplicates.
+        bob_ws.close(None).await.expect("bob close");
+        drop(bob_ws);
+        let third_b64 = STANDARD.encode(b"third");
+        let (status, _) = http_send(&http_state, &alice_token, dm_id, &third_b64).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let mut bob_ws = connect_identified(&addr, &bob_token, Some(event2_id)).await;
+        let _replayed_id = expect_event(&mut bob_ws, 3).await;
+        let quiet = tokio::time::timeout(std::time::Duration::from_secs(2), bob_ws.next()).await;
+        assert!(
+            quiet.is_err(),
+            "expected no duplicate delivery, got {quiet:?}"
+        );
+
+        server.abort();
+        pool.close().await;
     }
 }

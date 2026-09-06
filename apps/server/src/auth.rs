@@ -214,6 +214,18 @@ pub async fn create_user(
     })
 }
 
+/// Resolve a handle to its account id. Unknown handles are a plain input
+/// error (peer lookup, not login — no oracle concern beyond the 400 itself).
+pub async fn user_id_by_handle(pool: &sqlx::PgPool, handle: &str) -> Result<Uuid, AuthError> {
+    let handle = normalize_handle(handle)?;
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE handle = $1")
+        .bind(&handle)
+        .fetch_optional(pool)
+        .await
+        .map_err(AuthError::Database)?;
+    id.ok_or(AuthError::InvalidInput("unknown peer handle".to_owned()))
+}
+
 /// Register an installation for an account with its identity public key.
 pub async fn register_device(
     pool: &sqlx::PgPool,
