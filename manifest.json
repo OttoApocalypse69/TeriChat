@@ -1,0 +1,184 @@
+{
+  "pack": "Platform Spec Pack",
+  "revision": "v4",
+  "temporary_product_name": "TeriChat",
+  "security_brand": "TeriCrypt-4096™",
+  "files": [
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug.md",
+      "size": 948,
+      "sha256": "36066fcc96609f33c92075e4ef26c003509ba75620c0a6d5dfe8780027f7fa00"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/task.md",
+      "size": 1103,
+      "sha256": "baf6a9950d475f3bcb417e4a7615cfa815f602b377b26ea7baf7fd062212667e"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "size": 1530,
+      "sha256": "a0a6c26526aac158d68d9f891031101efc64e98ea7cf951531e66c57019fabe8"
+    },
+    {
+      "path": "00_README.md",
+      "size": 6128,
+      "sha256": "066250e444bcda8629aa7a3d25bd545895593c666b448ff9647fe49a334f0efd"
+    },
+    {
+      "path": "01_PRODUCT_VISION.md",
+      "size": 4053,
+      "sha256": "be7927d6dc013bba04a7bc971ea9bca558a411271d88a4ce221a89893bae4c90"
+    },
+    {
+      "path": "02_SYSTEM_ARCHITECTURE.md",
+      "size": 6742,
+      "sha256": "dd0ebe2ed7c0c6cfceaefb3f6916931a0b63adaf4e167f18c264f4d6c9cf5760"
+    },
+    {
+      "path": "03_SECURITY_TERICRYPT_4096.md",
+      "size": 5529,
+      "sha256": "eec431d074f9fb8c1fce9070e33e8d6daafc29d7f42efa8596ab8eb8ad204bbd"
+    },
+    {
+      "path": "04_CLIENTS_AND_UX.md",
+      "size": 4197,
+      "sha256": "eb10495d16adb8fc0f8e027391a2feca6a690fadb649e5f364190639f240acef"
+    },
+    {
+      "path": "05_WORKSPACES_AND_COLLABORATION.md",
+      "size": 2880,
+      "sha256": "431066ac044eb26200c9e755961025dcca25c9ef786bf1235da8bf8eb82f042d"
+    },
+    {
+      "path": "06_VOICE_MEDIA_AND_CINEMA.md",
+      "size": 4915,
+      "sha256": "27214d9fffdce6a8b8de87ccb8d90bc97510c454dab762c1e37846735105959c"
+    },
+    {
+      "path": "07_SERVICES_BOTS_AND_PLUGINS.md",
+      "size": 3913,
+      "sha256": "90145082882ccde4dbbc96dd24bafc73462bd64930dcd5db7914a09cb2876f4d"
+    },
+    {
+      "path": "08_AI_PLATFORM.md",
+      "size": 3108,
+      "sha256": "2f17144110afdfc9bdf15afc7429bc7bec71549be037c9b432614d0f65bc3684"
+    },
+    {
+      "path": "09_MONETIZATION_AND_ENTITLEMENTS.md",
+      "size": 4700,
+      "sha256": "b6f20564c9b1ffca2eea2e1d0b5d92719401fedebea67acea97093d3c7f1e111"
+    },
+    {
+      "path": "10_INFRASTRUCTURE_AND_OPERATIONS.md",
+      "size": 3807,
+      "sha256": "c02b44c48fc8a052d85bdf5deaa342a18c674618ecfb472bdba478fa2da12c65"
+    },
+    {
+      "path": "11_ROADMAP_AND_TASKS.md",
+      "size": 15123,
+      "sha256": "fcd05ce523050ad7d86bb2895ee50d888c8e2e59c105bc4f39fc2c6812810788"
+    },
+    {
+      "path": "12_OPEN_DECISIONS.md",
+      "size": 34784,
+      "sha256": "b0ebd97260b6021c53618674b7d2c619d3799ed7f25773a968b62737710e83a8"
+    },
+    {
+      "path": "13_AGENT_BOOTSTRAP_PROMPT.md",
+      "size": 19183,
+      "sha256": "e57433851ea5dd74c53a7b05a2982f2120dc816267210c7be7071f08aa06d494"
+    },
+    {
+      "path": "14_GLOSSARY.md",
+      "size": 2336,
+      "sha256": "f26adba7f473cc0626cd4dd68ebfebda42d706f1275ae22ff1ccf05a525dff3b"
+    },
+    {
+      "path": "15_REPOSITORY_CHANNELS_AND_RELEASES.md",
+      "size": 16401,
+      "sha256": "1f2cfb06d33b50ebb66aed224d068d5592d73b3de0b27bfc552643cf5603aef4"
+    },
+    {
+      "path": "16_TESTING_REVIEW_AND_QUALITY_GATES.md",
+      "size": 23721,
+      "sha256": "6579385949ffc79afaaa2107126c290573cfe95816661212a385806aab031b03"
+    },
+    {
+      "path": "17_ENGINEERING_SOURCES.md",
+      "size": 5239,
+      "sha256": "809c692dac545c53ab63f7f98b9fcefdf2f0403e1baf2eb9c2163a092e831c3f"
+    },
+    {
+      "path": "AGENTS.md",
+      "size": 10360,
+      "sha256": "8e5b0c430f915e0a36dea16b9bb065a8d102698181bb4ace96638f345a310d7c"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "size": 2627,
+      "sha256": "53ba1e9ec45bbefdbc78981473c8ed1accf255a86d0b00cff22c69fc522e519f"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "size": 5897,
+      "sha256": "2aac4d9b327f919656ef4e5a679a0a28e1d99cf0de1b90ca7cd5d053f3b31f14"
+    },
+    {
+      "path": "SECURITY.md",
+      "size": 5449,
+      "sha256": "a7e59e6f4248e369b88a29e32d5d76c4916310378d32eb8ebb7561effd133c66"
+    },
+    {
+      "path": "START_HERE.md",
+      "size": 1837,
+      "sha256": "1987315312588760ff7f86d57f40888f1e609870cf9a0e0283699154fea4d6df"
+    },
+    {
+      "path": "TERI_TODO.md",
+      "size": 4972,
+      "sha256": "0f622e2dd5443a3683a79281723e078881d296a271bde4c7f7344f114caba343"
+    },
+    {
+      "path": "VALIDATION_REPORT.md",
+      "size": 2377,
+      "sha256": "a23fd9a15e9a0ca019bf34d0eb0c4e8f1f881e696cc1241bc6815d7c03c3b5ef"
+    },
+    {
+      "path": "docs/adr/0000-template.md",
+      "size": 1187,
+      "sha256": "d12ec6e0a47cbc2f837cedc3541c390d16b8ba2467cd52ab225f4285926240dc"
+    },
+    {
+      "path": "docs/adr/README.md",
+      "size": 2789,
+      "sha256": "75f7d338daf528b7919f945f4cae15a47651b6cdd26c40aee0e03d1051007b90"
+    },
+    {
+      "path": "docs/development/BOOTSTRAP_SESSION.md",
+      "size": 4985,
+      "sha256": "daf3346c9639217d9ffe87993aefb697d597506b5604655ba4706148935ee741"
+    },
+    {
+      "path": "manifest.json",
+      "size": 5450,
+      "sha256": "0c1bb13d72ec1c565a69fdab157827facdedfc65fe5aaf00bb46fd39bde90d71"
+    },
+    {
+      "path": "templates/RELEASE_PROMOTION.md",
+      "size": 1134,
+      "sha256": "8736d51a933908169f556eb8158c0888bfdfb0fd04ad9ab2f38341bc8822e62d"
+    },
+    {
+      "path": "templates/REVIEW_FINDING.md",
+      "size": 867,
+      "sha256": "f4a192cfd70d0c0748e1fc049212d00c679b96725d6bda1992121b019efc1951"
+    },
+    {
+      "path": "templates/TASK_HANDOFF.md",
+      "size": 883,
+      "sha256": "7bfd23e3ab7d0fff01b2c2ff3857060a93cd9984d632ab93f17a5e047de76bb5"
+    }
+  ],
+  "file_count": 35
+}
