@@ -183,12 +183,15 @@ struct LoginResponse {
     user_handle: String,
 }
 
-/// Registered device view.
+/// Registered device view, with both public keys as hex (`None` agreement
+/// key for rows written before the agreement-key migration).
 #[derive(Debug, Serialize)]
 struct DeviceBody {
     id: Uuid,
     user_id: Uuid,
     label: String,
+    identity_pubkey: String,
+    agreement_pubkey: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -198,6 +201,8 @@ impl From<auth::Device> for DeviceBody {
             id: device.id,
             user_id: device.user_id,
             label: device.label,
+            identity_pubkey: hex::encode(&device.identity_pubkey),
+            agreement_pubkey: device.agreement_pubkey.as_deref().map(hex::encode),
             created_at: device.created_at,
         }
     }
@@ -219,12 +224,13 @@ struct LoginBody {
     password: String,
 }
 
-/// `POST /v1/auth/devices` request. The identity public key is lowercase or
-/// uppercase hex (`64` chars, `32` bytes); rejected generically otherwise.
+/// `POST /v1/auth/devices` request. Both keys are lowercase or uppercase hex
+/// (`64` chars, `32` bytes each); rejected generically otherwise.
 #[derive(Debug, Deserialize)]
 struct RegisterDeviceBody {
     label: String,
     identity_pubkey: String,
+    agreement_pubkey: String,
 }
 
 /// `POST /v1/conversations/dm` request: open (or reopen) the DM with a peer.
@@ -383,13 +389,24 @@ async fn register_device(
     Json(body): Json<RegisterDeviceBody>,
 ) -> Result<(StatusCode, Json<DeviceBody>), AppError> {
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
-    let raw = hex::decode(body.identity_pubkey.trim()).map_err(|_| {
-        AppError::BadRequest("identity_pubkey must be 64 hex characters".to_owned())
-    })?;
-    let pubkey: [u8; 32] = raw.try_into().map_err(|_| {
-        AppError::BadRequest("identity_pubkey must be 64 hex characters".to_owned())
-    })?;
-    let device = auth::register_device(pool, bearer.user_id(), &body.label, pubkey).await?;
+    let decode_key = |raw: &str| {
+        hex::decode(raw.trim())
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(AppError::BadRequest(
+                "identity_pubkey and agreement_pubkey must each be 64 hex characters".to_owned(),
+            ))
+    };
+    let identity_pubkey: [u8; 32] = decode_key(&body.identity_pubkey)?;
+    let agreement_pubkey: [u8; 32] = decode_key(&body.agreement_pubkey)?;
+    let device = auth::register_device(
+        pool,
+        bearer.user_id(),
+        &body.label,
+        identity_pubkey,
+        agreement_pubkey,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(DeviceBody::from(device))))
 }
 
@@ -737,7 +754,8 @@ mod tests {
             !MIGRATOR.migrations.is_empty(),
             "expected at least the identity migration"
         );
-        for expected in ["identity", "messaging"] {
+        // Note: sqlx renders filename underscores as spaces in descriptions.
+        for expected in ["identity", "messaging", "device agreement keys"] {
             assert!(
                 MIGRATOR
                     .migrations
@@ -850,19 +868,22 @@ mod tests {
         let token = login["token"].as_str().expect("token issued").to_owned();
 
         // Device registration behind the bearer → 201; bad pubkey → 400.
+        // Both keys travel as 64-char hex (Ed25519 identity + X25519 agreement).
+        let agree_hex = "cd".repeat(32);
         let (status, device) = post_json(
             build_router(state.clone()),
             "/v1/auth/devices",
-            serde_json::json!({"label": "laptop", "identity_pubkey": "ab".repeat(32)}),
+            serde_json::json!({"label": "laptop", "identity_pubkey": "ab".repeat(32), "agreement_pubkey": agree_hex}),
             Some(&token),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(device["label"], "laptop");
+        assert_eq!(device["agreement_pubkey"], "cd".repeat(32));
         let (status, _) = post_json(
             build_router(state.clone()),
             "/v1/auth/devices",
-            serde_json::json!({"label": "bad", "identity_pubkey": "zz"}),
+            serde_json::json!({"label": "bad", "identity_pubkey": "zz", "agreement_pubkey": agree_hex}),
             Some(&token),
         )
         .await;
@@ -1100,6 +1121,94 @@ mod tests {
         );
 
         server.abort();
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The Milestone D
+    /// proof: a sealed `TeriCrypt` envelope travels the real send/history
+    /// path as opaque bytes and only the recipient device opens it. The
+    /// server never sees `bro`.
+    #[tokio::test]
+    async fn sealed_dm_end_to_end() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: sealed_dm_end_to_end (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (alice_token, _, bob_id, dm_id) = ws_fixture(&pool, &stamp).await;
+        let alice_id = auth::user_id_by_handle(&pool, &format!("wsalice{stamp}"))
+            .await
+            .expect("alice id");
+
+        // Device keypairs live client-side; only the public halves register.
+        let alice_dev = tericrypt::IdentityKeypair::generate().expect("alice device keys");
+        let bob_dev = tericrypt::IdentityKeypair::generate().expect("bob device keys");
+        let mallory_dev = tericrypt::IdentityKeypair::generate().expect("mallory device keys");
+        auth::register_device(
+            &pool,
+            alice_id,
+            "alice-phone",
+            alice_dev.identity_verify_key(),
+            alice_dev.agreement_pubkey(),
+        )
+        .await
+        .expect("register alice device");
+        auth::register_device(
+            &pool,
+            bob_id,
+            "bob-laptop",
+            bob_dev.identity_verify_key(),
+            bob_dev.agreement_pubkey(),
+        )
+        .await
+        .expect("register bob device");
+
+        // Alice seals `bro` to Bob's agreement key and sends the wire bytes.
+        let envelope =
+            tericrypt::seal(&alice_dev, &bob_dev.agreement_pubkey(), b"bro").expect("seal");
+        let wire = envelope.to_bytes();
+        assert!(wire.len() >= tericrypt::HEADER_LEN);
+        let http_state = AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+        let (status, sent) = post_json(
+            build_router(http_state),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": dm_id,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": STANDARD.encode(&wire),
+            }),
+            Some(&alice_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Bob reads history and opens the envelope; Mallory's device cannot.
+        let history = messaging::message_history(&pool, bob_id, dm_id, 0, 50)
+            .await
+            .expect("bob history");
+        assert_eq!(history.len(), 1);
+        let received =
+            tericrypt::SealedEnvelope::from_bytes(&history[0].ciphertext).expect("parse envelope");
+        let plaintext = tericrypt::open(&bob_dev, &alice_dev.identity_verify_key(), &received)
+            .expect("bob opens");
+        assert_eq!(plaintext, b"bro");
+        assert!(
+            tericrypt::open(&mallory_dev, &alice_dev.identity_verify_key(), &received).is_err()
+        );
+
+        // The stored bytes are the sealed envelope, not plaintext.
+        assert_eq!(history[0].ciphertext, wire);
+        assert!(sent["seq"].as_i64().unwrap() >= 1);
         pool.close().await;
     }
 }

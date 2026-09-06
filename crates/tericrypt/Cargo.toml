@@ -1,0 +1,19 @@
+[package]
+name = "tericrypt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "TeriCrypt-4096 device cryptography: identities and sealed 1:1 envelopes (Alpha PoC)"
+
+[lints]
+workspace = true
+
+[dependencies]
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+hex = "0.4"

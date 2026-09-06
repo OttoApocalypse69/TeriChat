@@ -1,0 +1,12 @@
+# Normalize line endings: sqlx migration checksums are byte-sensitive, so
+# code, migrations, and config must stay LF even on Windows checkouts
+# (core.autocrlf would otherwise flip them to CRLF and break `migrate info`).
+* text=auto
+*.rs text eol=lf
+*.sql text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.y[a,]ml text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
