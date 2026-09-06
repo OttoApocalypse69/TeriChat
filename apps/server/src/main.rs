@@ -217,8 +217,14 @@ mod tests {
 
     #[tokio::test]
     async fn ready_route_serves_without_database() {
-        // Route-level smoke test: no `DATABASE_URL` in this process, so the
-        // handler reports `not_configured` instead of touching the network.
+        // Route-level smoke test for the no-database boot path. Precondition:
+        // no `DATABASE_URL` in this process — with one set (e.g. the DB-backed
+        // suite or the new CI db-tests job) the handler legitimately reports
+        // `connected`, so skip honestly instead of asserting the wrong state.
+        if std::env::var("DATABASE_URL").is_ok() {
+            eprintln!("SKIPPED: ready_route_serves_without_database (DATABASE_URL is set)");
+            return;
+        }
         let (status, json) = body_json(router(), "/ready").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["status"], "ok");
