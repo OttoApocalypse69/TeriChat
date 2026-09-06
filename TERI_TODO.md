@@ -69,8 +69,9 @@ Final logo, exact boost prices, Kubernetes, marketplace economics, enterprise ce
 
 ## Implementation progress (agent-maintained — Teri reads this, not the five boxes above)
 
-Local repo only: no GitHub repo, no Ryan access, no spending decisions yet (boxes 1, 3, 4 untouched).
-Pack IS in the local repo root with git history (`main` + `setup/baseline`).
+Remote: [OttoApocalypse69/TeriChat](https://github.com/OttoApocalypse69/TeriChat) (private).
+`main` + `setup/baseline` pushed; PR #1 open (backend A–C, CI green). No Ryan
+access yet, no spending decisions yet (boxes 3, 4 untouched).
 
 - [x] SETUP-001/002 — local repo initialized, spec pack committed (`77a1dd3`)
 - [x] SETUP-003 — Rust workspace + health/ready baseline, Compose PG, `.env.example` (`e18bce1`)
@@ -88,3 +89,6 @@ Pack IS in the local repo root with git history (`main` + `setup/baseline`).
   `/v1/messages` routes; 26/26 tests offline + DB-backed (zero skips);
   two-client WS test (exchange `bro` live, reconnect, resume, no dups);
   live curl smoke (register→DM→send→history→outsider-403)
+- [x] Push + security posture — private `OttoApocalypse69/TeriChat`, branches
+  pushed, PR #1 open, CI green, Actions token read-only, Dependabot on
+  (protection/rulesets/secret-scanning paywalled on Free — see report)
