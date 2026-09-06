@@ -17,6 +17,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid"] }
+dotenvy = "0.15"
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = "0.5"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
