@@ -304,7 +304,10 @@ async fn fold_new_events(
     .map_err(StatsError::Database)?;
     let mut folded = 0_u64;
     for (id, topic, payload) in &rows {
-        *last_seen = Some(*id);
+        // The cursor advances only past attempted rows: successes, duplicates,
+        // and warned skips. A database error returns WITHOUT advancing, so the
+        // next round retries the same row instead of dropping it and every row
+        // fetched after it.
         match process_event(pool, *id, topic, payload).await {
             Ok(true) => folded += 1,
             Ok(false) => {}
@@ -313,6 +316,7 @@ async fn fold_new_events(
             }
             Err(err) => return Err(err),
         }
+        *last_seen = Some(*id);
     }
     Ok(folded)
 }
@@ -699,6 +703,56 @@ mod tests {
         .expect("event rows");
         let dump = format!("{user_rows:?}{scoped_rows:?}{event_rows:?}");
         assert!(!dump.contains(&sentinel));
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The worker fold
+    /// counts real events, warns past a malformed row without stalling (a
+    /// later message still counts), and a second round recounts nothing.
+    /// Assertions are per-user deltas, so parallel tests sharing the database
+    /// cannot flake them.
+    #[tokio::test]
+    async fn fold_skips_poison_and_advances() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: fold_skips_poison_and_advances (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let user = stats_user(&pool, stamp, "foldone").await;
+        let peer = stats_user(&pool, stamp, "foldpeer").await;
+        let dm = crate::messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .expect("open dm");
+        sent_event(&pool, user, dm.id, b"one").await;
+        // Poison: countable topic, unparseable payload. Sits between the two
+        // sends, so a stalling cursor would leave the second uncounted.
+        sqlx::query("INSERT INTO outbox (id, topic, payload) VALUES ($1, 'message.created', '{}')")
+            .bind(Uuid::now_v7())
+            .execute(&pool)
+            .await
+            .expect("plant poison");
+        sent_event(&pool, user, dm.id, b"two").await;
+
+        let mut cursor = None;
+        let folded = fold_new_events(&pool, &mut cursor).await.expect("fold");
+        assert!(
+            folded >= 2,
+            "fold counted {folded}, want at least our two sends"
+        );
+        assert!(cursor.is_some(), "cursor must advance");
+        let stats = own_stats(&pool, user).await.expect("own stats");
+        assert_eq!(stats.message_count, 2);
+        // Second round: nothing new for us, cursor holds.
+        fold_new_events(&pool, &mut cursor).await.expect("refold");
+        let stats = own_stats(&pool, user).await.expect("own stats");
+        assert_eq!(stats.message_count, 2);
         pool.close().await;
     }
 
