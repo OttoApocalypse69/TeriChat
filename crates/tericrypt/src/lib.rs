@@ -504,8 +504,22 @@ mod tests {
             open(&bob, &sender, &envelope).unwrap_err(),
             TeriCryptError::InvalidSignature
         );
+        // A sender key with no curve solution fails at parse time. Tiny
+        // candidates are searched deterministically (about half of all y
+        // values are non-residues, so this terminates immediately).
+        let mut unparsable = [0_u8; 32];
+        for b in 1_u8..=255 {
+            unparsable = [b; 32];
+            if VerifyingKey::from_bytes(&unparsable).is_err() {
+                break;
+            }
+        }
+        assert!(
+            VerifyingKey::from_bytes(&unparsable).is_err(),
+            "search must land on a non-residue"
+        );
         assert_eq!(
-            open(&bob, &[0xFF_u8; 32], &envelope).unwrap_err(),
+            open(&bob, &unparsable, &envelope).unwrap_err(),
             TeriCryptError::InvalidPublicKey
         );
     }
