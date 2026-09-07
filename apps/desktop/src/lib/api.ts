@@ -2,6 +2,12 @@
 //
 // Transport only: envelope bytes are opaque base64 pass-through. No crypto,
 // key handling, or sync authority lives here.
+//
+// NOTE: fetch comes from @tauri-apps/plugin-http (proxied through Rust), not
+// the webview. WebView2 enforces CORS and the Alpha backend serves no CORS
+// headers, so window.fetch fails from the desktop shell. The plugin path is
+// capability-gated (see src-tauri/capabilities/default.json: loopback only).
+import { fetch } from '@tauri-apps/plugin-http';
 
 export interface UserBody {
   id: string;
