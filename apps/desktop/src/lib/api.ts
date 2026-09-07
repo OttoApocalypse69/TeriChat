@@ -2,6 +2,12 @@
 //
 // Transport only: envelope bytes are opaque base64 pass-through. No crypto,
 // key handling, or sync authority lives here.
+//
+// NOTE: fetch comes from @tauri-apps/plugin-http (proxied through Rust), not
+// the webview. WebView2 enforces CORS and the Alpha backend serves no CORS
+// headers, so window.fetch fails from the desktop shell. The plugin path is
+// capability-gated (see src-tauri/capabilities/default.json: loopback only).
+import { fetch } from '@tauri-apps/plugin-http';
 
 export interface UserBody {
   id: string;
@@ -35,6 +41,25 @@ export interface MessageBody {
   client_msg_id: string;
   sent_at: string;
   deduped: boolean;
+}
+
+export interface WorkspaceBody {
+  id: string;
+  name: string;
+  owner_id: string;
+  my_role: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChannelBody {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  name: string;
+  kind: string;
+  created_by: string;
+  created_at: string;
 }
 
 export class ApiError extends Error {
@@ -152,6 +177,25 @@ export class ApiClient {
     if (since_seq !== undefined) q.set('since_seq', String(since_seq));
     if (limit !== undefined) q.set('limit', String(limit));
     return this.req<MessageBody[]>('GET', `/v1/messages?${q.toString()}`);
+  }
+
+  listWorkspaces(): Promise<WorkspaceBody[]> {
+    return this.req<WorkspaceBody[]>('GET', '/v1/workspaces');
+  }
+
+  listChannels(workspaceId: string): Promise<ChannelBody[]> {
+    return this.req<ChannelBody[]>(
+      'GET',
+      `/v1/workspaces/${workspaceId}/channels`,
+    );
+  }
+
+  createChannel(workspaceId: string, name: string): Promise<ChannelBody> {
+    return this.req<ChannelBody>(
+      'POST',
+      `/v1/workspaces/${workspaceId}/channels`,
+      { name },
+    );
   }
 }
 

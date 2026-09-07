@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "TeriChat Alpha 0 desktop shell (Tauri)"
 edition = "2021"
 
+# Standalone crate: the root Cargo workspace must not absorb the Tauri shell
+# (its platform WebView deps would leak into every server/clippy/test build).
+[workspace]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -11,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tauri-plugin-http = "2.6.0"
 
 [features]
 default = ["custom-protocol"]

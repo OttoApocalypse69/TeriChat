@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ChannelList from './components/ChannelList';
 import ConnectionIndicator from './components/ConnectionIndicator';
 import ConversationList from './components/ConversationList';
 import ConversationView from './components/ConversationView';
 import LoginView from './components/LoginView';
+import WorkspaceList from './components/WorkspaceList';
 import {
   ApiClient,
   apiBaseUrl,
@@ -11,10 +13,16 @@ import {
 } from './lib/api';
 import { GatewayClient, type GatewayStatus } from './lib/gateway';
 import { ChatStore, toChatMessage } from './lib/store';
+import {
+  WorkspaceStore,
+  channelToConversation,
+  friendlyChannelError,
+} from './lib/workspaces';
 
 export default function App() {
   const api = useMemo(() => new ApiClient(apiBaseUrl()), []);
   const storeRef = useRef(new ChatStore());
+  const wsStoreRef = useRef(new WorkspaceStore());
   const gatewayRef = useRef<GatewayClient | null>(null);
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
@@ -27,12 +35,35 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [wsLoading, setWsLoading] = useState(false);
+  const [wsError, setWsError] = useState<string | null>(null);
+  const [chLoading, setChLoading] = useState(false);
 
   const store = storeRef.current;
+  const wsStore = wsStoreRef.current;
   const selected = store.conversations.find((c) => c.id === selectedId) ?? null;
   const messages = selectedId
     ? (store.messages.get(selectedId) ?? [])
     : [];
+
+  // DM/group conversations only — channel rows live in the channel list and
+  // reuse the same message flow via their conversation_id.
+  const dmConversations = useMemo(
+    () => store.conversations.filter((c) => c.kind !== 'channel'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store.conversations, version],
+  );
+
+  const selectedWorkspaceId = wsStore.selectedWorkspaceId;
+  const selectedWorkspace = wsStore.selectedWorkspace();
+  const channels = selectedWorkspaceId
+    ? wsStore.channelsFor(selectedWorkspaceId)
+    : [];
+  const channelsError = selectedWorkspaceId
+    ? wsStore.channelsErrorFor(selectedWorkspaceId)
+    : null;
+  const selectedChannel = wsStore.selectedChannel();
+  const channelTitle = selectedChannel ? `#${selectedChannel.name}` : null;
 
   const refreshHistory = useCallback(
     async (conversationId: string) => {
@@ -51,6 +82,58 @@ export default function App() {
         setError(err instanceof Error ? err.message : 'history failed');
       } finally {
         setLoading(false);
+      }
+    },
+    [api, bump, token],
+  );
+
+  const refreshWorkspaces = useCallback(async () => {
+    if (!token) return;
+    setWsLoading(true);
+    setWsError(null);
+    try {
+      const rows = await api.listWorkspaces();
+      wsStoreRef.current.setWorkspaces(rows);
+      // Auto-select the first workspace on first load for an Alpha-sized
+      // one-click path into channels.
+      if (
+        wsStoreRef.current.selectedWorkspaceId === null &&
+        rows.length > 0
+      ) {
+        const first = [...rows].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        )[0];
+        wsStoreRef.current.selectWorkspace(first.id);
+      }
+      bump();
+    } catch (err) {
+      setWsError(err instanceof Error ? err.message : 'workspaces failed');
+    } finally {
+      setWsLoading(false);
+    }
+  }, [api, bump, token]);
+
+  const refreshChannels = useCallback(
+    async (workspaceId: string) => {
+      if (!token) return;
+      setChLoading(true);
+      try {
+        const rows = await api.listChannels(workspaceId);
+        wsStoreRef.current.setChannels(workspaceId, rows);
+        // Register channel conversations so gateway events + history reuse
+        // the existing DM message flow keyed by conversation_id.
+        for (const ch of rows) {
+          storeRef.current.addConversation(channelToConversation(ch));
+        }
+        bump();
+      } catch (err) {
+        wsStoreRef.current.setChannelsError(
+          workspaceId,
+          err instanceof Error ? err.message : 'channels failed',
+        );
+        bump();
+      } finally {
+        setChLoading(false);
       }
     },
     [api, bump, token],
@@ -94,6 +177,17 @@ export default function App() {
     };
   }, [api, bump, token]);
 
+  // Load workspaces once per login.
+  useEffect(() => {
+    if (token) void refreshWorkspaces();
+  }, [refreshWorkspaces, token]);
+
+  // Load channels whenever the selected workspace changes.
+  useEffect(() => {
+    if (token && selectedWorkspaceId) void refreshChannels(selectedWorkspaceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWorkspaceId, token]);
+
   function onAuthed(nextToken: string, userId: string, userHandle: string) {
     api.setToken(nextToken);
     setToken(nextToken);
@@ -106,12 +200,14 @@ export default function App() {
     void api.logout().catch(() => undefined);
     api.setToken(null);
     storeRef.current = new ChatStore();
+    wsStoreRef.current = new WorkspaceStore();
     setToken(null);
     setMeId('');
     setHandle('');
     setSelectedId(null);
     setStatus('disconnected');
     setError(null);
+    setWsError(null);
     bump();
   }
 
@@ -121,6 +217,40 @@ export default function App() {
     setSelectedId(conv.id);
     bump();
     await refreshHistory(conv.id);
+  }
+
+  function selectWorkspace(id: string): void {
+    wsStoreRef.current.selectWorkspace(id);
+    bump();
+  }
+
+  function selectChannel(channelId: string): void {
+    wsStoreRef.current.selectChannel(channelId);
+    const channel = wsStoreRef.current.selectedChannel();
+    if (channel) {
+      storeRef.current.addConversation(channelToConversation(channel));
+      setSelectedId(channel.conversation_id);
+      bump();
+    }
+  }
+
+  async function createChannel(name: string): Promise<void> {
+    const workspaceId = wsStoreRef.current.selectedWorkspaceId;
+    if (!workspaceId) throw new Error('select a workspace first');
+    try {
+      const channel = await api.createChannel(workspaceId, name);
+      const current = wsStoreRef.current.channelsFor(workspaceId);
+      wsStoreRef.current.setChannels(workspaceId, [...current, channel]);
+      storeRef.current.addConversation(channelToConversation(channel));
+      wsStoreRef.current.selectChannel(channel.id);
+      setSelectedId(channel.conversation_id);
+      bump();
+      await refreshHistory(channel.conversation_id);
+    } catch (err) {
+      // Let ChannelList render the friendly (403-aware) message; rethrow so
+      // its form error path triggers.
+      throw new Error(friendlyChannelError(err));
+    }
   }
 
   async function send(text: string): Promise<void> {
@@ -164,15 +294,38 @@ export default function App() {
         </span>
       </header>
       <div className="flex min-h-0 flex-1">
-        <aside className="w-64 shrink-0 border-r border-zinc-800">
-          <ConversationList
-            conversations={store.conversations}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onOpenDm={openDm}
-          />
+        <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800">
+          <div className="max-h-48 shrink-0 overflow-y-auto">
+            <WorkspaceList
+              workspaces={wsStore.workspaces}
+              selectedWorkspaceId={selectedWorkspaceId}
+              loading={wsLoading}
+              error={wsError}
+              onSelect={selectWorkspace}
+              onRetry={() => void refreshWorkspaces()}
+            />
+          </div>
+          <div className="max-h-64 shrink-0 overflow-y-auto">
+            <ChannelList
+              workspaceName={selectedWorkspace?.name ?? null}
+              channels={channels}
+              selectedChannelId={wsStore.selectedChannelId}
+              loading={chLoading}
+              error={channelsError}
+              onSelect={selectChannel}
+              onCreateChannel={createChannel}
+            />
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <ConversationList
+              conversations={dmConversations}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onOpenDm={openDm}
+            />
+          </div>
         </aside>
-        <main className="min-w-0 flex-1" key={version}>
+        <main className="min-w-0 flex-1" key={`${version}-${selectedId ?? 'none'}`}>
           <ConversationView
             conversation={selected}
             messages={messages}
@@ -181,6 +334,7 @@ export default function App() {
             sending={sending}
             error={error}
             onSend={send}
+            title={channelTitle}
           />
         </main>
       </div>

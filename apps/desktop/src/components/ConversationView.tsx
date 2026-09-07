@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { decodeOpaqueText } from '../lib/api';
 import type { ChatConversation, ChatMessage } from '../lib/store';
 
@@ -10,6 +10,7 @@ interface Props {
   sending: boolean;
   error: string | null;
   onSend: (text: string) => Promise<void>;
+  title?: string | null;
 }
 
 export default function ConversationView({
@@ -20,9 +21,18 @@ export default function ConversationView({
   sending,
   error,
   onSend,
+  title,
 }: Props) {
   const [draft, setDraft] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // Switching conversations (DM <-> DM, DM <-> channel, channel <-> channel)
+  // must never leak the previous composer draft into the new conversation.
+  const conversationId = conversation?.id ?? null;
+  useEffect(() => {
+    setDraft('');
+    setSendError(null);
+  }, [conversationId]);
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -47,6 +57,7 @@ export default function ConversationView({
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+        {title && <span className="mr-2 font-semibold text-zinc-200">{title}</span>}
         <span className="font-mono">{conversation.id}</span>
         <span className="ml-2">{conversation.kind}</span>
       </div>
