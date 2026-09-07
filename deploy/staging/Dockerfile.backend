@@ -1,0 +1,34 @@
+# TeriChat staging backend: multi-stage release build.
+# Built ON the staging box (native ARM64), so no cross-compilation.
+FROM rust:1.97-bookworm AS build
+WORKDIR /src
+# Workspace layout first for dependency caching.
+COPY Cargo.toml Cargo.lock ./
+COPY apps/server/Cargo.toml apps/server/
+COPY crates/tericrypt/Cargo.toml crates/tericrypt/
+RUN mkdir -p apps/server/src crates/tericrypt/src \
+    && echo 'fn main() {}' > apps/server/src/main.rs \
+    && echo '' > crates/tericrypt/src/lib.rs \
+    && cargo build --release -p terichat-server \
+    && rm -rf apps/server/src crates/tericrypt/src
+# Real sources (freshness: git-archive/tar preserve old mtimes, which would
+# make cargo trust the dummy fingerprints above — touch everything so the
+# final build always recompiles for real).
+COPY apps/server/src apps/server/src
+COPY crates/tericrypt/src crates/tericrypt/src
+COPY migrations migrations
+RUN find apps crates migrations -exec touch {} + \
+    && cargo build --release -p terichat-server \
+    && test "$(stat -c%s target/release/terichat-server)" -gt 5000000
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/terichat-server /usr/local/bin/terichat-server
+ENV PORT=3001
+ENV BIND_ADDR=0.0.0.0
+EXPOSE 3001
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=40s \
+    CMD curl -fsS http://127.0.0.1:3001/health
+CMD ["terichat-server"]

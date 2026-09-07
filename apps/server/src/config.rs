@@ -6,9 +6,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 
 /// Default TCP port the server listens on when `PORT` is unset.
 const DEFAULT_PORT: u16 = 3001;
+
+/// Default bind address when `BIND_ADDR` is unset: loopback only. Container
+/// and staging deployments set `BIND_ADDR=0.0.0.0` explicitly.
+const DEFAULT_BIND: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
 /// Default `RUST_LOG` filter directive when `RUST_LOG` is unset.
 const DEFAULT_RUST_LOG: &str = "info";
@@ -17,12 +22,16 @@ const DEFAULT_RUST_LOG: &str = "info";
 ///
 /// Defaults (each also documented on its field):
 /// - `PORT` defaults to `3001`.
+/// - `BIND_ADDR` defaults to `127.0.0.1` (loopback only).
 /// - `RUST_LOG` defaults to `"info"`.
 /// - `DATABASE_URL`, when missing or empty, defaults to [`None`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// TCP port the server binds. Defaults to `3001` when `PORT` is unset.
     pub port: u16,
+    /// Local address the server binds. Defaults to loopback when `BIND_ADDR`
+    /// is unset; set `0.0.0.0` for containerized deployments.
+    pub bind_addr: IpAddr,
     /// Tracing/log filter directive. Defaults to `"info"` when `RUST_LOG` is unset.
     pub rust_log: String,
     /// Postgres connection URL. Defaults to [`None`] when `DATABASE_URL` is
@@ -38,6 +47,11 @@ pub enum ConfigError {
         /// Raw `PORT` value that failed to parse.
         raw: String,
     },
+    /// `BIND_ADDR` was set but is not a valid IP address.
+    InvalidBindAddr {
+        /// Raw `BIND_ADDR` value that failed to parse.
+        raw: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -49,6 +63,9 @@ impl fmt::Display for ConfigError {
                     "invalid PORT value {raw:?}: expected a port number 0-65535"
                 )
             }
+            Self::InvalidBindAddr { raw } => {
+                write!(f, "invalid BIND_ADDR value {raw:?}: expected an IP address")
+            }
         }
     }
 }
@@ -59,13 +76,14 @@ impl Config {
     /// Load configuration from the process environment.
     ///
     /// Loads `.env` first (a missing file is fine), then reads `PORT`,
-    /// `RUST_LOG`, and `DATABASE_URL` with the defaults documented on
-    /// [`Config`].
+    /// `BIND_ADDR`, `RUST_LOG`, and `DATABASE_URL` with the defaults
+    /// documented on [`Config`].
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidPort`] when `PORT` is set but does not
-    /// parse as a `u16` port number.
+    /// parse as a `u16` port number, or [`ConfigError::InvalidBindAddr`] when
+    /// `BIND_ADDR` is set but does not parse as an IP address.
     pub fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         Self::from_pairs(std::env::vars())
@@ -79,7 +97,8 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidPort`] when `PORT` is present but does
-    /// not parse as a `u16` port number.
+    /// not parse as a `u16` port number, or [`ConfigError::InvalidBindAddr`]
+    /// when `BIND_ADDR` is present but does not parse as an IP address.
     pub fn from_pairs(
         pairs: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, ConfigError> {
@@ -90,6 +109,13 @@ impl Config {
             Some(raw) => raw
                 .parse::<u16>()
                 .map_err(|_| ConfigError::InvalidPort { raw: raw.clone() })?,
+        };
+
+        let bind_addr = match vars.get("BIND_ADDR") {
+            None => DEFAULT_BIND,
+            Some(raw) => raw
+                .parse::<IpAddr>()
+                .map_err(|_| ConfigError::InvalidBindAddr { raw: raw.clone() })?,
         };
 
         let rust_log = vars
@@ -104,6 +130,7 @@ impl Config {
 
         Ok(Self {
             port,
+            bind_addr,
             rust_log,
             database_url,
         })
@@ -125,8 +152,25 @@ mod tests {
     fn defaults_when_nothing_is_set() {
         let config = Config::from_pairs(Vec::new()).unwrap();
         assert_eq!(config.port, 3001);
+        assert_eq!(
+            config.bind_addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
         assert_eq!(config.rust_log, "info");
         assert_eq!(config.database_url, None);
+    }
+
+    #[test]
+    fn bind_addr_parses_and_rejects_garbage() {
+        let config = Config::from_pairs(pairs(&[("BIND_ADDR", "0.0.0.0")])).unwrap();
+        assert_eq!(
+            config.bind_addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        );
+        assert!(matches!(
+            Config::from_pairs(pairs(&[("BIND_ADDR", "not-an-ip")])),
+            Err(ConfigError::InvalidBindAddr { .. })
+        ));
     }
 
     #[test]

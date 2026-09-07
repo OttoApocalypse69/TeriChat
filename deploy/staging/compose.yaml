@@ -1,0 +1,60 @@
+# TeriChat staging (single ARM64 box): Postgres + API + Caddy.
+# Only the web service publishes ports. PG/API stay on the internal network.
+name: terichat-staging
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: terichat
+      POSTGRES_USER: terichat
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U terichat -d terichat"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/staging/Dockerfile.backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/staging/Dockerfile.web
+    restart: unless-stopped
+    ports:
+      # Tailnet test port: the box's :80/:443 belong to the SPICE edge Caddy.
+      - "8080:80"
+    environment:
+      STAGING_HOST: ${STAGING_HOST}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,15 @@
+# TeriChat staging web: build the React client, serve it from Caddy.
+# Same-origin serving (Caddy proxies /v1/* to the API) so browsers never hit
+# CORS: the bundle is built with VITE_API_URL=/ (relative API base).
+FROM node:24-bookworm-slim AS build
+WORKDIR /app
+COPY apps/desktop/package.json apps/desktop/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY apps/desktop/index.html apps/desktop/vite.config.ts apps/desktop/tsconfig.json ./
+COPY apps/desktop/tailwind.config.js apps/desktop/postcss.config.js ./
+COPY apps/desktop/src ./src
+RUN VITE_API_URL=/ npm run build
+
+FROM caddy:2-alpine
+COPY deploy/staging/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /app/dist /srv/www
