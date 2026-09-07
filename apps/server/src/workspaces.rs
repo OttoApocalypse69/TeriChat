@@ -201,7 +201,8 @@ pub struct Workspace {
     pub id: Uuid,
     /// Display name (`1..=100` chars).
     pub name: String,
-    /// Founding owner account.
+    /// Founding owner account (set at creation, never rewritten: role rows in
+    /// `workspace_members` are authoritative for who owns the space today).
     pub owner_id: Uuid,
     /// Creation time.
     pub created_at: DateTime<Utc>,
@@ -507,14 +508,124 @@ fn check_rank(actor: Role, target: Role, new_role: Option<Role>) -> Result<(), W
 /// # Errors
 ///
 /// Returns [`WorkspacesError::Database`] on database failure.
-async fn owner_count(pool: &sqlx::PgPool, workspace_id: Uuid) -> Result<i64, WorkspacesError> {
+async fn owner_count<'c, E>(ex: E, workspace_id: Uuid) -> Result<i64, WorkspacesError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = $1 AND role = 'owner'",
     )
     .bind(workspace_id)
-    .fetch_one(pool)
+    .fetch_one(ex)
     .await
     .map_err(WorkspacesError::Database)
+}
+
+/// Fresh roles for `actor` and `target` with both rows locked (`FOR UPDATE`,
+/// deterministic `user_id` order so concurrent managers cannot deadlock).
+/// Management transactions re-check ranks on these values, never on the
+/// pre-transaction reads — a promotion racing a kick cannot slip through.
+///
+/// # Errors
+///
+/// Returns [`WorkspacesError::Database`] on database failure.
+async fn locked_roles<'c, E>(
+    ex: E,
+    workspace_id: Uuid,
+    actor_id: Uuid,
+    target_id: Uuid,
+) -> Result<(Option<Role>, Option<Role>), WorkspacesError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT user_id, role FROM workspace_members
+         WHERE workspace_id = $1 AND user_id IN ($2, $3)
+         ORDER BY user_id FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(actor_id)
+    .bind(target_id)
+    .fetch_all(ex)
+    .await
+    .map_err(WorkspacesError::Database)?;
+    let mut actor_role = None;
+    let mut target_role = None;
+    for (user_id, raw) in rows {
+        let role =
+            parse_role(&raw).map_err(|_| WorkspacesError::Database(sqlx::Error::RowNotFound))?;
+        if user_id == actor_id {
+            actor_role = Some(role);
+        } else {
+            target_role = Some(role);
+        }
+    }
+    if actor_id == target_id {
+        target_role = actor_role;
+    }
+    Ok((actor_role, target_role))
+}
+
+/// Ensure `user_id` sits in every channel conversation of `workspace_id`.
+/// Idempotent self-heal for the join/create-channel race: read and write
+/// paths call it before enforcing participation, so a stranded member is
+/// re-seated instead of locked out.
+///
+/// # Errors
+///
+/// Returns [`WorkspacesError::Database`] on database failure.
+pub async fn ensure_channel_participation(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), WorkspacesError> {
+    sync_add_to_channels(pool, workspace_id, user_id).await
+}
+
+/// Heal every channel seat of every workspace `user_id` belongs to. Called
+/// on gateway identify so a join/create race never strands a member out of
+/// its own replay.
+///
+/// # Errors
+///
+/// Returns [`WorkspacesError::Database`] on database failure.
+pub async fn ensure_all_participation(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<(), WorkspacesError> {
+    for (workspace, _) in list_workspaces(pool, user_id).await? {
+        ensure_channel_participation(pool, workspace.id, user_id).await?;
+    }
+    Ok(())
+}
+
+/// Drop `user_id`'s member-targeted channel overrides in `workspace_id`.
+/// Called on kick/ban/leave so a rejoining user never resurrects stale
+/// per-member grants or denials.
+///
+/// # Errors
+///
+/// Returns [`WorkspacesError::Database`] on database failure.
+async fn drop_member_overrides<'c, E>(
+    ex: E,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), WorkspacesError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        "DELETE FROM channel_overrides
+         WHERE target_kind = 'member' AND target = $2 AND channel_id IN (
+             SELECT id FROM channels WHERE workspace_id = $1
+         )",
+    )
+    .bind(workspace_id)
+    .bind(user_id.to_string())
+    .execute(ex)
+    .await
+    .map_err(WorkspacesError::Database)?;
+    Ok(())
 }
 
 /// Copy `user_id` into every channel conversation of `workspace_id`.
@@ -743,7 +854,15 @@ pub async fn add_member(
         .bind(role.as_str())
         .execute(&mut *tx)
         .await
-        .map_err(WorkspacesError::Database)?;
+        .map_err(|err| {
+            if is_unique_violation(&err) {
+                // Lost a concurrent double-add race: report the duplicate,
+                // not a 500.
+                WorkspacesError::BadInput("user is already a member".to_owned())
+            } else {
+                WorkspacesError::Database(err)
+            }
+        })?;
     sync_add_to_channels(&mut *tx, workspace_id, target_id).await?;
     record_audit(
         &mut *tx,
@@ -774,28 +893,44 @@ pub async fn set_role(
     target_id: Uuid,
     new_role: Role,
 ) -> Result<(), WorkspacesError> {
-    let actor = require(pool, workspace_id, actor_id, Permission::ManageRoles).await?;
-    let current = role_of(pool, workspace_id, target_id)
-        .await?
-        .ok_or(WorkspacesError::NotMember)?;
+    // Permission first (nice errors), then everything else under lock: the
+    // rank check re-reads both rows `FOR UPDATE`, so a promotion racing a
+    // kick cannot slip through, and the last-owner guard holds in-tx.
+    // (The fresh in-tx actor role below is authoritative; this call only
+    // gates on the pre-transaction permission for error quality.)
+    require(pool, workspace_id, actor_id, Permission::ManageRoles).await?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let (actor_opt, target_opt) = locked_roles(&mut *tx, workspace_id, actor_id, target_id).await?;
+    let actor = actor_opt.ok_or(WorkspacesError::NotMember)?;
+    let current = target_opt.ok_or(WorkspacesError::NotMember)?;
+    // The pre-transaction permission stands only if the actor still outranks;
+    // re-check on fresh rows (a demotion racing this call must win).
     check_rank(actor, current, Some(new_role))?;
     if current == Role::Owner
         && new_role != Role::Owner
-        && owner_count(pool, workspace_id).await? < 2
+        && owner_count(&mut *tx, workspace_id).await? < 2
     {
         return Err(WorkspacesError::BadInput(
             "workspace must keep at least one owner".to_owned(),
         ));
     }
-    sqlx::query("UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2")
-        .bind(workspace_id)
-        .bind(target_id)
-        .bind(new_role.as_str())
-        .execute(pool)
-        .await
-        .map_err(WorkspacesError::Database)?;
+    let updated = sqlx::query(
+        "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(target_id)
+    .bind(new_role.as_str())
+    .execute(&mut *tx)
+    .await
+    .map_err(WorkspacesError::Database)?
+    .rows_affected();
+    if updated == 0 {
+        // Kicked between the lock read and the write (or a concurrent path
+        // removed the row): report absence, not success.
+        return Err(WorkspacesError::NotMember);
+    }
     record_audit(
-        pool,
+        &mut *tx,
         workspace_id,
         actor_id,
         "member.role_changed",
@@ -803,6 +938,7 @@ pub async fn set_role(
         &serde_json::json!({ "from": current.as_str(), "to": new_role.as_str() }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(())
 }
 
@@ -819,17 +955,17 @@ pub async fn remove_member(
     workspace_id: Uuid,
     target_id: Uuid,
 ) -> Result<(), WorkspacesError> {
-    let actor = require(pool, workspace_id, actor_id, Permission::KickMembers).await?;
-    let current = role_of(pool, workspace_id, target_id)
-        .await?
-        .ok_or(WorkspacesError::NotMember)?;
+    require(pool, workspace_id, actor_id, Permission::KickMembers).await?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let (actor_opt, target_opt) = locked_roles(&mut *tx, workspace_id, actor_id, target_id).await?;
+    let actor = actor_opt.ok_or(WorkspacesError::NotMember)?;
+    let current = target_opt.ok_or(WorkspacesError::NotMember)?;
     check_rank(actor, current, None)?;
-    if current == Role::Owner && owner_count(pool, workspace_id).await? < 2 {
+    if current == Role::Owner && owner_count(&mut *tx, workspace_id).await? < 2 {
         return Err(WorkspacesError::BadInput(
             "workspace must keep at least one owner".to_owned(),
         ));
     }
-    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace_id)
         .bind(target_id)
@@ -837,12 +973,61 @@ pub async fn remove_member(
         .await
         .map_err(WorkspacesError::Database)?;
     sync_remove_from_channels(&mut *tx, workspace_id, target_id).await?;
+    drop_member_overrides(&mut *tx, workspace_id, target_id).await?;
     record_audit(
         &mut *tx,
         workspace_id,
         actor_id,
         "member.kicked",
         Some(target_id),
+        &serde_json::json!({ "role": current.as_str() }),
+    )
+    .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
+    Ok(())
+}
+
+/// Leave a workspace voluntarily. Any member may leave; the last owner
+/// cannot (make another owner first). Departure cleans up like a kick:
+/// channel seats and member-targeted overrides go with the leaver, who may
+/// rejoin later through the normal paths.
+///
+/// # Errors
+///
+/// Returns [`WorkspacesError::NotMember`], [`WorkspacesError::Banned`],
+/// [`WorkspacesError::BadInput`] (last owner), or
+/// [`WorkspacesError::Database`].
+pub async fn leave(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<(), WorkspacesError> {
+    let current = role_of(pool, workspace_id, user_id)
+        .await?
+        .ok_or(WorkspacesError::NotMember)?;
+    if is_banned(pool, workspace_id, user_id).await? {
+        return Err(WorkspacesError::Banned);
+    }
+    if current == Role::Owner && owner_count(pool, workspace_id).await? < 2 {
+        return Err(WorkspacesError::BadInput(
+            "workspace must keep at least one owner — make another owner first".to_owned(),
+        ));
+    }
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(WorkspacesError::Database)?;
+    sync_remove_from_channels(&mut *tx, workspace_id, user_id).await?;
+    drop_member_overrides(&mut *tx, workspace_id, user_id).await?;
+    record_audit(
+        &mut *tx,
+        workspace_id,
+        user_id,
+        "member.left",
+        Some(user_id),
         &serde_json::json!({ "role": current.as_str() }),
     )
     .await?;
@@ -866,16 +1051,7 @@ pub async fn ban_member(
     target_id: Uuid,
     reason: &str,
 ) -> Result<(), WorkspacesError> {
-    let actor = require(pool, workspace_id, actor_id, Permission::BanMembers).await?;
-    let current = role_of(pool, workspace_id, target_id)
-        .await?
-        .ok_or(WorkspacesError::NotMember)?;
-    check_rank(actor, current, None)?;
-    if current == Role::Owner && owner_count(pool, workspace_id).await? < 2 {
-        return Err(WorkspacesError::BadInput(
-            "workspace must keep at least one owner".to_owned(),
-        ));
-    }
+    require(pool, workspace_id, actor_id, Permission::BanMembers).await?;
     let reason = reason.trim().to_owned();
     if reason.chars().count() > 500 {
         return Err(WorkspacesError::BadInput(
@@ -883,6 +1059,15 @@ pub async fn ban_member(
         ));
     }
     let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let (actor_opt, target_opt) = locked_roles(&mut *tx, workspace_id, actor_id, target_id).await?;
+    let actor = actor_opt.ok_or(WorkspacesError::NotMember)?;
+    let current = target_opt.ok_or(WorkspacesError::NotMember)?;
+    check_rank(actor, current, None)?;
+    if current == Role::Owner && owner_count(&mut *tx, workspace_id).await? < 2 {
+        return Err(WorkspacesError::BadInput(
+            "workspace must keep at least one owner".to_owned(),
+        ));
+    }
     sqlx::query(
         "INSERT INTO workspace_bans (workspace_id, user_id, banned_by, reason)
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
@@ -901,6 +1086,7 @@ pub async fn ban_member(
         .await
         .map_err(WorkspacesError::Database)?;
     sync_remove_from_channels(&mut *tx, workspace_id, target_id).await?;
+    drop_member_overrides(&mut *tx, workspace_id, target_id).await?;
     record_audit(
         &mut *tx,
         workspace_id,
@@ -928,12 +1114,18 @@ pub async fn unban(
     target_id: Uuid,
 ) -> Result<(), WorkspacesError> {
     require(pool, workspace_id, actor_id, Permission::BanMembers).await?;
-    sqlx::query("DELETE FROM workspace_bans WHERE workspace_id = $1 AND user_id = $2")
-        .bind(workspace_id)
-        .bind(target_id)
-        .execute(pool)
-        .await
-        .map_err(WorkspacesError::Database)?;
+    let removed =
+        sqlx::query("DELETE FROM workspace_bans WHERE workspace_id = $1 AND user_id = $2")
+            .bind(workspace_id)
+            .bind(target_id)
+            .execute(pool)
+            .await
+            .map_err(WorkspacesError::Database)?
+            .rows_affected();
+    if removed == 0 {
+        // Idempotent no-op: no ban existed, so no audit row either.
+        return Ok(());
+    }
     record_audit(
         pool,
         workspace_id,
@@ -1190,9 +1382,12 @@ pub async fn delete_channel(
     Ok(())
 }
 
-/// Set (upsert) a channel permission override. Only `SEND_MESSAGES` and
-/// `MANAGE_MESSAGES` are overridable in Alpha. Role targets must name a real
-/// role; member targets must belong to the workspace. Requires
+/// Set (upsert) a channel permission override. Only `SEND_MESSAGES` is
+/// overridable in this slice: `MANAGE_MESSAGES` has no enforcement point yet
+/// (no message-moderation endpoint consumes it), so accepting it would sell
+/// a moderation control that does nothing. The management slice will widen
+/// this set alongside real enforcement. Role targets must name a real role;
+/// member targets must belong to the workspace. Requires
 /// [`Permission::ManageChannels`] on the parent.
 ///
 /// # Errors
@@ -1210,12 +1405,9 @@ pub async fn set_override(
     permission: Permission,
     allowed: bool,
 ) -> Result<ChannelOverride, WorkspacesError> {
-    if !matches!(
-        permission,
-        Permission::SendMessages | Permission::ManageMessages
-    ) {
+    if permission != Permission::SendMessages {
         return Err(WorkspacesError::BadInput(
-            "only SEND_MESSAGES and MANAGE_MESSAGES are overridable".to_owned(),
+            "only SEND_MESSAGES is overridable until message moderation lands".to_owned(),
         ));
     }
     let channel = get_channel(pool, actor_id, channel_id).await?;
@@ -1308,13 +1500,32 @@ pub async fn delete_override(
         Permission::ManageChannels,
     )
     .await?;
+    // Same normalization as `set_override`: raw path segments would otherwise
+    // silently match zero rows (`Member` vs `member`, uppercase UUIDs).
+    let target_kind = target_kind.trim().to_lowercase();
+    if target_kind != "role" && target_kind != "member" {
+        return Err(WorkspacesError::BadInput(
+            "target_kind must be role or member".to_owned(),
+        ));
+    }
+    let normalized_target = if target_kind == "role" {
+        parse_role(target)?.as_str().to_owned()
+    } else {
+        target
+            .trim()
+            .parse::<Uuid>()
+            .map(|id| id.to_string())
+            .map_err(|_: uuid::Error| {
+                WorkspacesError::BadInput("member target must be a user id".to_owned())
+            })?
+    };
     sqlx::query(
         "DELETE FROM channel_overrides
          WHERE channel_id = $1 AND target_kind = $2 AND target = $3 AND permission = $4",
     )
     .bind(channel_id)
-    .bind(target_kind.trim().to_lowercase())
-    .bind(target.trim())
+    .bind(&target_kind)
+    .bind(&normalized_target)
     .bind(permission.as_str())
     .execute(pool)
     .await
@@ -1436,6 +1647,10 @@ pub async fn can_send(
     channel_allowed(pool, channel_id, user_id, Permission::SendMessages).await
 }
 
+/// Longest invite lifetime: 366 days. Bounds the user-controlled
+/// `expires_in_secs` so the deadline arithmetic cannot overflow.
+const MAX_INVITE_TTL_SECS: i64 = 366 * 24 * 60 * 60;
+
 /// Fresh random invite code (144 bits, URL-safe, 24 chars). The RNG failure
 /// mode is a panic inside `OsRng`, matching the password module's stance that
 /// a broken OS RNG is unrecoverable.
@@ -1477,9 +1692,9 @@ pub async fn create_invite(
             "max_uses must be positive".to_owned(),
         ));
     }
-    if expires_in_secs.is_some_and(|n| n <= 0) {
+    if expires_in_secs.is_some_and(|n| n <= 0 || n > MAX_INVITE_TTL_SECS) {
         return Err(WorkspacesError::BadInput(
-            "expires_in_secs must be positive".to_owned(),
+            "expires_in_secs must be between 1 and 31622400 (366 days)".to_owned(),
         ));
     }
     let expires_at = expires_in_secs.map(|secs| Utc::now() + chrono::Duration::seconds(secs));
@@ -2164,6 +2379,371 @@ mod tests {
         )
         .await
         .is_err());
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The trigger is
+    /// the last-owner backstop behind the application guard: raw demotion or
+    /// deletion of a sole owner aborts, even bypassing every app check.
+    #[tokio::test]
+    async fn owner_trigger_backstop() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: owner_trigger_backstop (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "towner").await;
+        let workspace = create_workspace(&pool, owner, "Trigger Space")
+            .await
+            .expect("create workspace");
+
+        // Sole-owner demotion and deletion both abort at the database.
+        assert!(sqlx::query(
+            "UPDATE workspace_members SET role = 'member'
+             WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace.id)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .is_err());
+        assert!(sqlx::query(
+            "DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace.id)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .is_err());
+        // A second owner makes the same statements legal again.
+        let spare = user(&pool, stamp, "tspare").await;
+        add_member(&pool, owner, workspace.id, spare, Role::Owner)
+            .await
+            .expect("second owner");
+        sqlx::query(
+            "UPDATE workspace_members SET role = 'member'
+             WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace.id)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .expect("demote with spare owner");
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Two owners race
+    /// to demote each other: ordered row locks serialize the pair, so the
+    /// loser meets the guard instead of deadlocking or orphaning the space.
+    #[tokio::test]
+    async fn concurrent_managers_keep_an_owner() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: concurrent_managers_keep_an_owner (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let first = user(&pool, stamp, "cfirst").await;
+        let second = user(&pool, stamp, "csecond").await;
+        let workspace = create_workspace(&pool, first, "Race Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, first, workspace.id, second, Role::Owner)
+            .await
+            .expect("second owner");
+
+        let (left, right) = tokio::join!(
+            set_role(&pool, first, workspace.id, second, Role::Member),
+            set_role(&pool, second, workspace.id, first, Role::Member),
+        );
+        // Exactly one demotion can win: the loser meets the guard (app-level
+        // or trigger), never a deadlock, never zero owners.
+        assert!(left.is_ok() ^ right.is_ok(), "one demotion wins");
+        assert!(owner_count(&pool, workspace.id).await.expect("count") >= 1);
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Voluntary exit:
+    /// members leave cleanly (seats and overrides go with them), the last
+    /// owner is stopped, and a second owner frees the first to go.
+    #[tokio::test]
+    async fn leave_flow() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: leave_flow (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "lowner").await;
+        let member = user(&pool, stamp, "lmember").await;
+        let workspace = create_workspace(&pool, owner, "Leave Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+
+        leave(&pool, member, workspace.id)
+            .await
+            .expect("member leaves");
+        assert!(get_workspace(&pool, member, workspace.id).await.is_err());
+        assert!(leave(&pool, owner, workspace.id).await.is_err());
+
+        let spare = user(&pool, stamp, "lspare").await;
+        add_member(&pool, owner, workspace.id, spare, Role::Owner)
+            .await
+            .expect("second owner");
+        leave(&pool, owner, workspace.id)
+            .await
+            .expect("first owner leaves");
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Kicks reset
+    /// channel privilege: a member-specific grant does not survive the kick,
+    /// so rejoining restores the base role default instead of the stale row.
+    #[tokio::test]
+    async fn override_resurrection() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: override_resurrection (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "rowner").await;
+        let member = user(&pool, stamp, "rmember").await;
+        let workspace = create_workspace(&pool, owner, "Resurrect Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        let channel = create_channel(&pool, owner, workspace.id, "general")
+            .await
+            .expect("create channel");
+
+        set_override(
+            &pool,
+            owner,
+            channel.id,
+            "member",
+            &member.to_string(),
+            Permission::SendMessages,
+            false,
+        )
+        .await
+        .expect("deny member");
+        assert!(!can_send(&pool, channel.id, member).await.expect("eval"));
+        remove_member(&pool, owner, workspace.id, member)
+            .await
+            .expect("kick");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("rejoin");
+        assert!(list_overrides(&pool, member, channel.id)
+            .await
+            .expect("overrides")
+            .is_empty());
+        assert!(can_send(&pool, channel.id, member).await.expect("eval"));
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Invite lifetimes
+    /// are bounded: zero, negative, and overflow-scale TTLs are refused
+    /// before any date arithmetic runs; an hour works.
+    #[tokio::test]
+    async fn invite_expiry_bounds() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: invite_expiry_bounds (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "eowner").await;
+        let workspace = create_workspace(&pool, owner, "Expiry Space")
+            .await
+            .expect("create workspace");
+
+        for ttl in [0, -5, i64::MAX, 366 * 24 * 60 * 60 + 1] {
+            assert!(
+                create_invite(&pool, owner, workspace.id, Role::Member, Some(ttl), None)
+                    .await
+                    .is_err(),
+                "ttl {ttl} must be refused"
+            );
+        }
+        let invite = create_invite(&pool, owner, workspace.id, Role::Member, Some(3600), None)
+            .await
+            .expect("hour-long invite");
+        assert!(invite.expires_at.is_some());
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Override
+    /// hygiene: `MANAGE_MESSAGES` has no enforcement yet so it is refused
+    /// outright; deletes normalize like sets (uppercase UUID works); and an
+    /// unban with no ban behind it writes no audit row.
+    #[tokio::test]
+    async fn override_hygiene() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: override_hygiene (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "howner").await;
+        let member = user(&pool, stamp, "hmember").await;
+        let workspace = create_workspace(&pool, owner, "Hygiene Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        let channel = create_channel(&pool, owner, workspace.id, "general")
+            .await
+            .expect("create channel");
+
+        assert!(set_override(
+            &pool,
+            owner,
+            channel.id,
+            "role",
+            "member",
+            Permission::ManageMessages,
+            false,
+        )
+        .await
+        .is_err());
+        set_override(
+            &pool,
+            owner,
+            channel.id,
+            "member",
+            &member.to_string(),
+            Permission::SendMessages,
+            false,
+        )
+        .await
+        .expect("deny member");
+        delete_override(
+            &pool,
+            owner,
+            channel.id,
+            "MEMBER",
+            &member.to_string().to_uppercase(),
+            Permission::SendMessages,
+        )
+        .await
+        .expect("normalized delete");
+        assert!(list_overrides(&pool, member, channel.id)
+            .await
+            .expect("overrides")
+            .is_empty());
+
+        let before = list_audit(&pool, owner, workspace.id, 100)
+            .await
+            .expect("audit")
+            .len();
+        unban(&pool, owner, workspace.id, member)
+            .await
+            .expect("unban no-op");
+        let after = list_audit(&pool, owner, workspace.id, 100)
+            .await
+            .expect("audit")
+            .len();
+        assert_eq!(before, after, "no-op unban writes no audit");
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The
+    /// join/create-channel race heals: a member stranded out of a channel's
+    /// participants is re-seated by the ensure call read paths run.
+    #[tokio::test]
+    async fn participation_heal() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: participation_heal (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "powner").await;
+        let member = user(&pool, stamp, "pmember").await;
+        let workspace = create_workspace(&pool, owner, "Heal Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        let channel = create_channel(&pool, owner, workspace.id, "general")
+            .await
+            .expect("create channel");
+
+        // Simulate the race: member exists, channel seat does not.
+        sqlx::query(
+            "DELETE FROM conversation_participants
+             WHERE conversation_id = $1 AND user_id = $2",
+        )
+        .bind(channel.conversation_id)
+        .bind(member)
+        .execute(&pool)
+        .await
+        .expect("strand member");
+        assert!(
+            !crate::messaging::is_member(&pool, channel.conversation_id, member)
+                .await
+                .expect("probe")
+        );
+        ensure_channel_participation(&pool, workspace.id, member)
+            .await
+            .expect("heal");
+        assert!(
+            crate::messaging::is_member(&pool, channel.conversation_id, member)
+                .await
+                .expect("probe")
+        );
         pool.close().await;
     }
 }
