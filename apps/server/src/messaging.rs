@@ -246,15 +246,21 @@ pub async fn send_message(
     }
 
     let mut tx = pool.begin().await.map_err(MessagingError::Database)?;
-    let member: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2)",
+    // FOR UPDATE pins the participant row for the life of this tx: a
+    // concurrent kick's DELETE blocks here instead of slipping between this
+    // check and the send below, so send-then-kick and kick-then-send are the
+    // only two possible orders. The lock is consistent (participant row first,
+    // conversation row second) everywhere both are touched, so no deadlock.
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM conversation_participants
+         WHERE conversation_id = $1 AND user_id = $2 FOR UPDATE",
     )
     .bind(conversation_id)
     .bind(sender_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(MessagingError::Database)?;
-    if !member {
+    if member.is_none() {
         return Err(MessagingError::NotMember);
     }
 
@@ -274,13 +280,18 @@ pub async fn send_message(
     }
 
     // Row lock on the conversation serializes concurrent sends for sequencing.
+    // A vanished conversation here means a concurrent channel delete slipped
+    // in after the membership check: report absence, not a 500.
     let seq: i64 = sqlx::query_scalar(
         "UPDATE conversations SET next_seq = next_seq + 1 WHERE id = $1 RETURNING next_seq - 1",
     )
     .bind(conversation_id)
     .fetch_one(&mut *tx)
     .await
-    .map_err(MessagingError::Database)?;
+    .map_err(|err| match err {
+        sqlx::Error::RowNotFound => MessagingError::NotMember,
+        other => MessagingError::Database(other),
+    })?;
 
     let message = insert_message(
         &mut tx,

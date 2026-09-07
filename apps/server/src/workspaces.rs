@@ -798,18 +798,19 @@ pub async fn rename_workspace(
 ) -> Result<Workspace, WorkspacesError> {
     require(pool, workspace_id, actor_id, Permission::ManageWorkspace).await?;
     let name = clean_name(name)?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     let row: WorkspaceRow = sqlx::query_as(
         "UPDATE workspaces SET name = $2 WHERE id = $1
          RETURNING id, name, owner_id, created_at, updated_at",
     )
     .bind(workspace_id)
     .bind(&name)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(WorkspacesError::Database)?
     .ok_or(WorkspacesError::NotMember)?;
     record_audit(
-        pool,
+        &mut *tx,
         workspace_id,
         actor_id,
         "workspace.renamed",
@@ -817,6 +818,7 @@ pub async fn rename_workspace(
         &serde_json::json!({ "name": name }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(to_workspace(row))
 }
 
@@ -1114,11 +1116,12 @@ pub async fn unban(
     target_id: Uuid,
 ) -> Result<(), WorkspacesError> {
     require(pool, workspace_id, actor_id, Permission::BanMembers).await?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     let removed =
         sqlx::query("DELETE FROM workspace_bans WHERE workspace_id = $1 AND user_id = $2")
             .bind(workspace_id)
             .bind(target_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(WorkspacesError::Database)?
             .rows_affected();
@@ -1127,7 +1130,7 @@ pub async fn unban(
         return Ok(());
     }
     record_audit(
-        pool,
+        &mut *tx,
         workspace_id,
         actor_id,
         "member.unbanned",
@@ -1135,11 +1138,15 @@ pub async fn unban(
         &serde_json::json!({}),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(())
 }
 
 /// Create a text channel with a backing `channel` conversation, enrolling all
 /// current members as participants. Requires [`Permission::ManageChannels`].
+/// Retries need list-to-reconcile: channel identity is server-generated per
+/// attempt (unique on `(workspace_id, name)`), so a retried create after a
+/// lost success response reports the name as taken.
 ///
 /// # Errors
 ///
@@ -1154,13 +1161,17 @@ pub async fn create_channel(
 ) -> Result<Channel, WorkspacesError> {
     require(pool, workspace_id, actor_id, Permission::ManageChannels).await?;
     let name = clean_name(name)?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    // Snapshot inside the tx (not before it): a join committing in a
+    // pre-tx window would otherwise miss this channel permanently. Residual
+    // skew against fully concurrent joins heals via
+    // `ensure_channel_participation` on read/write paths.
     let members: Vec<Uuid> =
         sqlx::query_scalar("SELECT user_id FROM workspace_members WHERE workspace_id = $1")
             .bind(workspace_id)
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(WorkspacesError::Database)?;
-    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     let conversation_id = Uuid::now_v7();
     sqlx::query("INSERT INTO conversations (id, kind, created_by) VALUES ($1, 'channel', $2)")
         .bind(conversation_id)
@@ -1234,9 +1245,10 @@ pub async fn list_channels(
     get_workspace(pool, user_id, workspace_id).await?;
     let rows: Vec<ChannelRow> = sqlx::query_as(
         "SELECT id, workspace_id, conversation_id, name, kind, created_by, created_at
-         FROM channels WHERE workspace_id = $1 ORDER BY created_at ASC",
+         FROM channels WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT $2",
     )
     .bind(workspace_id)
+    .bind(MAX_LIST_ROWS)
     .fetch_all(pool)
     .await
     .map_err(WorkspacesError::Database)?;
@@ -1315,13 +1327,14 @@ pub async fn rename_channel(
     )
     .await?;
     let name = clean_name(name)?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     let row: ChannelRow = sqlx::query_as(
         "UPDATE channels SET name = $2 WHERE id = $1
          RETURNING id, workspace_id, conversation_id, name, kind, created_by, created_at",
     )
     .bind(channel_id)
     .bind(&name)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|err| {
         if is_unique_violation(&err) {
@@ -1331,7 +1344,7 @@ pub async fn rename_channel(
         }
     })?;
     record_audit(
-        pool,
+        &mut *tx,
         channel.workspace_id,
         actor_id,
         "channel.renamed",
@@ -1339,6 +1352,7 @@ pub async fn rename_channel(
         &serde_json::json!({ "channel_id": channel_id, "name": name }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(to_channel(row))
 }
 
@@ -1364,11 +1378,26 @@ pub async fn delete_channel(
     .await?;
     let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     // Cascades to messages, participants, and the channel row itself.
-    sqlx::query("DELETE FROM conversations WHERE id = $1")
+    let deleted = sqlx::query("DELETE FROM conversations WHERE id = $1")
         .bind(channel.conversation_id)
         .execute(&mut *tx)
         .await
-        .map_err(WorkspacesError::Database)?;
+        .map_err(WorkspacesError::Database)?
+        .rows_affected();
+    if deleted == 0 {
+        // Lost a concurrent double-delete: report absence, audit nothing.
+        return Err(WorkspacesError::NotMember);
+    }
+    // Unpublished outbox rows would otherwise ghost-broadcast a deleted
+    // conversation to still-connected clients. Published rows are inert
+    // (already fanned out) and stay untouched.
+    sqlx::query(
+        "DELETE FROM outbox WHERE published_at IS NULL AND payload->>'conversation_id' = $1",
+    )
+    .bind(channel.conversation_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(WorkspacesError::Database)?;
     record_audit(
         &mut *tx,
         channel.workspace_id,
@@ -1411,7 +1440,7 @@ pub async fn set_override(
         ));
     }
     let channel = get_channel(pool, actor_id, channel_id).await?;
-    require(
+    let actor_role = require(
         pool,
         channel.workspace_id,
         actor_id,
@@ -1424,22 +1453,22 @@ pub async fn set_override(
             "target_kind must be role or member".to_owned(),
         ));
     }
-    let normalized_target = if target_kind == "role" {
-        parse_role(target)?.as_str().to_owned()
+    let (normalized_target, target_role) = if target_kind == "role" {
+        let role = parse_role(target)?;
+        (role.as_str().to_owned(), role)
     } else {
         let user_id: Uuid = target.trim().parse().map_err(|_: uuid::Error| {
             WorkspacesError::BadInput("member target must be a user id".to_owned())
         })?;
-        if role_of(pool, channel.workspace_id, user_id)
-            .await?
-            .is_none()
-        {
-            return Err(WorkspacesError::BadInput(
-                "override target is not a workspace member".to_owned(),
-            ));
-        }
-        user_id.to_string()
+        let role = role_of(pool, channel.workspace_id, user_id).await?.ok_or(
+            WorkspacesError::BadInput("override target is not a workspace member".to_owned()),
+        )?;
+        (user_id.to_string(), role)
     };
+    // Overrides are moderation power: the rank rule covers the target, so an
+    // admin can neither silence an owner nor favor one past their station.
+    check_rank(actor_role, target_role, None)?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     sqlx::query(
         "INSERT INTO channel_overrides (channel_id, target_kind, target, permission, allowed)
          VALUES ($1, $2, $3, $4, $5)
@@ -1451,11 +1480,11 @@ pub async fn set_override(
     .bind(&normalized_target)
     .bind(permission.as_str())
     .bind(allowed)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(WorkspacesError::Database)?;
     record_audit(
-        pool,
+        &mut *tx,
         channel.workspace_id,
         actor_id,
         "channel.override_set",
@@ -1469,6 +1498,7 @@ pub async fn set_override(
         }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(ChannelOverride {
         channel_id,
         target_kind,
@@ -1519,7 +1549,8 @@ pub async fn delete_override(
                 WorkspacesError::BadInput("member target must be a user id".to_owned())
             })?
     };
-    sqlx::query(
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let removed = sqlx::query(
         "DELETE FROM channel_overrides
          WHERE channel_id = $1 AND target_kind = $2 AND target = $3 AND permission = $4",
     )
@@ -1527,11 +1558,16 @@ pub async fn delete_override(
     .bind(&target_kind)
     .bind(&normalized_target)
     .bind(permission.as_str())
-    .execute(pool)
+    .execute(&mut *tx)
     .await
-    .map_err(WorkspacesError::Database)?;
+    .map_err(WorkspacesError::Database)?
+    .rows_affected();
+    if removed == 0 {
+        // Idempotent no-op: nothing matched, so no audit row either.
+        return Ok(());
+    }
     record_audit(
-        pool,
+        &mut *tx,
         channel.workspace_id,
         actor_id,
         "channel.override_removed",
@@ -1539,6 +1575,7 @@ pub async fn delete_override(
         &serde_json::json!({ "channel_id": channel_id }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(())
 }
 
@@ -1651,6 +1688,10 @@ pub async fn can_send(
 /// `expires_in_secs` so the deadline arithmetic cannot overflow.
 const MAX_INVITE_TTL_SECS: i64 = 366 * 24 * 60 * 60;
 
+/// Cap for unbounded list endpoints (channels, invites). Reads stay bounded
+/// until cursor pagination lands; the cap is documented on each query.
+const MAX_LIST_ROWS: i64 = 500;
+
 /// Fresh random invite code (144 bits, URL-safe, 24 chars). The RNG failure
 /// mode is a panic inside `OsRng`, matching the password module's stance that
 /// a broken OS RNG is unrecoverable.
@@ -1700,6 +1741,7 @@ pub async fn create_invite(
     let expires_at = expires_in_secs.map(|secs| Utc::now() + chrono::Duration::seconds(secs));
     let id = Uuid::now_v7();
     let code = new_invite_code();
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
     let row: InviteRow = sqlx::query_as(
         "INSERT INTO invites (id, workspace_id, code, created_by, initial_role, expires_at, max_uses)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1713,11 +1755,11 @@ pub async fn create_invite(
     .bind(initial_role.as_str())
     .bind(expires_at)
     .bind(max_uses)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(WorkspacesError::Database)?;
     record_audit(
-        pool,
+        &mut *tx,
         workspace_id,
         actor_id,
         "invite.created",
@@ -1725,6 +1767,7 @@ pub async fn create_invite(
         &serde_json::json!({ "invite_id": id, "initial_role": initial_role.as_str() }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(to_invite(row))
 }
 
@@ -1745,9 +1788,10 @@ pub async fn list_invites(
     let rows: Vec<InviteRow> = sqlx::query_as(
         "SELECT id, workspace_id, code, created_by, initial_role, expires_at,
                 max_uses, uses, revoked, created_at
-         FROM invites WHERE workspace_id = $1 ORDER BY created_at DESC",
+         FROM invites WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2",
     )
     .bind(workspace_id)
+    .bind(MAX_LIST_ROWS)
     .fetch_all(pool)
     .await
     .map_err(WorkspacesError::Database)?;
@@ -1767,14 +1811,22 @@ pub async fn revoke_invite(
     invite_id: Uuid,
 ) -> Result<(), WorkspacesError> {
     require(pool, workspace_id, actor_id, Permission::ManageMembers).await?;
-    sqlx::query("UPDATE invites SET revoked = TRUE WHERE id = $1 AND workspace_id = $2")
-        .bind(invite_id)
-        .bind(workspace_id)
-        .execute(pool)
-        .await
-        .map_err(WorkspacesError::Database)?;
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let removed =
+        sqlx::query("UPDATE invites SET revoked = TRUE WHERE id = $1 AND workspace_id = $2")
+            .bind(invite_id)
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(WorkspacesError::Database)?
+            .rows_affected();
+    if removed == 0 {
+        // Unknown id, or an id from another workspace: same wall, no oracle,
+        // and no audit row for something that never happened.
+        return Err(WorkspacesError::NotMember);
+    }
     record_audit(
-        pool,
+        &mut *tx,
         workspace_id,
         actor_id,
         "invite.revoked",
@@ -1782,6 +1834,7 @@ pub async fn revoke_invite(
         &serde_json::json!({ "invite_id": invite_id }),
     )
     .await?;
+    tx.commit().await.map_err(WorkspacesError::Database)?;
     Ok(())
 }
 
@@ -1854,7 +1907,10 @@ pub async fn join_via_invite(
     if !invite_usable(&fresh, Utc::now()) {
         return Err(WorkspacesError::InviteRejected);
     }
-    sqlx::query(
+    // The INSERT is the arbiter: under the membership primary key it inserts
+    // exactly once per user, so `inserted == 0` means the seat was already
+    // taken — by an earlier add or by a concurrent join winner.
+    let inserted = sqlx::query(
         "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)
          ON CONFLICT DO NOTHING",
     )
@@ -1863,7 +1919,32 @@ pub async fn join_via_invite(
     .bind(initial_role.as_str())
     .execute(&mut *tx)
     .await
-    .map_err(WorkspacesError::Database)?;
+    .map_err(WorkspacesError::Database)?
+    .rows_affected();
+    if inserted == 0 {
+        // Already seated, or a concurrent join won the race to this INSERT:
+        // either way the seat is not ours. Roll back (nothing of ours
+        // is in the tx), burn no use, audit nothing, and return the actual
+        // current seat rather than the invite's initial role.
+        tx.rollback().await.map_err(WorkspacesError::Database)?;
+        let raw: String = sqlx::query_scalar(
+            "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => WorkspacesError::NotMember,
+            other => WorkspacesError::Database(other),
+        })?;
+        let role =
+            parse_role(&raw).map_err(|_| WorkspacesError::Database(sqlx::Error::RowNotFound))?;
+        let workspace = get_workspace(pool, user_id, workspace_id).await?.0;
+        return Ok((workspace, role));
+    }
+    // Fresh seat (possibly ours from a lost race — either way the
+    // row now exists exactly once, so exactly one use is charged).
     sqlx::query("UPDATE invites SET uses = uses + 1 WHERE id = $1")
         .bind(row.0)
         .execute(&mut *tx)
@@ -1880,10 +1961,7 @@ pub async fn join_via_invite(
     )
     .await?;
     tx.commit().await.map_err(WorkspacesError::Database)?;
-    let workspace = get_workspace(pool, user_id, workspace_id)
-        .await
-        .map(|(workspace, _)| workspace)
-        .map_err(|_| WorkspacesError::Database(sqlx::Error::RowNotFound))?;
+    let workspace = get_workspace(pool, user_id, workspace_id).await?.0;
     Ok((workspace, initial_role))
 }
 
@@ -1989,6 +2067,43 @@ mod tests {
         assert!(check_rank(Role::Owner, Role::Owner, Some(Role::Owner)).is_ok());
     }
 
+    /// The invite gate is a pure predicate: revoked, expired, and spent codes
+    /// all fail; everything else passes.
+    #[test]
+    fn invite_usable_boundaries() {
+        let now = Utc::now();
+        let base: InviteRow = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "code".to_owned(),
+            Uuid::now_v7(),
+            "member".to_owned(),
+            None,
+            None,
+            0,
+            false,
+            now,
+        );
+        assert!(invite_usable(&base, now));
+        let mut revoked = base.clone();
+        revoked.8 = true;
+        assert!(!invite_usable(&revoked, now));
+        let mut expired = base.clone();
+        expired.5 = Some(now - chrono::Duration::seconds(1));
+        assert!(!invite_usable(&expired, now));
+        let mut fresh = base.clone();
+        fresh.5 = Some(now + chrono::Duration::seconds(60));
+        assert!(invite_usable(&fresh, now));
+        let mut spent = base.clone();
+        spent.6 = Some(1);
+        spent.7 = 1;
+        assert!(!invite_usable(&spent, now));
+        let mut room = base.clone();
+        room.6 = Some(2);
+        room.7 = 1;
+        assert!(invite_usable(&room, now));
+    }
+
     /// Parsing is forgiving about case/whitespace and strict about values.
     #[test]
     fn parse_rejects_garbage() {
@@ -2003,6 +2118,15 @@ mod tests {
             Permission::SendMessages
         );
         assert!(parse_permission("DROP_TABLES").is_err());
+    }
+
+    /// Count audit entries (test helper; keeps long lifecycle tests under the
+    /// pedantic line budget).
+    async fn audit_len(pool: &sqlx::PgPool, actor: Uuid, workspace: Uuid) -> usize {
+        list_audit(pool, actor, workspace, 100)
+            .await
+            .expect("audit")
+            .len()
     }
 
     /// Register one user for workspace tests, returning its id.
@@ -2087,6 +2211,13 @@ mod tests {
         assert!(set_role(&pool, owner, workspace.id, owner, Role::Member)
             .await
             .is_err());
+        // The last-owner guard covers kick and ban too, not just demotion.
+        assert!(remove_member(&pool, owner, workspace.id, owner)
+            .await
+            .is_err());
+        assert!(ban_member(&pool, owner, workspace.id, owner, "self")
+            .await
+            .is_err());
         pool.close().await;
     }
 
@@ -2167,13 +2298,11 @@ mod tests {
         .await
         .expect("allow one member");
         assert!(can_send(&pool, general.id, member).await.expect("eval"));
-        assert_eq!(
-            list_overrides(&pool, member, general.id)
-                .await
-                .expect("list overrides")
-                .len(),
-            2
-        );
+        let overrides = list_overrides(&pool, member, general.id)
+            .await
+            .expect("list overrides");
+        assert_eq!(overrides.len(), 2);
+        let audits_before = audit_len(&pool, owner, workspace.id).await;
         delete_override(
             &pool,
             owner,
@@ -2184,19 +2313,35 @@ mod tests {
         )
         .await
         .expect("remove role deny");
+        // A repeat delete is a silent no-op: still Ok, and no second audit row.
+        delete_override(
+            &pool,
+            owner,
+            general.id,
+            "role",
+            "member",
+            Permission::SendMessages,
+        )
+        .await
+        .expect("repeat delete stays silent");
+        assert_eq!(
+            audit_len(&pool, owner, workspace.id).await,
+            audits_before + 1,
+            "exactly one audit row for one removal"
+        );
         rename_channel(&pool, owner, general.id, "lobby")
             .await
             .expect("rename channel");
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. Invites, kicks,
-    /// bans, and the audit trail: bounded codes, idempotent rejoin,
-    /// revocation, ban persistence, and payload-free audit entries.
+    /// Requires a live database; skips honestly without one. Invites:
+    /// bounded single-use codes, idempotent rejoin without burning uses,
+    /// redeem-as-member keeps the current seat, revocation, and rejection.
     #[tokio::test]
-    async fn invites_kick_ban_audit() {
+    async fn invites_accept_revoke() {
         let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: invites_kick_ban_audit (DATABASE_URL unset)");
+            eprintln!("SKIPPED: invites_accept_revoke (DATABASE_URL unset)");
             return;
         };
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -2222,9 +2367,6 @@ mod tests {
         add_member(&pool, owner, workspace.id, guest, Role::Guest)
             .await
             .expect("add guest");
-        let general = create_channel(&pool, owner, workspace.id, "general")
-            .await
-            .expect("create channel");
 
         // Invites: bounded single-use code, accept, revoke, reject.
         let invite = create_invite(&pool, owner, workspace.id, Role::Member, None, Some(1))
@@ -2248,6 +2390,12 @@ mod tests {
             .await
             .expect("idempotent rejoin");
         assert_eq!(again, Role::Member);
+        let spent: i32 = sqlx::query_scalar("SELECT uses FROM invites WHERE id = $1")
+            .bind(invite.id)
+            .fetch_one(&pool)
+            .await
+            .expect("read uses");
+        assert_eq!(spent, 1, "idempotent rejoin must not burn a use");
         let multi = create_invite(&pool, owner, workspace.id, Role::Guest, None, None)
             .await
             .expect("open invite");
@@ -2258,6 +2406,65 @@ mod tests {
         assert!(join_via_invite(&pool, late, "not-a-real-code")
             .await
             .is_err());
+        // A member added out-of-band who then redeems a live code keeps the
+        // seat they have and burns no uses (the lost-join-race shape).
+        let open = create_invite(&pool, owner, workspace.id, Role::Guest, None, None)
+            .await
+            .expect("open invite");
+        add_member(&pool, owner, workspace.id, late, Role::Member)
+            .await
+            .expect("add late directly");
+        let (_, seat) = join_via_invite(&pool, late, &open.code)
+            .await
+            .expect("redeem as member");
+        assert_eq!(seat, Role::Member);
+        let burned: i32 = sqlx::query_scalar("SELECT uses FROM invites WHERE id = $1")
+            .bind(open.id)
+            .fetch_one(&pool)
+            .await
+            .expect("read uses");
+        assert_eq!(burned, 0, "redeem-as-member must not burn a use");
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Kicks, bans,
+    /// and the audit trail: removal syncs channel seats, bans persist and
+    /// block re-adds, unbans heal, and audit entries stay payload-free.
+    #[tokio::test]
+    async fn kick_ban_audit_delete() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: kick_ban_audit_delete (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "w3bowner").await;
+        let member = user(&pool, stamp, "w3bmember").await;
+        let guest = user(&pool, stamp, "w3bguest").await;
+        let outsider = user(&pool, stamp, "w3bout").await;
+
+        let workspace = create_workspace(&pool, owner, "Ban Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        add_member(&pool, owner, workspace.id, guest, Role::Guest)
+            .await
+            .expect("add guest");
+        // The kick target needs a seat first so removal has something to sync.
+        add_member(&pool, owner, workspace.id, outsider, Role::Member)
+            .await
+            .expect("add outsider");
+        let general = create_channel(&pool, owner, workspace.id, "general")
+            .await
+            .expect("create channel");
 
         // Kick: out, channel seats gone, may rejoin. Ban: out and stays out.
         remove_member(&pool, owner, workspace.id, outsider)
@@ -2286,11 +2493,25 @@ mod tests {
         let audit = list_audit(&pool, owner, workspace.id, 100)
             .await
             .expect("audit");
-        assert!(audit.len() >= 10, "audit has {} entries", audit.len());
+        assert!(audit.len() >= 8, "audit has {} entries", audit.len());
         for entry in &audit {
             let rendered = serde_json::to_string(&entry.detail).expect("render");
             assert!(!rendered.contains("ciphertext"), "audit leaks payload");
         }
+        // The schema is pinned per action, not just scanned for secrets:
+        // member.added carries exactly the granted role.
+        let added = audit
+            .iter()
+            .find(|entry| entry.action == "member.added")
+            .expect("member.added audited");
+        let keys: Vec<&str> = added
+            .detail
+            .as_object()
+            .expect("detail is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["role"]);
         assert!(list_audit(&pool, guest, workspace.id, 10).await.is_err());
 
         // Channel deletion removes the backing conversation too.
@@ -2304,6 +2525,327 @@ mod tests {
                 .await
                 .expect("probe conversation");
         assert!(!gone, "backing conversation must go with the channel");
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Overrides are
+    /// moderation power: the rank rule covers the target, so an admin can
+    /// silence a member but neither silence nor favor an owner.
+    #[tokio::test]
+    async fn override_rank_rule() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: override_rank_rule (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "w4owner").await;
+        let admin = user(&pool, stamp, "w4admin").await;
+        let member = user(&pool, stamp, "w4member").await;
+
+        let workspace = create_workspace(&pool, owner, "Rank Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, admin, Role::Admin)
+            .await
+            .expect("add admin");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        let channel = create_channel(&pool, owner, workspace.id, "mod")
+            .await
+            .expect("create channel");
+
+        // An admin may silence a member...
+        set_override(
+            &pool,
+            admin,
+            channel.id,
+            "member",
+            &member.to_string(),
+            Permission::SendMessages,
+            false,
+        )
+        .await
+        .expect("admin silences member");
+        // ...but may not touch the owner, by id or by role, deny or allow.
+        assert!(matches!(
+            set_override(
+                &pool,
+                admin,
+                channel.id,
+                "member",
+                &owner.to_string(),
+                Permission::SendMessages,
+                false,
+            )
+            .await,
+            Err(WorkspacesError::Forbidden)
+        ));
+        assert!(matches!(
+            set_override(
+                &pool,
+                admin,
+                channel.id,
+                "role",
+                "owner",
+                Permission::SendMessages,
+                false,
+            )
+            .await,
+            Err(WorkspacesError::Forbidden)
+        ));
+        assert!(matches!(
+            set_override(
+                &pool,
+                admin,
+                channel.id,
+                "role",
+                "owner",
+                Permission::SendMessages,
+                true,
+            )
+            .await,
+            Err(WorkspacesError::Forbidden)
+        ));
+        // The owner bypasses the rank rule entirely.
+        set_override(
+            &pool,
+            owner,
+            channel.id,
+            "member",
+            &member.to_string(),
+            Permission::SendMessages,
+            false,
+        )
+        .await
+        .expect("owner override always lands");
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Revoking an
+    /// unknown id — or one from another workspace — reports absence without
+    /// an oracle and leaves the foreign invite usable.
+    #[tokio::test]
+    async fn revoke_unknown_is_not_member() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: revoke_unknown_is_not_member (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "w5owner").await;
+        let stranger = user(&pool, stamp, "w5stranger").await;
+
+        let first = create_workspace(&pool, owner, "First Space")
+            .await
+            .expect("create workspace");
+        assert!(matches!(
+            revoke_invite(&pool, owner, first.id, Uuid::now_v7()).await,
+            Err(WorkspacesError::NotMember)
+        ));
+        let second = create_workspace(&pool, owner, "Second Space")
+            .await
+            .expect("create workspace");
+        let foreign = create_invite(&pool, owner, second.id, Role::Member, None, None)
+            .await
+            .expect("foreign invite");
+        assert!(matches!(
+            revoke_invite(&pool, owner, first.id, foreign.id).await,
+            Err(WorkspacesError::NotMember)
+        ));
+        // The attempt revoked nothing: the foreign invite still redeems.
+        let (joined, _) = join_via_invite(&pool, stranger, &foreign.code)
+            .await
+            .expect("foreign invite intact");
+        assert_eq!(joined.id, second.id);
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Deleting a
+    /// channel twice reports absence the second time, and unpublished outbox
+    /// rows for the deleted conversation are cleaned so clients never
+    /// ghost-receive a dead channel.
+    #[tokio::test]
+    async fn channel_delete_cleans_outbox() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: channel_delete_cleans_outbox (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "w6owner").await;
+        let member = user(&pool, stamp, "w6member").await;
+
+        let workspace = create_workspace(&pool, owner, "Delete Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        let channel = create_channel(&pool, owner, workspace.id, "doomed")
+            .await
+            .expect("create channel");
+        let (_, created) = crate::messaging::send_message(
+            &pool,
+            member,
+            channel.conversation_id,
+            Uuid::now_v7(),
+            b"bye",
+            None,
+        )
+        .await
+        .expect("send");
+        assert!(created);
+
+        delete_channel(&pool, owner, channel.id)
+            .await
+            .expect("delete channel");
+        assert!(matches!(
+            delete_channel(&pool, owner, channel.id).await,
+            Err(WorkspacesError::NotMember)
+        ));
+        let claimed = crate::messaging::claim_outbox(&pool, 100)
+            .await
+            .expect("claim");
+        for entry in &claimed {
+            let convo = entry
+                .payload
+                .get("conversation_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            assert_ne!(
+                convo,
+                channel.conversation_id.to_string(),
+                "deleted channel must not ghost-broadcast"
+            );
+        }
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. History is a
+    /// read: guests and send-revoked members can read it, outsiders cannot.
+    #[tokio::test]
+    async fn guest_reads_history() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: guest_reads_history (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "w7owner").await;
+        let member = user(&pool, stamp, "w7member").await;
+        let guest = user(&pool, stamp, "w7guest").await;
+        let outsider = user(&pool, stamp, "w7out").await;
+
+        let workspace = create_workspace(&pool, owner, "Read Space")
+            .await
+            .expect("create workspace");
+        add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .expect("add member");
+        add_member(&pool, owner, workspace.id, guest, Role::Guest)
+            .await
+            .expect("add guest");
+        let channel = create_channel(&pool, owner, workspace.id, "general")
+            .await
+            .expect("create channel");
+        crate::messaging::send_message(
+            &pool,
+            member,
+            channel.conversation_id,
+            Uuid::now_v7(),
+            b"hi",
+            None,
+        )
+        .await
+        .expect("send");
+
+        // Guests hold no SEND grant but read fine...
+        let seen = crate::messaging::message_history(&pool, guest, channel.conversation_id, 0, 50)
+            .await
+            .expect("guest reads");
+        assert_eq!(seen.len(), 1);
+        // ...as do members whose SEND grant was revoked...
+        set_override(
+            &pool,
+            owner,
+            channel.id,
+            "role",
+            "member",
+            Permission::SendMessages,
+            false,
+        )
+        .await
+        .expect("mute members");
+        assert!(!can_send(&pool, channel.id, member).await.expect("eval"));
+        let seen_muted =
+            crate::messaging::message_history(&pool, member, channel.conversation_id, 0, 50)
+                .await
+                .expect("muted member still reads");
+        assert_eq!(seen_muted.len(), 1);
+        // ...while outsiders still hit the wall.
+        assert!(
+            crate::messaging::message_history(&pool, outsider, channel.conversation_id, 0, 50)
+                .await
+                .is_err()
+        );
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. List endpoints
+    /// stay bounded: past the cap the oldest-first page is truncated.
+    #[tokio::test]
+    async fn channel_list_is_bounded() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: channel_list_is_bounded (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "w8owner").await;
+        let workspace = create_workspace(&pool, owner, "Cap Space")
+            .await
+            .expect("create workspace");
+        for index in 0..505 {
+            create_channel(&pool, owner, workspace.id, &format!("cap{index:03}"))
+                .await
+                .expect("create channel");
+        }
+        let channels = list_channels(&pool, owner, workspace.id)
+            .await
+            .expect("list channels");
+        assert_eq!(channels.len(), 500);
         pool.close().await;
     }
 
