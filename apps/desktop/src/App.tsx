@@ -328,7 +328,7 @@ export default function App() {
     <div className="flex h-full flex-col bg-zinc-950 text-zinc-100">
       <header className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
         <span className="text-sm font-semibold">
-          TeriChat <span className="text-zinc-500">· {handle}</span>
+          UnknownChat <span className="text-zinc-500">· {handle}</span>
         </span>
         <span className="flex items-center gap-3">
           <ConnectionIndicator status={status} />

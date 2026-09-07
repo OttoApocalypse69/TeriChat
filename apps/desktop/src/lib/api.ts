@@ -1,4 +1,4 @@
-// Typed HTTP client for the TeriChat Alpha 0 API (auth / DM / send / history).
+// Typed HTTP client for the UnknownChat Alpha 0 API (auth / DM / send / history).
 //
 // Transport only: envelope bytes are opaque base64 pass-through. No crypto,
 // key handling, or sync authority lives here.
