@@ -8,7 +8,6 @@ RUN npm ci --no-audit --no-fund
 COPY apps/desktop/index.html apps/desktop/vite.config.ts apps/desktop/tsconfig.json ./
 COPY apps/desktop/tailwind.config.js apps/desktop/postcss.config.js ./
 COPY apps/desktop/src ./src
-COPY apps/desktop/public ./public
 RUN VITE_API_URL=/ npm run build
 
 FROM caddy:2-alpine
