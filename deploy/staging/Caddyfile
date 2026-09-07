@@ -1,11 +1,11 @@
 # TeriChat staging edge: same-origin API proxy + static web UI.
-# Tailnet-only mode (no public domain yet): plain HTTP on :80 — the tailnet
-# itself is WireGuard-encrypted, so no ACME needed. When a public hostname
-# lands, change the site address to {$STAGING_HOST} and Caddy provisions TLS.
+# Two ways in: tailnet IP (WireGuard-encrypted, plain HTTP) and the public
+# chat.unknownchat.xyz via the SPICE edge Caddy (edge terminates TLS, this
+# stays plain HTTP on :80 in-container).
 # NOTE: the box's :80 belongs to the SPICE edge Caddy, so compose publishes
 # this on host :8080 — but the site stays portless (:80 in-container) so the
 # host port remains a publish detail and :443 migration stays trivial.
-http://{$STAGING_HOST} {
+http://{$STAGING_HOST}, http://chat.unknownchat.xyz {
     # API + gateway WebSocket (upgrade handled automatically).
     # /health is explicit so edge checks never fall through to the SPA.
     handle /health {
