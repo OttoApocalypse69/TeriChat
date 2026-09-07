@@ -1,0 +1,19 @@
+# TeriChat staging edge: TLS + same-origin API proxy + static web UI.
+# {$STAGING_HOST} comes from the compose environment (never committed).
+{$STAGING_HOST} {
+    # API + gateway WebSocket (upgrade handled automatically).
+    handle /v1/* {
+        reverse_proxy api:3001
+    }
+
+    # Static React bundle with SPA fallback.
+    handle {
+        root * /srv/www
+        try_files {path} /index.html
+        file_server
+    }
+
+    log {
+        output stdout
+    }
+}
