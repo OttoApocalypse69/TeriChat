@@ -15,13 +15,17 @@ authentication), and the production direction is `OpenMLS` groups.
 | Key derivation | `hkdf` (`SHA-256`) | 0.12 |
 | Hashing | `sha2` | 0.10 |
 | Randomness | `rand_core` (`getrandom`, explicit dep) | 0.6 |
+| Secret wiping | `zeroize` | 1 |
 
 ## Construction
 
-Seal: fresh ephemeral `X25519` → `ECDH` with recipient agreement key →
-`HKDF-SHA256(salt = ephemeral_pub, info = "terichat-dm-v1")` → 32-byte key →
-`XChaCha20-Poly1305` with fresh 24-byte nonce → sign
-`ephemeral_pub || nonce || ciphertext` with sender `Ed25519`.
+Seal: fresh ephemeral `X25519` → `ECDH` with recipient agreement key (zero
+peer key refused up front) →
+`HKDF-SHA256(salt = ephemeral_pub, info = "terichat-dm-v2" || sender_verify
+|| recipient_agreement)` → 32-byte key → `XChaCha20-Poly1305` with fresh
+24-byte nonce → sign `sender_verify || recipient_agreement || ephemeral_pub
+|| nonce || ciphertext` with sender `Ed25519`. Long-term secrets are drawn
+independently per group and wiped with `zeroize` when dropped.
 
 Wire: `ephemeral_pub[32] || nonce[24] || signature[64] || ciphertext`.
 
