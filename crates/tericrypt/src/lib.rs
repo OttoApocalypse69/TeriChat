@@ -1,5 +1,10 @@
 //! `TeriCrypt-4096` device cryptography — Alpha proof of concept.
 //!
+//! The `4096` brand is aspirational (large-margin direction), not a strength
+//! claim for this suite: the construction below is ~128-bit classical
+//! (`Curve25519` + `XChaCha20-Poly1305`, no post-quantum). Production claims
+//! need the specialist review bar in `docs/THREAT_MODEL.md`.
+//!
 //! Each installation owns an [`IdentityKeypair`]: an `Ed25519` signing key
 //! (who the device claims to be) and an `X25519` agreement key (how others
 //! reach it). [`seal`] encrypts a 1:1 direct message so only the recipient
@@ -42,8 +47,12 @@ use zeroize::Zeroizing;
 /// `ephemeral_pub (32) + nonce (24) + signature (64)` envelope header.
 pub const HEADER_LEN: usize = 32 + 24 + 64;
 
-/// Server-side envelope cap is 1 MiB; plaintext must leave room for the header.
-pub const MAX_PLAINTEXT_BYTES: usize = 1_048_576 - HEADER_LEN;
+/// `XChaCha20-Poly1305` authentication tag appended to the ciphertext.
+pub const TAG_LEN: usize = 16;
+
+/// Server-side envelope cap is 1 MiB; the worst-case wire size is
+/// `HEADER_LEN + plaintext + TAG_LEN`, so plaintext must leave room for both.
+pub const MAX_PLAINTEXT_BYTES: usize = 1_048_576 - HEADER_LEN - TAG_LEN;
 
 /// `HKDF` domain separation. Changing the construction retires this string;
 /// `v1` bound neither peer identity, so `v1` envelopes do not open here.
@@ -462,6 +471,43 @@ mod tests {
         assert!(valid_agreement_key(&device.agreement_pubkey()));
         assert!(!valid_verify_key(&[0_u8; 32]));
         assert!(!valid_agreement_key(&[0_u8; 32]));
+    }
+
+    /// Boundary: the largest sealable plaintext still fits the server's 1 MiB
+    /// envelope cap (header + tag accounted); one byte more is refused.
+    #[test]
+    fn max_plaintext_fits_server_cap() {
+        let (alice, bob) = devices();
+        let big = vec![0x62_u8; MAX_PLAINTEXT_BYTES];
+        let envelope = seal(&alice, &bob.agreement_pubkey(), &big).expect("seal max");
+        assert!(envelope.to_bytes().len() <= 1_048_576);
+        let over = vec![0x62_u8; MAX_PLAINTEXT_BYTES + 1];
+        let err = seal(&alice, &bob.agreement_pubkey(), &over).unwrap_err();
+        assert_eq!(err, TeriCryptError::TooLarge);
+    }
+
+    /// The signature covers the ephemeral key and nonce too: flipping either
+    /// bit fails as forgery, and a garbage sender key fails at parse time.
+    #[test]
+    fn tampered_ephemeral_or_nonce_fails() {
+        let (alice, bob) = devices();
+        let sender = alice.identity_verify_key();
+        let mut envelope = seal(&alice, &bob.agreement_pubkey(), b"bro").expect("seal");
+        envelope.ephemeral_pub[0] ^= 0x01;
+        assert_eq!(
+            open(&bob, &sender, &envelope).unwrap_err(),
+            TeriCryptError::InvalidSignature
+        );
+        let mut envelope = seal(&alice, &bob.agreement_pubkey(), b"bro").expect("seal");
+        envelope.nonce[0] ^= 0x01;
+        assert_eq!(
+            open(&bob, &sender, &envelope).unwrap_err(),
+            TeriCryptError::InvalidSignature
+        );
+        assert_eq!(
+            open(&bob, &[0xFF_u8; 32], &envelope).unwrap_err(),
+            TeriCryptError::InvalidPublicKey
+        );
     }
 
     /// The exact byte layout both sides sign and verify (v2 context first).
