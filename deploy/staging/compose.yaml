@@ -43,8 +43,8 @@ services:
       dockerfile: deploy/staging/Dockerfile.web
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      # Tailnet test port: the box's :80/:443 belong to the SPICE edge Caddy.
+      - "8080:80"
     environment:
       STAGING_HOST: ${STAGING_HOST}
     volumes:
