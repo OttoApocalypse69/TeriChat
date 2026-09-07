@@ -3,7 +3,10 @@ import ChannelList from './components/ChannelList';
 import ConnectionIndicator from './components/ConnectionIndicator';
 import ConversationList from './components/ConversationList';
 import ConversationView from './components/ConversationView';
+import InvitePanel from './components/InvitePanel';
+import JoinWorkspace from './components/JoinWorkspace';
 import LoginView from './components/LoginView';
+import MemberPanel from './components/MemberPanel';
 import WorkspaceList from './components/WorkspaceList';
 import {
   ApiClient,
@@ -224,6 +227,31 @@ export default function App() {
     bump();
   }
 
+  /** Redeem an invite code and land in the workspace (select + channels). */
+  async function joinByCode(code: string): Promise<string> {
+    const joined = await api.joinWorkspace(code.trim());
+    const rows = [
+      ...wsStoreRef.current.workspaces.filter((w) => w.id !== joined.id),
+      joined,
+    ];
+    wsStoreRef.current.setWorkspaces(rows);
+    wsStoreRef.current.selectWorkspace(joined.id);
+    bump();
+    await refreshChannels(joined.id);
+    return joined.id;
+  }
+
+  /** Drop a left workspace from local state and clear its selection. */
+  function handleLeftWorkspace(workspaceId: string): void {
+    wsStoreRef.current.setWorkspaces(
+      wsStore.workspaces.filter((w) => w.id !== workspaceId),
+    );
+    if (wsStoreRef.current.selectedWorkspaceId === workspaceId) {
+      wsStoreRef.current.selectWorkspace(null);
+    }
+    bump();
+  }
+
   function selectChannel(channelId: string): void {
     wsStoreRef.current.selectChannel(channelId);
     const channel = wsStoreRef.current.selectedChannel();
@@ -305,6 +333,9 @@ export default function App() {
               onRetry={() => void refreshWorkspaces()}
             />
           </div>
+          <div className="shrink-0 border-b border-zinc-800">
+            <JoinWorkspace onJoin={joinByCode} />
+          </div>
           <div className="max-h-64 shrink-0 overflow-y-auto">
             <ChannelList
               workspaceName={selectedWorkspace?.name ?? null}
@@ -337,6 +368,30 @@ export default function App() {
             title={channelTitle}
           />
         </main>
+        {selectedWorkspace && (
+          <aside className="w-80 shrink-0 overflow-y-auto border-l border-zinc-800">
+            <div className="border-b border-zinc-800 p-2">
+              <h2 className="truncate text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                {selectedWorkspace.name} · {selectedWorkspace.my_role}
+              </h2>
+            </div>
+            <MemberPanel
+              key={`members-${selectedWorkspace.id}`}
+              api={api}
+              workspaceId={selectedWorkspace.id}
+              myRole={selectedWorkspace.my_role}
+              meId={meId}
+              myHandle={handle}
+              onLeft={handleLeftWorkspace}
+            />
+            <InvitePanel
+              key={`invites-${selectedWorkspace.id}`}
+              api={api}
+              workspaceId={selectedWorkspace.id}
+              myRole={selectedWorkspace.my_role}
+            />
+          </aside>
+        )}
       </div>
     </div>
   );

@@ -62,6 +62,29 @@ export interface ChannelBody {
   created_at: string;
 }
 
+export interface InviteBody {
+  id: string;
+  workspace_id: string;
+  code: string;
+  created_by: string;
+  initial_role: string;
+  expires_at: string | null;
+  max_uses: number | null;
+  uses: number;
+  revoked: boolean;
+  created_at: string;
+}
+
+export interface AuditBody {
+  id: string;
+  workspace_id: string;
+  actor_id: string;
+  action: string;
+  target_id: string | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -123,8 +146,13 @@ export class ApiClient {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!res.ok) throw await parseError(res);
-    if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
+    // Add-member / ban return 201 with an empty body, and several member
+    // routes return 204: treat any empty success body as undefined instead
+    // of failing JSON parsing.
+    if (res.status === 204 || res.status === 205) return undefined as T;
+    const text = await res.text();
+    if (text.trim() === '') return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   register(input: {
@@ -195,6 +223,100 @@ export class ApiClient {
       'POST',
       `/v1/workspaces/${workspaceId}/channels`,
       { name },
+    );
+  }
+
+  // --- Phase 3: workspace invites + members (server-owned, transport only) ---
+
+  /** Redeem an invite code. Returns the joined workspace (with my_role). */
+  joinWorkspace(code: string): Promise<WorkspaceBody> {
+    return this.req<WorkspaceBody>('POST', '/v1/workspaces/join', { code });
+  }
+
+  createInvite(
+    workspaceId: string,
+    input: {
+      initial_role?: string;
+      expires_in_secs?: number;
+      max_uses?: number;
+    },
+  ): Promise<InviteBody> {
+    return this.req<InviteBody>(
+      'POST',
+      `/v1/workspaces/${workspaceId}/invites`,
+      input,
+    );
+  }
+
+  listInvites(workspaceId: string): Promise<InviteBody[]> {
+    return this.req<InviteBody[]>(
+      'GET',
+      `/v1/workspaces/${workspaceId}/invites`,
+    );
+  }
+
+  revokeInvite(workspaceId: string, inviteId: string): Promise<void> {
+    return this.req<void>(
+      'DELETE',
+      `/v1/workspaces/${workspaceId}/invites/${inviteId}`,
+    );
+  }
+
+  /** Direct-add by handle. Resolves 201 with an empty body. */
+  addMember(
+    workspaceId: string,
+    input: { user_handle: string; role: string },
+  ): Promise<void> {
+    return this.req<void>(
+      'POST',
+      `/v1/workspaces/${workspaceId}/members`,
+      input,
+    );
+  }
+
+  setMemberRole(
+    workspaceId: string,
+    userId: string,
+    role: string,
+  ): Promise<void> {
+    return this.req<void>(
+      'PATCH',
+      `/v1/workspaces/${workspaceId}/members/${userId}`,
+      { role },
+    );
+  }
+
+  kickMember(workspaceId: string, userId: string): Promise<void> {
+    return this.req<void>(
+      'DELETE',
+      `/v1/workspaces/${workspaceId}/members/${userId}`,
+    );
+  }
+
+  leaveWorkspace(workspaceId: string): Promise<void> {
+    return this.req<void>('POST', `/v1/workspaces/${workspaceId}/leave`);
+  }
+
+  /** Ban resolves 201 with an empty body. */
+  banMember(workspaceId: string, userId: string, reason?: string): Promise<void> {
+    return this.req<void>('POST', `/v1/workspaces/${workspaceId}/bans`, {
+      user_id: userId,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+  }
+
+  unbanMember(workspaceId: string, userId: string): Promise<void> {
+    return this.req<void>(
+      'DELETE',
+      `/v1/workspaces/${workspaceId}/bans/${userId}`,
+    );
+  }
+
+  listAudit(workspaceId: string, limit = 100): Promise<AuditBody[]> {
+    const q = new URLSearchParams({ limit: String(limit) });
+    return this.req<AuditBody[]>(
+      'GET',
+      `/v1/workspaces/${workspaceId}/audit?${q.toString()}`,
     );
   }
 }
