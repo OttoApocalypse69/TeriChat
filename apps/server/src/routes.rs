@@ -137,6 +137,35 @@ impl From<messaging::Conversation> for ConversationBody {
     }
 }
 
+/// `GET /v1/conversations` entry: the caller's conversation with, for
+/// two-member DMs, the peer handle + display name resolved server-side
+/// (caller is a member — no handle oracle), plus the last message position
+/// for previews and sync.
+#[derive(Debug, Serialize)]
+struct ConversationSummaryBody {
+    id: Uuid,
+    kind: String,
+    members: Vec<Uuid>,
+    peer_handle: Option<String>,
+    peer_display_name: Option<String>,
+    last_seq: Option<i64>,
+    last_sent_at: Option<DateTime<Utc>>,
+}
+
+impl From<messaging::ConversationSummary> for ConversationSummaryBody {
+    fn from(row: messaging::ConversationSummary) -> Self {
+        Self {
+            id: row.id,
+            kind: row.kind,
+            members: row.members,
+            peer_handle: row.peer_handle,
+            peer_display_name: row.peer_display_name,
+            last_seq: row.last_seq,
+            last_sent_at: row.last_sent_at,
+        }
+    }
+}
+
 /// `POST /v1/messages` request. Envelope bytes travel base64-encoded;
 /// the server never decodes them into anything but opaque storage.
 #[derive(Debug, Deserialize)]
@@ -471,6 +500,21 @@ async fn create_group(
     Ok((
         StatusCode::CREATED,
         Json(ConversationBody::from(conversation)),
+    ))
+}
+
+async fn list_conversations(
+    State(state): State<AppState>,
+    bearer: Bearer,
+) -> Result<Json<Vec<ConversationSummaryBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Caller-scoped by construction: only conversations the caller belongs
+    // to are returned, with peer identity resolved server-side (no oracle).
+    let rows = messaging::list_conversations(pool, bearer.user_id()).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(ConversationSummaryBody::from)
+            .collect(),
     ))
 }
 
@@ -937,7 +981,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(logout))
         .route("/v1/auth/devices", post(register_device))
         .route("/v1/conversations/dm", post(create_dm))
-        .route("/v1/conversations", post(create_group))
+        .route(
+            "/v1/conversations",
+            post(create_group).get(list_conversations),
+        )
         .route("/v1/messages", post(send_message).get(message_history))
         .route(
             "/v1/workspaces",

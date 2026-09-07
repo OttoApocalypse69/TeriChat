@@ -31,6 +31,17 @@ export interface ConversationBody {
   members: string[];
 }
 
+/** GET /v1/conversations entry: caller-scoped, with the DM peer resolved. */
+export interface ConversationSummaryBody {
+  id: string;
+  kind: string;
+  members: string[];
+  peer_handle: string | null;
+  peer_display_name: string | null;
+  last_seq: number | null;
+  last_sent_at: string | null;
+}
+
 export interface MessageBody {
   id: string;
   conversation_id: string;
@@ -185,6 +196,11 @@ export class ApiClient {
     return this.req<ConversationBody>('POST', '/v1/conversations', {
       member_handles,
     });
+  }
+
+  /** Caller-scoped conversation list with DM peers + last positions. */
+  listConversations(): Promise<ConversationSummaryBody[]> {
+    return this.req<ConversationSummaryBody[]>('GET', '/v1/conversations');
   }
 
   sendMessage(input: {

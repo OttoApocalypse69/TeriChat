@@ -15,7 +15,7 @@ import {
   newClientMsgId,
 } from './lib/api';
 import { GatewayClient, type GatewayStatus } from './lib/gateway';
-import { ChatStore, toChatMessage } from './lib/store';
+import { ChatStore, sortConversations, toChatMessage } from './lib/store';
 import {
   WorkspaceStore,
   channelToConversation,
@@ -52,9 +52,13 @@ export default function App() {
   // DM/group conversations only — channel rows live in the channel list and
   // reuse the same message flow via their conversation_id.
   const dmConversations = useMemo(
-    () => store.conversations.filter((c) => c.kind !== 'channel'),
+    () =>
+      sortConversations(
+        store.conversations.filter((c) => c.kind !== 'channel'),
+        store.messages,
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store.conversations, version],
+    [store.conversations, store.messages, version],
   );
 
   const selectedWorkspaceId = wsStore.selectedWorkspaceId;
@@ -89,6 +93,17 @@ export default function App() {
     },
     [api, bump, token],
   );
+
+  const refreshConversations = useCallback(async () => {
+    if (!token) return;
+    try {
+      const rows = await api.listConversations();
+      for (const row of rows) storeRef.current.addConversation(row);
+      bump();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'conversations failed');
+    }
+  }, [api, bump, token]);
 
   const refreshWorkspaces = useCallback(async () => {
     if (!token) return;
@@ -180,10 +195,14 @@ export default function App() {
     };
   }, [api, bump, token]);
 
-  // Load workspaces once per login.
+  // Load conversations + workspaces once per login so DMs survive reload
+  // with peer names (not UUIDs).
   useEffect(() => {
-    if (token) void refreshWorkspaces();
-  }, [refreshWorkspaces, token]);
+    if (token) {
+      void refreshConversations();
+      void refreshWorkspaces();
+    }
+  }, [refreshConversations, refreshWorkspaces, token]);
 
   // Load channels whenever the selected workspace changes.
   useEffect(() => {
@@ -219,6 +238,7 @@ export default function App() {
     storeRef.current.addConversation(conv);
     setSelectedId(conv.id);
     bump();
+    await refreshConversations();
     await refreshHistory(conv.id);
   }
 
@@ -350,6 +370,7 @@ export default function App() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             <ConversationList
               conversations={dmConversations}
+              messagesByConversation={store.messages}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onOpenDm={openDm}
@@ -361,6 +382,7 @@ export default function App() {
             conversation={selected}
             messages={messages}
             meId={meId}
+            status={status}
             loading={loading}
             sending={sending}
             error={error}
