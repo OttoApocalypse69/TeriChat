@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Alpha 0 default capability: host the bundled frontend.",
+  "windows": ["main"],
+  "permissions": []
+}

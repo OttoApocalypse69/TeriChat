@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TeriChat",
+  "version": "0.1.0",
+  "identifier": "com.terichat.desktop",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "TeriChat (Alpha 0)",
+        "width": 1100,
+        "height": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Utility",
+    "targets": "all"
+  }
+}
