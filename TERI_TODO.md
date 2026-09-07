@@ -99,9 +99,11 @@ access yet, no spending decisions yet (boxes 3, 4 untouched).
   endpoint carries both keys), sealed-DM E2E test (server stays blind);
   27+8 tests, zero skips; fresh-DB boot verified. Gaps documented: no FS,
   no deniability/groups/transparency yet — MLS follow-up.
-- [x] Crypto review fixes (D) — adversarial review returned REWORK with 3 S1s,
-  all verified in source and fixed: independent key material per group,
-  `terichat-dm-v2` binding sender/recipient into KDF + signature, zero-key
-  refusal at seal time and registration, `zeroize` on secrets. Torsion blacklist
-  + arbitrary-key transparency stay documented residuals. 12/12 tericrypt
-  tests (red-proven), registration-gate tests, threat-model updated.
+- [x] Milestone E workspaces — `workspaces.rs` (roles, central permission
+  evaluator, channels backed by `channel` conversations, invites, overrides,
+  kick/ban/leave, audit), migrations 0004–0005, 18 routes, workspace gates on
+  send/history/gateway-live; 47+8 tests, zero skips; fresh-DB boot + live curl
+  smoke verified. AuthZ review (2 S1s: gateway bypass, handled; 7 S2s + nits,
+  all fixed with regression tests — guest-read semantics, leave path, locked
+  management txns + owner trigger, race-heal backfill, override cleanup,
+  invite TTL bound, oracle/order/normalization hygiene).
