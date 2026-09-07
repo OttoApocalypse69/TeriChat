@@ -12,6 +12,7 @@ mod config;
 mod gateway;
 mod messaging;
 mod password;
+mod stats;
 mod workspaces;
 
 use std::net::SocketAddr;
@@ -151,6 +152,19 @@ impl From<messaging::MessagingError> for AppError {
             | messaging::MessagingError::CiphertextTooLarge => Self::BadRequest(err.to_string()),
             messaging::MessagingError::Database(_) => {
                 tracing::error!("messaging backend failure: {err}");
+                Self::Internal
+            }
+        }
+    }
+}
+
+impl From<stats::StatsError> for AppError {
+    fn from(err: stats::StatsError) -> Self {
+        match err {
+            stats::StatsError::NotMember => Self::Forbidden,
+            stats::StatsError::BadInput(detail) => Self::BadRequest(detail),
+            stats::StatsError::Database(inner) => {
+                tracing::error!("stats backend failure: {inner}");
                 Self::Internal
             }
         }
@@ -1058,6 +1072,60 @@ async fn list_audit(
     Ok(Json(entries.into_iter().map(AuditBody::from).collect()))
 }
 
+async fn get_own_stats(
+    State(state): State<AppState>,
+    bearer: Bearer,
+) -> Result<Json<StatsBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Scoped to the caller by construction: only their own id is queried.
+    let rollup = stats::own_stats(pool, bearer.user_id()).await?;
+    Ok(Json(StatsBody {
+        user_id: rollup.user_id,
+        message_count: rollup.message_count,
+        last_message_at: rollup.last_message_at,
+    }))
+}
+
+async fn get_conversation_stats(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Query(params): Query<ConversationStatsParams>,
+) -> Result<Json<ConversationStatsBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Membership-checked inside; outsiders get `Forbidden`, never a count.
+    let scoped = stats::conversation_stats(pool, bearer.user_id(), params.conversation_id).await?;
+    Ok(Json(ConversationStatsBody {
+        user_id: scoped.user_id,
+        conversation_id: scoped.conversation_id,
+        message_count: scoped.message_count,
+        last_message_at: scoped.last_message_at,
+    }))
+}
+
+/// `GET /v1/stats/me` view: the caller's own message rollup. Counts only,
+/// never content — and only the caller's own.
+#[derive(Debug, Serialize)]
+struct StatsBody {
+    user_id: Uuid,
+    message_count: i64,
+    last_message_at: Option<DateTime<Utc>>,
+}
+
+/// `GET /v1/stats/conversation` view: the caller's own sends in one conversation.
+#[derive(Debug, Serialize)]
+struct ConversationStatsBody {
+    user_id: Uuid,
+    conversation_id: Uuid,
+    message_count: i64,
+    last_message_at: Option<DateTime<Utc>>,
+}
+
+/// `GET /v1/stats/conversation` query.
+#[derive(Debug, Deserialize)]
+struct ConversationStatsParams {
+    conversation_id: Uuid,
+}
+
 /// Authenticated request identity plus the raw bearer token, available only
 /// to handlers that need to hash it (logout). Handlers that only need the
 /// identity use [`Bearer::user_id`].
@@ -1184,6 +1252,8 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/v1/workspaces/{id}/audit", get(list_audit))
         .route("/v1/gateway", get(gateway::gateway_handler))
+        .route("/v1/stats/me", get(get_own_stats))
+        .route("/v1/stats/conversation", get(get_conversation_stats))
         .with_state(state)
 }
 
@@ -1221,6 +1291,8 @@ async fn main() {
     if let Some(pool) = &pool {
         // At-least-once fan-out; the next boot re-claims anything unmarked.
         tokio::spawn(messaging::outbox_worker(pool.clone(), hub.clone()));
+        // Stats fold: at-least-once too, deduped on the outbox event id.
+        tokio::spawn(stats::stats_worker(pool.clone()));
     }
 
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
@@ -1287,6 +1359,25 @@ mod tests {
                     .body(axum::body::Body::from(body.to_string()))
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    async fn get_json(
+        app: Router,
+        uri: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -1551,6 +1642,118 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "label {label}");
         }
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The stats HTTP
+    /// surface: `/v1/stats/me` serves only the caller's own rollup, the
+    /// per-conversation endpoint is membership-checked, and missing
+    /// credentials are rejected.
+    #[tokio::test]
+    async fn http_own_stats_is_scoped_to_caller() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: http_own_stats_is_scoped_to_caller (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let register = async |tag: &str| {
+            auth::create_user(
+                &pool,
+                &format!("sthttp{tag}{stamp}"),
+                &format!("sthttp{tag}{stamp}@example.com"),
+                "Stats Http",
+                "pw-stats-http",
+            )
+            .await
+            .expect("register user")
+        };
+        let alice = register("a").await;
+        let bob = register("b").await;
+        let stranger = register("s").await;
+        let token = async |handle: &str| {
+            auth::login(&pool, handle, "pw-stats-http")
+                .await
+                .expect("login")
+                .token
+        };
+        let (alice_token, bob_token, stranger_token) = (
+            token(&alice.handle).await,
+            token(&bob.handle).await,
+            token(&stranger.handle).await,
+        );
+        let dm = messaging::find_or_create_dm(&pool, alice.id, bob.id)
+            .await
+            .expect("open dm");
+        let (_, created) =
+            messaging::send_message(&pool, alice.id, dm.id, Uuid::now_v7(), b"hi", None)
+                .await
+                .expect("send");
+        assert!(created);
+        // Fold the event the background worker would have folded.
+        let event: (Uuid, String, serde_json::Value) = sqlx::query_as(
+            "SELECT id, topic, payload FROM outbox
+             WHERE (payload->>'conversation_id')::uuid = $1
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(dm.id)
+        .fetch_one(&pool)
+        .await
+        .expect("outbox row");
+        assert!(stats::process_event(&pool, event.0, &event.1, &event.2)
+            .await
+            .expect("fold"));
+
+        // Alice reads her own rollup: one message.
+        let (status, me) = get_json(
+            build_router(state.clone()),
+            "/v1/stats/me",
+            Some(&alice_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["message_count"], 1);
+        assert_eq!(
+            me["user_id"].as_str().expect("user uuid"),
+            alice.id.to_string()
+        );
+
+        // Bob sees only his own (zero) rollup — no cross-user reads.
+        let (status, bob_me) = get_json(
+            build_router(state.clone()),
+            "/v1/stats/me",
+            Some(&bob_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bob_me["message_count"], 0);
+
+        // Conversation scope: a member reads their own count there.
+        let uri = format!("/v1/stats/conversation?conversation_id={}", dm.id);
+        let (status, scoped) =
+            get_json(build_router(state.clone()), &uri, Some(&alice_token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(scoped["message_count"], 1);
+        // An outsider gets 403, never a count.
+        let (status, body) =
+            get_json(build_router(state.clone()), &uri, Some(&stranger_token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+
+        // No credentials at all: 401.
+        let (status, _) = get_json(build_router(state.clone()), "/v1/stats/me", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
         pool.close().await;
     }
 
