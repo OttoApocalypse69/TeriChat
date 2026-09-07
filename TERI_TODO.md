@@ -99,3 +99,9 @@ access yet, no spending decisions yet (boxes 3, 4 untouched).
   endpoint carries both keys), sealed-DM E2E test (server stays blind);
   27+8 tests, zero skips; fresh-DB boot verified. Gaps documented: no FS,
   no deniability/groups/transparency yet — MLS follow-up.
+- [x] Milestone E workspaces — `workspaces.rs` (roles, central permission
+  evaluator, channels backed by `channel` conversations, invites, overrides,
+  kick/ban, audit), migration 0004, 17 routes, channel SEND gate on
+  send/history; 36+8 tests, zero skips; fresh-DB boot + live curl smoke
+  verified. P1 scope done except group-DM-as-workspace-less (covered by
+  group conversations) and moderation beyond kick/ban.

@@ -124,15 +124,17 @@ fn to_message(row: MessageRow) -> Message {
     }
 }
 
-/// Create a conversation of `kind` (`dm`/`group`) with `members`. The creator
-/// is added when missing. Empty membership is rejected.
+/// Create a conversation of `kind` (`dm`/`group`/`channel`) with `members`.
+/// The creator is added when missing. Empty membership is rejected.
+/// `channel` rows are created by the workspaces module with a linked channel;
+/// see `channels.conversation_id`.
 pub async fn create_conversation(
     pool: &sqlx::PgPool,
     creator: Uuid,
     kind: &str,
     members: &[Uuid],
 ) -> Result<Conversation, MessagingError> {
-    if kind != "dm" && kind != "group" {
+    if kind != "dm" && kind != "group" && kind != "channel" {
         return Err(MessagingError::Database(sqlx::Error::RowNotFound));
     }
     let mut all: Vec<Uuid> = members.to_vec();
