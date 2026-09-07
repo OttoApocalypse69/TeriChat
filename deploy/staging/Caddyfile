@@ -2,8 +2,10 @@
 # Tailnet-only mode (no public domain yet): plain HTTP on :80 — the tailnet
 # itself is WireGuard-encrypted, so no ACME needed. When a public hostname
 # lands, change the site address to {$STAGING_HOST} and Caddy provisions TLS.
-# NOTE: the box's :80 belongs to the SPICE edge Caddy, so staging serves :8080.
-http://{$STAGING_HOST}:8080 {
+# NOTE: the box's :80 belongs to the SPICE edge Caddy, so compose publishes
+# this on host :8080 — but the site stays portless (:80 in-container) so the
+# host port remains a publish detail and :443 migration stays trivial.
+http://{$STAGING_HOST} {
     # API + gateway WebSocket (upgrade handled automatically).
     # /health is explicit so edge checks never fall through to the SPA.
     handle /health {
