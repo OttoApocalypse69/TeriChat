@@ -43,6 +43,25 @@ export interface MessageBody {
   deduped: boolean;
 }
 
+export interface WorkspaceBody {
+  id: string;
+  name: string;
+  owner_id: string;
+  my_role: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChannelBody {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  name: string;
+  kind: string;
+  created_by: string;
+  created_at: string;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -158,6 +177,25 @@ export class ApiClient {
     if (since_seq !== undefined) q.set('since_seq', String(since_seq));
     if (limit !== undefined) q.set('limit', String(limit));
     return this.req<MessageBody[]>('GET', `/v1/messages?${q.toString()}`);
+  }
+
+  listWorkspaces(): Promise<WorkspaceBody[]> {
+    return this.req<WorkspaceBody[]>('GET', '/v1/workspaces');
+  }
+
+  listChannels(workspaceId: string): Promise<ChannelBody[]> {
+    return this.req<ChannelBody[]>(
+      'GET',
+      `/v1/workspaces/${workspaceId}/channels`,
+    );
+  }
+
+  createChannel(workspaceId: string, name: string): Promise<ChannelBody> {
+    return this.req<ChannelBody>(
+      'POST',
+      `/v1/workspaces/${workspaceId}/channels`,
+      { name },
+    );
   }
 }
 
