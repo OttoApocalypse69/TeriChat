@@ -99,3 +99,9 @@ access yet, no spending decisions yet (boxes 3, 4 untouched).
   endpoint carries both keys), sealed-DM E2E test (server stays blind);
   27+8 tests, zero skips; fresh-DB boot verified. Gaps documented: no FS,
   no deniability/groups/transparency yet — MLS follow-up.
+- [x] Crypto review fixes (D) — adversarial review returned REWORK with 3 S1s,
+  all verified in source and fixed: independent key material per group,
+  `terichat-dm-v2` binding sender/recipient into KDF + signature, zero-key
+  refusal at seal time and registration, `zeroize` on secrets. Torsion blacklist
+  + arbitrary-key transparency stay documented residuals. 12/12 tericrypt
+  tests (red-proven), registration-gate tests, threat-model updated.

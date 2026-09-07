@@ -236,6 +236,9 @@ type DeviceRow = (Uuid, Uuid, String, Vec<u8>, Option<Vec<u8>>, DateTime<Utc>);
 
 /// Register an installation for an account with its identity public key
 /// (`Ed25519`, 32 bytes) and agreement public key (`X25519`, 32 bytes).
+/// Degenerate keys (all-zero, unparsable identity) are refused: a planted
+/// zero agreement key would make every envelope to that device readable by
+/// whoever planted it (see `crates/tericrypt`).
 pub async fn register_device(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -243,6 +246,13 @@ pub async fn register_device(
     identity_pubkey: [u8; 32],
     agreement_pubkey: [u8; 32],
 ) -> Result<Device, AuthError> {
+    if !tericrypt::valid_verify_key(&identity_pubkey)
+        || !tericrypt::valid_agreement_key(&agreement_pubkey)
+    {
+        return Err(AuthError::InvalidInput(
+            "device keys are not valid public keys".to_owned(),
+        ));
+    }
     let row: DeviceRow = sqlx::query_as(
         r"INSERT INTO devices (id, user_id, label, identity_pubkey, agreement_pubkey)
            VALUES ($1, $2, $3, $4, $5)
@@ -494,12 +504,42 @@ mod tests {
         .await
         .expect("register user");
 
-        let device = register_device(&pool, user.id, "laptop", [7_u8; 32], [8_u8; 32])
-            .await
-            .expect("register device");
+        let device_keys = tericrypt::IdentityKeypair::generate().expect("device keys");
+        let device = register_device(
+            &pool,
+            user.id,
+            "laptop",
+            device_keys.identity_verify_key(),
+            device_keys.agreement_pubkey(),
+        )
+        .await
+        .expect("register device");
         assert_eq!(device.user_id, user.id);
         assert_eq!(device.label, "laptop");
-        assert_eq!(device.agreement_pubkey, Some(vec![8_u8; 32]));
+        assert_eq!(
+            device.agreement_pubkey,
+            Some(device_keys.agreement_pubkey().to_vec())
+        );
+
+        // Degenerate keys are refused, never stored.
+        assert!(register_device(
+            &pool,
+            user.id,
+            "zero-id",
+            [0_u8; 32],
+            device_keys.agreement_pubkey()
+        )
+        .await
+        .is_err());
+        assert!(register_device(
+            &pool,
+            user.id,
+            "zero-agree",
+            device_keys.identity_verify_key(),
+            [0_u8; 32]
+        )
+        .await
+        .is_err());
 
         pool.close().await;
     }

@@ -867,28 +867,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let token = login["token"].as_str().expect("token issued").to_owned();
 
-        // Device registration behind the bearer → 201; bad pubkey → 400.
-        // Both keys travel as 64-char hex (Ed25519 identity + X25519 agreement).
-        let agree_hex = "cd".repeat(32);
-        let (status, device) = post_json(
-            build_router(state.clone()),
-            "/v1/auth/devices",
-            serde_json::json!({"label": "laptop", "identity_pubkey": "ab".repeat(32), "agreement_pubkey": agree_hex}),
-            Some(&token),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(device["label"], "laptop");
-        assert_eq!(device["agreement_pubkey"], "cd".repeat(32));
-        let (status, _) = post_json(
-            build_router(state.clone()),
-            "/v1/auth/devices",
-            serde_json::json!({"label": "bad", "identity_pubkey": "zz", "agreement_pubkey": agree_hex}),
-            Some(&token),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
         // Logout → 200; the token is dead afterwards; garbage never works.
         let (status, _) = post_json(
             build_router(state.clone()),
@@ -909,6 +887,70 @@ mod tests {
         assert_eq!(body["error"]["code"], "unauthorized");
 
         state.pool.as_ref().unwrap().close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Device keys over
+    /// HTTP: real keys register (201), non-hex is rejected (400), and
+    /// well-formed-but-degenerate keys are refused, never stored (400).
+    #[tokio::test]
+    async fn http_device_key_validation() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: http_device_key_validation (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let handle = format!("devkey{stamp}");
+        post_json(
+            build_router(state.clone()),
+            "/v1/auth/register",
+            serde_json::json!({"handle": handle, "email": format!("{handle}@example.com"), "display_name": "Keys", "password": "pw-keys-1"}),
+            None,
+        )
+        .await;
+        let (_, login) = post_json(
+            build_router(state.clone()),
+            "/v1/auth/login",
+            serde_json::json!({"handle": handle, "password": "pw-keys-1"}),
+            None,
+        )
+        .await;
+        let token = login["token"].as_str().expect("token issued").to_owned();
+
+        let device_keys = tericrypt::IdentityKeypair::generate().expect("device keys");
+        let identity_hex = hex::encode(device_keys.identity_verify_key());
+        let agree_hex = hex::encode(device_keys.agreement_pubkey());
+        let (status, device) = post_json(
+            build_router(state.clone()),
+            "/v1/auth/devices",
+            serde_json::json!({"label": "laptop", "identity_pubkey": identity_hex, "agreement_pubkey": agree_hex.clone()}),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(device["label"], "laptop");
+        assert_eq!(device["agreement_pubkey"], agree_hex);
+        let zeros = "00".repeat(32);
+        for (label, identity) in [("bad", "zz"), ("zero", zeros.as_str())] {
+            let (status, _) = post_json(
+                build_router(state.clone()),
+                "/v1/auth/devices",
+                serde_json::json!({"label": label, "identity_pubkey": identity, "agreement_pubkey": agree_hex}),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "label {label}");
+        }
+        pool.close().await;
     }
 
     /// Plain (non-TLS) client WebSocket used by the gateway tests.
