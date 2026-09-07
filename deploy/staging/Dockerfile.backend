@@ -27,6 +27,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/terichat-server /usr/local/bin/terichat-server
 ENV PORT=3001
+ENV BIND_ADDR=0.0.0.0
 EXPOSE 3001
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=40s \
     CMD curl -fsS http://127.0.0.1:3001/health

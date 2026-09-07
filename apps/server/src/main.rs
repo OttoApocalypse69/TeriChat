@@ -48,7 +48,7 @@ async fn main() {
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
     bootstrap::spawn_workers(pool.as_ref(), &hub);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let addr = SocketAddr::from((config.bind_addr, config.port));
     let listener = bootstrap::bind_listener(addr).await;
     tracing::info!(%addr, "terichat-server listening");
     axum::serve(listener, build_router(AppState { pool, hub }))
