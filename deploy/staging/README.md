@@ -19,8 +19,11 @@ Migrations run automatically on API boot (embedded migrator). Verify:
 
 ```sh
 curl -fsS http://127.0.0.1:3001/health          # direct, on-box
-curl -fsS https://$STAGING_HOST/health          # through Caddy + TLS
+curl -fsS http://$STAGING_HOST/health           # through Caddy (tailnet)
 ```
+
+(Public-TLS mode, when a hostname lands: replace with
+`https://$STAGING_HOST/health` plus the `--resolve` pre-DNS check below.)
 
 Pre-DNS check from anywhere (SNI-correct, bypasses DNS):
 

@@ -1,6 +1,8 @@
-# TeriChat staging edge: TLS + same-origin API proxy + static web UI.
-# {$STAGING_HOST} comes from the compose environment (never committed).
-{$STAGING_HOST} {
+# TeriChat staging edge: same-origin API proxy + static web UI.
+# Tailnet-only mode (no public domain yet): plain HTTP on :80 — the tailnet
+# itself is WireGuard-encrypted, so no ACME needed. When a public hostname
+# lands, change the site address to {$STAGING_HOST} and Caddy provisions TLS.
+http://{$STAGING_HOST} {
     # API + gateway WebSocket (upgrade handled automatically).
     handle /v1/* {
         reverse_proxy api:3001
