@@ -43,6 +43,13 @@ docker compose ps   # api + web healthy; db untouched, pgdata persists
 Restart preserves the database (named `pgdata` volume). To restart only the
 API: `docker compose restart api`.
 
+> Gotcha: the Caddyfile is `COPY`d into the web image (and the server binary
+> into the api image), so config/code changes need
+> `docker compose up --build -d <svc>` — a plain `up -d` only restarts.
+> Tarball deploys make it worse: extraction replaces the file (new inode),
+> orphaning any bind mount. Always `--build` after deploying, then verify the
+> live config (`exec web wget -q -O- http://127.0.0.1:2019/config/...`).
+
 ## Backup (off-machine) + restore drill
 
 Nightly dump to the operator's machine (run from anywhere with SSH):
