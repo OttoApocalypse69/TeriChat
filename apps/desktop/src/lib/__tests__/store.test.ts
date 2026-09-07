@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  avatarInitial,
   ChatStore,
+  conversationLabel,
+  conversationSublabel,
+  dayLabel,
+  formatClockTime,
+  formatListTime,
   gatewayEventInfo,
+  lastActivityAt,
   mergeMessages,
+  senderLabel,
+  sortConversations,
+  truncatePreview,
   upsertConversation,
+  type ChatConversation,
   type ChatMessage,
 } from '../store';
 
@@ -67,6 +78,106 @@ describe('send/receive merge without duplicates', () => {
     expect(store.messages.get('conv-1')?.map((m) => m.id)).toEqual([
       'm1',
       'm2',
+    ]);
+  });
+});
+
+describe('conversation list display helpers', () => {
+  const dm = (over: Partial<ChatConversation> = {}): ChatConversation => ({
+    id: 'c-dm',
+    kind: 'dm',
+    members: ['me', 'peer'],
+    peer_handle: 'bob',
+    peer_display_name: 'Bob',
+    last_seq: 4,
+    last_sent_at: '2026-03-04T10:00:00Z',
+    ...over,
+  });
+
+  it('labels DMs with the peer name, never a UUID', () => {
+    expect(conversationLabel(dm())).toBe('Bob');
+    expect(conversationLabel(dm({ peer_display_name: null }))).toBe('@bob');
+    expect(
+      conversationLabel(dm({ peer_display_name: null, peer_handle: null })),
+    ).toBe('Direct message');
+    expect(conversationSublabel(dm())).toBe('@bob');
+    expect(conversationSublabel(dm({ peer_display_name: null }))).toBeNull();
+  });
+
+  it('derives avatar initials from the peer name first', () => {
+    expect(avatarInitial(dm())).toBe('B');
+    expect(avatarInitial(dm({ peer_display_name: null }))).toBe('B');
+    expect(
+      avatarInitial({ id: 'g', kind: 'group', members: ['a', 'b'] }),
+    ).toBe('G');
+  });
+
+  it('tags senders as you/peer, not raw ids', () => {
+    expect(senderLabel('me', 'me', dm())).toBe('you');
+    expect(senderLabel('me', 'peer', dm())).toBe('Bob');
+    expect(senderLabel('me', 'peer', dm({ peer_display_name: null }))).toBe(
+      '@bob',
+    );
+    expect(senderLabel('me', 'abcdef123456', null)).toBe('abcdef12');
+  });
+
+  it('upsert keeps peer/last-message fields across list reloads', () => {
+    const afterList = upsertConversation([], dm());
+    expect(afterList[0].peer_display_name).toBe('Bob');
+    expect(afterList[0].last_seq).toBe(4);
+    // A later create-DM echo without summary fields must not wipe them.
+    const afterEcho = upsertConversation(afterList, {
+      id: 'c-dm',
+      kind: 'dm',
+      members: ['me', 'peer'],
+    });
+    expect(afterEcho[0].peer_display_name).toBe('Bob');
+    expect(afterEcho).toHaveLength(1);
+  });
+
+  it('buckets day dividers into Today/Yesterday/date', () => {
+    expect(dayLabel('2026-03-04T23:00:00Z', '2026-03-04T12:00:00Z')).toBe(
+      'Today',
+    );
+    expect(dayLabel('2026-03-03T23:00:00Z', '2026-03-04T12:00:00Z')).toBe(
+      'Yesterday',
+    );
+    expect(dayLabel('2026-03-01T00:00:00Z', '2026-03-04T12:00:00Z')).toBe(
+      '2026-03-01',
+    );
+    expect(dayLabel('not-a-date', '2026-03-04T12:00:00Z')).toBe('');
+  });
+
+  it('formats clock times and list timestamps without throwing', () => {
+    expect(formatClockTime(null)).toBe('');
+    expect(formatClockTime('bogus')).toBe('');
+    expect(formatClockTime('2026-03-04T10:05:00Z')).toMatch(/^\d{2}:\d{2}$/);
+    expect(
+      formatListTime('2026-03-04T10:05:00Z', '2026-03-04T12:00:00Z'),
+    ).toMatch(/^\d{2}:\d{2}$/);
+    expect(
+      formatListTime('2026-03-03T10:05:00Z', '2026-03-04T12:00:00Z'),
+    ).toBe('Yesterday');
+    expect(formatListTime(null)).toBe('');
+  });
+
+  it('truncates previews to a single capped line', () => {
+    expect(truncatePreview('  hello   world  ')).toBe('hello world');
+    expect(truncatePreview('x'.repeat(100))).toHaveLength(60);
+    expect(truncatePreview('x'.repeat(100)).endsWith('…')).toBe(true);
+  });
+
+  it('sorts newest activity first with message fallback', () => {
+    const quiet = dm({ id: 'c-quiet', last_sent_at: '2026-01-01T00:00:00Z' });
+    const loud = dm({ id: 'c-loud', last_sent_at: null, last_seq: null });
+    const msgs = new Map([
+      ['c-loud', [msg({ id: 'm9', conversation_id: 'c-loud', seq: 9 })]],
+    ]);
+    expect(lastActivityAt(quiet)).toBe('2026-01-01T00:00:00Z');
+    expect(lastActivityAt(loud, [])).toBeNull();
+    expect(sortConversations([quiet, loud], msgs).map((c) => c.id)).toEqual([
+      'c-loud',
+      'c-quiet',
     ]);
   });
 });

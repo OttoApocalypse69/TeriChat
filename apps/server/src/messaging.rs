@@ -65,6 +65,130 @@ pub struct Conversation {
     pub members: Vec<Uuid>,
 }
 
+/// Conversation list entry for `GET /v1/conversations`.
+///
+/// Everything here is scoped to conversations the caller already belongs
+/// to: the peer identity is resolved server-side from the membership rows
+/// (no handle oracle — a stranger's handle can never be probed through
+/// this endpoint), plus the last message position for previews/sync.
+#[derive(Debug, Clone)]
+pub struct ConversationSummary {
+    /// Conversation id (`UUIDv7`).
+    pub id: Uuid,
+    /// `dm`, `group`, or `channel`.
+    pub kind: String,
+    /// Member account ids.
+    pub members: Vec<Uuid>,
+    /// For a two-member `dm`: the other member's handle. `None` otherwise.
+    pub peer_handle: Option<String>,
+    /// For a two-member `dm`: the other member's display name. `None` otherwise.
+    pub peer_display_name: Option<String>,
+    /// Highest `seq` sent in this conversation, if any message exists.
+    pub last_seq: Option<i64>,
+    /// `sent_at` of that last message, if any message exists.
+    pub last_sent_at: Option<DateTime<Utc>>,
+}
+
+/// One row of the conversation list query: id, kind, last seq, last time.
+type ConversationListRow = (Uuid, String, Option<i64>, Option<DateTime<Utc>>);
+
+/// List the caller's conversations (dm/group/channel rows where the caller
+/// is a participant), newest activity first.
+///
+/// For two-member `dm`s the peer handle + display name are resolved from
+/// the `users` table — the caller is a member, so this reveals nothing new
+/// (no oracle). Groups and channels carry `peer_* = None`; clients label
+/// those from their own membership/workspace state.
+pub async fn list_conversations(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Vec<ConversationSummary>, MessagingError> {
+    // One row per member conversation with its last message position.
+    // Correlated subqueries keep this a single round-trip; Alpha-sized lists
+    // make this cheaper than a join + dedup in code.
+    let rows: Vec<ConversationListRow> = sqlx::query_as(
+        r"SELECT c.id, c.kind,
+            (SELECT MAX(m.seq) FROM messages m WHERE m.conversation_id = c.id),
+            (SELECT MAX(m.sent_at) FROM messages m WHERE m.conversation_id = c.id)
+          FROM conversations c
+          JOIN conversation_participants p ON p.conversation_id = c.id
+          WHERE p.user_id = $1
+          ORDER BY 4 DESC NULLS LAST, c.id ASC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(MessagingError::Database)?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.0).collect();
+    // All member ids for exactly these conversations (still caller-scoped:
+    // every row belongs to a conversation the caller is in).
+    let member_rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT conversation_id, user_id FROM conversation_participants
+         WHERE conversation_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(MessagingError::Database)?;
+    let mut members_by_conv: std::collections::HashMap<Uuid, Vec<Uuid>> =
+        std::collections::HashMap::new();
+    for (conv_id, member_id) in member_rows {
+        members_by_conv.entry(conv_id).or_default().push(member_id);
+    }
+
+    // Peer candidates: the non-caller member of two-member DMs only.
+    let peer_ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|row| row.1 == "dm")
+        .filter_map(|row| {
+            let members = members_by_conv.get(&row.0)?;
+            if members.len() == 2 {
+                members.iter().find(|id| **id != user_id).copied()
+            } else {
+                None
+            }
+        })
+        .collect();
+    let peer_rows: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, handle, display_name FROM users WHERE id = ANY($1)")
+            .bind(&peer_ids)
+            .fetch_all(pool)
+            .await
+            .map_err(MessagingError::Database)?;
+    let peers: std::collections::HashMap<Uuid, (String, String)> = peer_rows
+        .into_iter()
+        .map(|row| (row.0, (row.1, row.2)))
+        .collect();
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let members = members_by_conv.remove(&row.0).unwrap_or_default();
+            let peer = if row.1 == "dm" && members.len() == 2 {
+                members
+                    .iter()
+                    .find(|id| **id != user_id)
+                    .and_then(|id| peers.get(id))
+            } else {
+                None
+            };
+            ConversationSummary {
+                id: row.0,
+                kind: row.1,
+                members,
+                peer_handle: peer.map(|p| p.0.clone()),
+                peer_display_name: peer.map(|p| p.1.clone()),
+                last_seq: row.2,
+                last_sent_at: row.3,
+            }
+        })
+        .collect())
+}
+
 /// Stored message: routing metadata plus opaque bytes. No plaintext here.
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -658,6 +782,113 @@ mod tests {
             .await
             .expect("page");
         assert!(page.is_empty());
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The
+    /// conversation list returns the caller's conversations with the DM
+    /// peer resolved server-side plus the last message position — and a
+    /// stranger sees none of it (no oracle).
+    #[tokio::test]
+    async fn list_conversations_dm_peer_and_last_message() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: list_conversations_dm_peer_and_last_message (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let alice = crate::auth::create_user(
+            &pool,
+            &format!("lstalice{stamp}"),
+            &format!("lstalice{stamp}@example.com"),
+            "List Alice",
+            "pw-list-alice-1",
+        )
+        .await
+        .expect("register alice");
+        let bob = crate::auth::create_user(
+            &pool,
+            &format!("lstbob{stamp}"),
+            &format!("lstbob{stamp}@example.com"),
+            "List Bob",
+            "pw-list-bob-1",
+        )
+        .await
+        .expect("register bob");
+        let mallory = crate::auth::create_user(
+            &pool,
+            &format!("lstmallory{stamp}"),
+            &format!("lstmallory{stamp}@example.com"),
+            "List Mallory",
+            "pw-list-mallory-1",
+        )
+        .await
+        .expect("register mallory");
+
+        // Empty list before any conversation exists.
+        let empty = list_conversations(&pool, alice.id)
+            .await
+            .expect("empty list");
+        assert!(empty.is_empty());
+
+        let dm = find_or_create_dm(&pool, alice.id, bob.id)
+            .await
+            .expect("create dm");
+        let group = create_conversation(&pool, alice.id, "group", &[bob.id])
+            .await
+            .expect("create group");
+
+        // One message in the DM only: the group stays quiet (NULL position).
+        send_message(&pool, alice.id, dm.id, Uuid::now_v7(), b"hey", None)
+            .await
+            .expect("dm send");
+
+        let listed = list_conversations(&pool, alice.id)
+            .await
+            .expect("list alice");
+        assert_eq!(listed.len(), 2, "alice sees dm + group");
+
+        let dm_row = listed.iter().find(|row| row.id == dm.id).expect("dm row");
+        assert_eq!(dm_row.kind, "dm");
+        assert_eq!(dm_row.members.len(), 2);
+        assert_eq!(dm_row.peer_handle.as_deref(), Some(bob.handle.as_str()));
+        assert_eq!(
+            dm_row.peer_display_name.as_deref(),
+            Some(bob.display_name.as_str())
+        );
+        assert_eq!(dm_row.last_seq, Some(1));
+        assert!(dm_row.last_sent_at.is_some());
+
+        let group_row = listed
+            .iter()
+            .find(|row| row.id == group.id)
+            .expect("group row");
+        assert_eq!(group_row.kind, "group");
+        assert_eq!(group_row.peer_handle, None);
+        assert_eq!(group_row.peer_display_name, None);
+        assert_eq!(group_row.last_seq, None);
+        assert_eq!(group_row.last_sent_at, None);
+
+        // Bob sees the same DM with Alice as the peer.
+        let bob_listed = list_conversations(&pool, bob.id).await.expect("list bob");
+        let bob_dm = bob_listed
+            .iter()
+            .find(|row| row.id == dm.id)
+            .expect("bob dm row");
+        assert_eq!(bob_dm.peer_handle.as_deref(), Some(alice.handle.as_str()));
+
+        // Mallory is in neither conversation: sees nothing (no oracle).
+        let mallory_listed = list_conversations(&pool, mallory.id)
+            .await
+            .expect("list mallory");
+        assert!(!mallory_listed.iter().any(|row| row.id == dm.id));
+        assert!(!mallory_listed.iter().any(|row| row.id == group.id));
         pool.close().await;
     }
 }

@@ -43,7 +43,7 @@ export default function LoginView({ api, onAuthed }: Props) {
         onSubmit={submit}
         className="w-80 space-y-3 rounded-lg bg-zinc-900 p-6 shadow"
       >
-        <h1 className="text-lg font-semibold">TeriChat — Alpha 0</h1>
+        <h1 className="text-lg font-semibold">UnknownChat — Alpha 0</h1>
         <div className="flex gap-2 text-sm">
           <button
             type="button"

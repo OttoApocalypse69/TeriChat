@@ -20,6 +20,14 @@ export interface ChatConversation {
   id: string;
   kind: string;
   members: string[];
+  /** Two-member DM peer handle, resolved server-side (null otherwise). */
+  peer_handle?: string | null;
+  /** Two-member DM peer display name, resolved server-side. */
+  peer_display_name?: string | null;
+  /** Highest sent seq, when the server reported message activity. */
+  last_seq?: number | null;
+  /** `sent_at` of that last message, when the server reported activity. */
+  last_sent_at?: string | null;
 }
 
 export function toChatMessage(m: MessageBody): ChatMessage {
@@ -73,9 +81,11 @@ export function upsertConversation(
   list: ChatConversation[],
   conv: ConversationBody | ChatConversation,
 ): ChatConversation[] {
+  // Spread the whole row: summary entries carry peer/last-message fields
+  // that must survive reload-driven list merges, not just id/kind/members.
   const next = list.some((c) => c.id === conv.id)
     ? list.map((c) => (c.id === conv.id ? { ...c, ...conv } : c))
-    : [...list, { id: conv.id, kind: conv.kind, members: conv.members }];
+    : [...list, { ...(conv as ChatConversation) }];
   return [...next].sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -100,6 +110,129 @@ export function gatewayEventInfo(
   const seq = typeof data?.seq === 'number' ? data.seq : undefined;
   if (!conversationId || !messageId || seq === undefined) return null;
   return { conversationId, messageId, seq, eventId: event.id };
+}
+
+/** Primary row title: peer name for DMs, never a raw UUID. */
+export function conversationLabel(conv: ChatConversation): string {
+  if (conv.kind === 'dm') {
+    if (conv.peer_display_name) return conv.peer_display_name;
+    if (conv.peer_handle) return `@${conv.peer_handle}`;
+    return 'Direct message';
+  }
+  if (conv.kind === 'channel') return 'Channel';
+  if (conv.kind === 'group') {
+    return conv.members.length > 0
+      ? `Group · ${conv.members.length} members`
+      : 'Group';
+  }
+  return conv.kind || 'Conversation';
+}
+
+/** Secondary row line for DMs: the handle behind the display name. */
+export function conversationSublabel(conv: ChatConversation): string | null {
+  if (conv.kind === 'dm' && conv.peer_display_name && conv.peer_handle) {
+    return `@${conv.peer_handle}`;
+  }
+  return null;
+}
+
+/** Single avatar letter from the peer name (or kind fallback). */
+export function avatarInitial(conv: ChatConversation): string {
+  const src =
+    conv.peer_display_name?.trim() ||
+    conv.peer_handle?.trim() ||
+    conv.kind.trim();
+  return (src.charAt(0) || '?').toUpperCase();
+}
+
+/** Sender tag under a message: `you` for self, peer name for DMs. */
+export function senderLabel(
+  meId: string,
+  senderId: string,
+  conv: ChatConversation | null,
+): string {
+  if (senderId === meId) return 'you';
+  if (conv?.kind === 'dm') {
+    if (conv.peer_display_name) return conv.peer_display_name;
+    if (conv.peer_handle) return `@${conv.peer_handle}`;
+  }
+  return senderId.slice(0, 8);
+}
+
+/** `YYYY-MM-DD` (UTC) day bucket for divider grouping; '' when invalid. */
+export function dayKey(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+}
+
+/** Divider text: Today / Yesterday / YYYY-MM-DD. */
+export function dayLabel(iso: string, nowIso?: string): string {
+  const key = dayKey(iso);
+  if (!key) return '';
+  const today = dayKey(nowIso ?? new Date().toISOString());
+  if (key === today) return 'Today';
+  const base = new Date(`${today}T00:00:00Z`).getTime();
+  const yesterday = new Date(base - 86_400_000).toISOString().slice(0, 10);
+  if (key === yesterday) return 'Yesterday';
+  return key;
+}
+
+/** Local `HH:MM` clock time from `sent_at`; '' when missing/invalid. */
+export function formatClockTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+/**
+ * List-row timestamp: clock time for today's activity, `Yesterday` for
+ * yesterday's, otherwise the `YYYY-MM-DD` day.
+ */
+export function formatListTime(
+  iso: string | null | undefined,
+  nowIso?: string,
+): string {
+  if (!iso) return '';
+  const label = dayLabel(iso, nowIso);
+  if (label === 'Today') return formatClockTime(iso);
+  return label;
+}
+
+/** Single-line list preview, capped at `max` chars with an ellipsis. */
+export function truncatePreview(text: string, max = 60): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  return `${flat.slice(0, max - 1)}…`;
+}
+
+/**
+ * Last activity for sorting/previews: newest loaded message wins, falling
+ * back to the server-reported `last_sent_at` (covers quiet reloads).
+ */
+export function lastActivityAt(
+  conv: ChatConversation,
+  messages?: ChatMessage[],
+): string | null {
+  if (messages && messages.length > 0) {
+    return messages[messages.length - 1].sent_at;
+  }
+  return conv.last_sent_at ?? null;
+}
+
+/** Newest-activity-first ordering for the conversation list. */
+export function sortConversations(
+  list: ChatConversation[],
+  messagesByConversation?: Map<string, ChatMessage[]>,
+): ChatConversation[] {
+  return [...list].sort(
+    (a, b) =>
+      (lastActivityAt(b, messagesByConversation?.get(b.id)) ?? '').localeCompare(
+        lastActivityAt(a, messagesByConversation?.get(a.id)) ?? '',
+      ) || a.id.localeCompare(b.id),
+  );
 }
 
 export class ChatStore {
