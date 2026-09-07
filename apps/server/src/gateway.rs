@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::messaging::{self, OutboxEntry};
-use crate::{workspaces, AppError, AppState};
+use crate::{errors::AppError, state::AppState, workspaces};
 
 /// `GET /v1/gateway?token=...` query.
 #[derive(Debug, Deserialize)]
