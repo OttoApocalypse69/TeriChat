@@ -12,15 +12,16 @@ mod config;
 mod gateway;
 mod messaging;
 mod password;
+mod workspaces;
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{
-    extract::{FromRequestParts, Query, State},
+    extract::{FromRequestParts, Path, Query, State},
     http::{header, request::Parts, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -52,6 +53,11 @@ enum AppError {
     Unauthorized,
     /// Caller is not a conversation member (also covers missing rows).
     Forbidden,
+    /// Caller is not a workspace member or lacks workspace permission.
+    /// Carries a safe message (never workspace existence details).
+    Denied(String),
+    /// Named object (e.g. invite) is unknown or unusable.
+    NotFound(String),
     /// A database-backed route called without a configured database.
     NoDatabase,
     /// Readiness dependency unavailable.
@@ -74,6 +80,8 @@ impl IntoResponse for AppError {
                 "forbidden",
                 "not a conversation member".to_owned(),
             ),
+            Self::Denied(message) => (StatusCode::FORBIDDEN, "forbidden", message),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
             Self::NoDatabase => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "no_database",
@@ -111,6 +119,30 @@ impl From<auth::AuthError> for AppError {
     }
 }
 
+impl From<workspaces::WorkspacesError> for AppError {
+    fn from(err: workspaces::WorkspacesError) -> Self {
+        match err {
+            // No existence oracle: outsiders get a workspace-shaped wall.
+            workspaces::WorkspacesError::NotMember => {
+                Self::Denied("not a workspace member".to_owned())
+            }
+            workspaces::WorkspacesError::Forbidden => {
+                Self::Denied("insufficient workspace permission".to_owned())
+            }
+            workspaces::WorkspacesError::Banned => {
+                Self::Denied("banned from this workspace".to_owned())
+            }
+            workspaces::WorkspacesError::InviteRejected => {
+                Self::NotFound("invite is invalid, expired, or fully used".to_owned())
+            }
+            workspaces::WorkspacesError::BadInput(detail) => Self::BadRequest(detail),
+            workspaces::WorkspacesError::Database(_) => {
+                tracing::error!("workspace backend failure: {err}");
+                Self::Internal
+            }
+        }
+    }
+}
 impl From<messaging::MessagingError> for AppError {
     fn from(err: messaging::MessagingError) -> Self {
         match err {
@@ -311,6 +343,185 @@ struct HistoryParams {
     limit: Option<i64>,
 }
 
+/// Workspace view with the caller's role.
+#[derive(Debug, Serialize)]
+struct WorkspaceBody {
+    id: Uuid,
+    name: String,
+    owner_id: Uuid,
+    my_role: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+/// `POST /v1/workspaces` / `PATCH /v1/workspaces/{id}` request.
+#[derive(Debug, Deserialize)]
+struct WorkspaceNameBody {
+    name: String,
+}
+
+/// `POST /v1/workspaces/{id}/members` request.
+#[derive(Debug, Deserialize)]
+struct AddMemberBody {
+    user_handle: String,
+    role: String,
+}
+
+/// `PATCH /v1/workspaces/{id}/members/{user_id}` request.
+#[derive(Debug, Deserialize)]
+struct SetRoleBody {
+    role: String,
+}
+
+/// `POST /v1/workspaces/{id}/bans` request.
+#[derive(Debug, Deserialize)]
+struct BanBody {
+    user_id: Uuid,
+    reason: Option<String>,
+}
+
+/// Channel view with the backing conversation for the message path.
+#[derive(Debug, Serialize)]
+struct ChannelBody {
+    id: Uuid,
+    workspace_id: Uuid,
+    conversation_id: Uuid,
+    name: String,
+    kind: String,
+    created_by: Uuid,
+    created_at: DateTime<Utc>,
+}
+
+impl From<workspaces::Channel> for ChannelBody {
+    fn from(channel: workspaces::Channel) -> Self {
+        Self {
+            id: channel.id,
+            workspace_id: channel.workspace_id,
+            conversation_id: channel.conversation_id,
+            name: channel.name,
+            kind: channel.kind,
+            created_by: channel.created_by,
+            created_at: channel.created_at,
+        }
+    }
+}
+
+/// `POST /v1/workspaces/{id}/channels` / `PATCH /v1/channels/{id}` request.
+#[derive(Debug, Deserialize)]
+struct ChannelNameBody {
+    name: String,
+}
+
+/// Channel override view.
+#[derive(Debug, Serialize)]
+struct OverrideBody {
+    channel_id: Uuid,
+    target_kind: String,
+    target: String,
+    permission: String,
+    allowed: bool,
+}
+
+impl From<workspaces::ChannelOverride> for OverrideBody {
+    fn from(override_row: workspaces::ChannelOverride) -> Self {
+        Self {
+            channel_id: override_row.channel_id,
+            target_kind: override_row.target_kind,
+            target: override_row.target,
+            permission: override_row.permission,
+            allowed: override_row.allowed,
+        }
+    }
+}
+
+/// `POST /v1/channels/{id}/overrides` request.
+#[derive(Debug, Deserialize)]
+struct OverrideSetBody {
+    target_kind: String,
+    target: String,
+    permission: String,
+    allowed: bool,
+}
+
+/// Invite view. The code is shown here at creation and listing time only —
+/// treat it as a bearer credential.
+#[derive(Debug, Serialize)]
+struct InviteBody {
+    id: Uuid,
+    workspace_id: Uuid,
+    code: String,
+    created_by: Uuid,
+    initial_role: String,
+    expires_at: Option<DateTime<Utc>>,
+    max_uses: Option<i32>,
+    uses: i32,
+    revoked: bool,
+    created_at: DateTime<Utc>,
+}
+
+impl From<workspaces::Invite> for InviteBody {
+    fn from(invite: workspaces::Invite) -> Self {
+        Self {
+            id: invite.id,
+            workspace_id: invite.workspace_id,
+            code: invite.code,
+            created_by: invite.created_by,
+            initial_role: invite.initial_role,
+            expires_at: invite.expires_at,
+            max_uses: invite.max_uses,
+            uses: invite.uses,
+            revoked: invite.revoked,
+            created_at: invite.created_at,
+        }
+    }
+}
+
+/// `POST /v1/workspaces/{id}/invites` request.
+#[derive(Debug, Deserialize)]
+struct CreateInviteBody {
+    initial_role: Option<String>,
+    expires_in_secs: Option<i64>,
+    max_uses: Option<i32>,
+}
+
+/// `POST /v1/workspaces/join` request.
+#[derive(Debug, Deserialize)]
+struct JoinBody {
+    code: String,
+}
+
+/// Audit entry view. Actions and ids only, never message plaintext.
+#[derive(Debug, Serialize)]
+struct AuditBody {
+    id: Uuid,
+    workspace_id: Uuid,
+    actor_id: Uuid,
+    action: String,
+    target_id: Option<Uuid>,
+    detail: serde_json::Value,
+    created_at: DateTime<Utc>,
+}
+
+impl From<workspaces::AuditEntry> for AuditBody {
+    fn from(entry: workspaces::AuditEntry) -> Self {
+        Self {
+            id: entry.id,
+            workspace_id: entry.workspace_id,
+            actor_id: entry.actor_id,
+            action: entry.action,
+            target_id: entry.target_id,
+            detail: entry.detail,
+            created_at: entry.created_at,
+        }
+    }
+}
+
+/// `GET /v1/workspaces/{id}/audit` query.
+#[derive(Debug, Deserialize)]
+struct AuditParams {
+    limit: Option<i64>,
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -453,6 +664,18 @@ async fn send_message(
     Json(body): Json<SendBody>,
 ) -> Result<(StatusCode, Json<MessageBody>), AppError> {
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Channel conversations are workspace-gated BEFORE transport decoding, so
+    // strangers get the membership wall (403) rather than a decode error
+    // (400): membership first, then the race-heal, then the SEND write gate.
+    if let Some(channel) = workspaces::channel_by_conversation(pool, body.conversation_id).await? {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
+            .await?;
+        if !workspaces::can_send(pool, channel.id, bearer.user_id()).await? {
+            return Err(AppError::Denied("not permitted in this channel".to_owned()));
+        }
+    }
     // Envelope bytes are opaque: decoded from transport encoding straight
     // into storage, never inspected or logged.
     let ciphertext = STANDARD
@@ -488,6 +711,16 @@ async fn message_history(
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<Vec<MessageBody>>, AppError> {
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Channel read gate: workspace members (guests included) may read. The
+    // SEND grant is a *write* gate and does not apply to history — guests
+    // are read-only, not blind.
+    if let Some(channel) = workspaces::channel_by_conversation(pool, params.conversation_id).await?
+    {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
+            .await?;
+    }
     let messages = messaging::message_history(
         pool,
         bearer.user_id(),
@@ -502,6 +735,327 @@ async fn message_history(
             .map(|message| MessageBody::new(message, false))
             .collect(),
     ))
+}
+
+fn workspace_body(workspace: workspaces::Workspace, role: workspaces::Role) -> WorkspaceBody {
+    WorkspaceBody {
+        id: workspace.id,
+        name: workspace.name,
+        owner_id: workspace.owner_id,
+        my_role: role.as_str().to_owned(),
+        created_at: workspace.created_at,
+        updated_at: workspace.updated_at,
+    }
+}
+
+async fn create_workspace(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Json(body): Json<WorkspaceNameBody>,
+) -> Result<(StatusCode, Json<WorkspaceBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let workspace = workspaces::create_workspace(pool, bearer.user_id(), &body.name).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(workspace_body(workspace, workspaces::Role::Owner)),
+    ))
+}
+
+async fn list_workspaces(
+    State(state): State<AppState>,
+    bearer: Bearer,
+) -> Result<Json<Vec<WorkspaceBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let rows = workspaces::list_workspaces(pool, bearer.user_id()).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(workspace, role)| workspace_body(workspace, role))
+            .collect(),
+    ))
+}
+
+async fn get_workspace(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<WorkspaceBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let (workspace, role) = workspaces::get_workspace(pool, bearer.user_id(), workspace_id).await?;
+    Ok(Json(workspace_body(workspace, role)))
+}
+
+async fn rename_workspace(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<WorkspaceNameBody>,
+) -> Result<Json<WorkspaceBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let workspace =
+        workspaces::rename_workspace(pool, bearer.user_id(), workspace_id, &body.name).await?;
+    let role = workspaces::role_of(pool, workspace_id, bearer.user_id())
+        .await?
+        .ok_or(AppError::Forbidden)?;
+    Ok(Json(workspace_body(workspace, role)))
+}
+
+async fn add_workspace_member(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<AddMemberBody>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let role = workspaces::parse_role(&body.role)?;
+    // Membership gate BEFORE handle resolution: resolving first would let any
+    // authenticated stranger distinguish registered handles (400) from
+    // unregistered ones only after the fact — resolve only for managers.
+    workspaces::require(
+        pool,
+        workspace_id,
+        bearer.user_id(),
+        workspaces::Permission::ManageMembers,
+    )
+    .await?;
+    let target = auth::user_id_by_handle(pool, &body.user_handle).await?;
+    workspaces::add_member(pool, bearer.user_id(), workspace_id, target, role).await?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn set_workspace_role(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path((workspace_id, user_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SetRoleBody>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let role = workspaces::parse_role(&body.role)?;
+    workspaces::set_role(pool, bearer.user_id(), workspace_id, user_id, role).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn kick_workspace_member(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path((workspace_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    workspaces::remove_member(pool, bearer.user_id(), workspace_id, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn leave_workspace(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    workspaces::leave(pool, bearer.user_id(), workspace_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ban_workspace_member(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<BanBody>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    workspaces::ban_member(
+        pool,
+        bearer.user_id(),
+        workspace_id,
+        body.user_id,
+        body.reason.as_deref().unwrap_or(""),
+    )
+    .await?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn unban_workspace_member(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path((workspace_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    workspaces::unban(pool, bearer.user_id(), workspace_id, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_channel(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<ChannelNameBody>,
+) -> Result<(StatusCode, Json<ChannelBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let channel =
+        workspaces::create_channel(pool, bearer.user_id(), workspace_id, &body.name).await?;
+    Ok((StatusCode::CREATED, Json(ChannelBody::from(channel))))
+}
+
+async fn list_channels(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<Vec<ChannelBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let channels = workspaces::list_channels(pool, bearer.user_id(), workspace_id).await?;
+    Ok(Json(channels.into_iter().map(ChannelBody::from).collect()))
+}
+
+async fn get_channel(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(channel_id): Path<Uuid>,
+) -> Result<Json<ChannelBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let channel = workspaces::get_channel(pool, bearer.user_id(), channel_id).await?;
+    Ok(Json(ChannelBody::from(channel)))
+}
+
+async fn rename_channel(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(channel_id): Path<Uuid>,
+    Json(body): Json<ChannelNameBody>,
+) -> Result<Json<ChannelBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let channel =
+        workspaces::rename_channel(pool, bearer.user_id(), channel_id, &body.name).await?;
+    Ok(Json(ChannelBody::from(channel)))
+}
+
+async fn delete_channel(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(channel_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    workspaces::delete_channel(pool, bearer.user_id(), channel_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_channel_override(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(channel_id): Path<Uuid>,
+    Json(body): Json<OverrideSetBody>,
+) -> Result<(StatusCode, Json<OverrideBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let permission = workspaces::parse_permission(&body.permission)?;
+    let override_row = workspaces::set_override(
+        pool,
+        bearer.user_id(),
+        channel_id,
+        &body.target_kind,
+        &body.target,
+        permission,
+        body.allowed,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(OverrideBody::from(override_row))))
+}
+
+async fn list_channel_overrides(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(channel_id): Path<Uuid>,
+) -> Result<Json<Vec<OverrideBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let rows = workspaces::list_overrides(pool, bearer.user_id(), channel_id).await?;
+    Ok(Json(rows.into_iter().map(OverrideBody::from).collect()))
+}
+
+async fn delete_channel_override(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path((channel_id, target_kind, target, permission)): Path<(Uuid, String, String, String)>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let permission = workspaces::parse_permission(&permission)?;
+    workspaces::delete_override(
+        pool,
+        bearer.user_id(),
+        channel_id,
+        &target_kind,
+        &target,
+        permission,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_invite(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<CreateInviteBody>,
+) -> Result<(StatusCode, Json<InviteBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let initial = body.initial_role.as_deref().unwrap_or("member");
+    let role = workspaces::parse_role(initial)?;
+    // The invite code is returned once here (and on manager listing); the
+    // request log must never carry it — only the response does.
+    let invite = workspaces::create_invite(
+        pool,
+        bearer.user_id(),
+        workspace_id,
+        role,
+        body.expires_in_secs,
+        body.max_uses,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(InviteBody::from(invite))))
+}
+
+async fn list_invites(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<Vec<InviteBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let invites = workspaces::list_invites(pool, bearer.user_id(), workspace_id).await?;
+    Ok(Json(invites.into_iter().map(InviteBody::from).collect()))
+}
+
+async fn revoke_invite(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path((workspace_id, invite_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    workspaces::revoke_invite(pool, bearer.user_id(), workspace_id, invite_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn join_workspace(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Json(body): Json<JoinBody>,
+) -> Result<(StatusCode, Json<WorkspaceBody>), AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // The invite code arrives in the request body (never a URL) so it stays
+    // out of access logs; it is never logged or echoed back here.
+    let (workspace, role) = workspaces::join_via_invite(pool, bearer.user_id(), &body.code).await?;
+    Ok((StatusCode::OK, Json(workspace_body(workspace, role))))
+}
+
+async fn list_audit(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(workspace_id): Path<Uuid>,
+    Query(params): Query<AuditParams>,
+) -> Result<Json<Vec<AuditBody>>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    let entries = workspaces::list_audit(
+        pool,
+        bearer.user_id(),
+        workspace_id,
+        params.limit.unwrap_or(50),
+    )
+    .await?;
+    Ok(Json(entries.into_iter().map(AuditBody::from).collect()))
 }
 
 /// Authenticated request identity plus the raw bearer token, available only
@@ -582,6 +1136,53 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/conversations/dm", post(create_dm))
         .route("/v1/conversations", post(create_group))
         .route("/v1/messages", post(send_message).get(message_history))
+        .route(
+            "/v1/workspaces",
+            post(create_workspace).get(list_workspaces),
+        )
+        .route("/v1/workspaces/join", post(join_workspace))
+        .route(
+            "/v1/workspaces/{id}",
+            get(get_workspace).patch(rename_workspace),
+        )
+        .route("/v1/workspaces/{id}/members", post(add_workspace_member))
+        .route("/v1/workspaces/{id}/leave", post(leave_workspace))
+        .route(
+            "/v1/workspaces/{id}/members/{user_id}",
+            patch(set_workspace_role).delete(kick_workspace_member),
+        )
+        .route("/v1/workspaces/{id}/bans", post(ban_workspace_member))
+        .route(
+            "/v1/workspaces/{id}/bans/{user_id}",
+            delete(unban_workspace_member),
+        )
+        .route(
+            "/v1/workspaces/{id}/channels",
+            post(create_channel).get(list_channels),
+        )
+        .route(
+            "/v1/channels/{id}",
+            get(get_channel)
+                .patch(rename_channel)
+                .delete(delete_channel),
+        )
+        .route(
+            "/v1/channels/{id}/overrides",
+            post(set_channel_override).get(list_channel_overrides),
+        )
+        .route(
+            "/v1/channels/{id}/overrides/{target_kind}/{target}/{permission}",
+            delete(delete_channel_override),
+        )
+        .route(
+            "/v1/workspaces/{id}/invites",
+            post(create_invite).get(list_invites),
+        )
+        .route(
+            "/v1/workspaces/{id}/invites/{invite_id}",
+            delete(revoke_invite),
+        )
+        .route("/v1/workspaces/{id}/audit", get(list_audit))
         .route("/v1/gateway", get(gateway::gateway_handler))
         .with_state(state)
 }
@@ -975,6 +1576,20 @@ mod tests {
     use futures_util::{SinkExt as _, StreamExt as _};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    /// The outbox table is global to the test database and each realtime test
+    /// spawns a worker that claims rows for its own hub: running two such
+    /// tests concurrently lets the workers steal each other's live events.
+    /// This guard serializes them; replay-only tests are unaffected.
+    static WS_SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    /// Hold while a realtime test owns the shared outbox worker pattern.
+    async fn ws_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        WS_SERIAL
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     /// Send a JSON frame on a gateway test socket.
     async fn ws_send(ws: &mut WsStream, value: serde_json::Value) {
         ws.send(WsMessage::Text(value.to_string().into()))
@@ -1043,6 +1658,7 @@ mod tests {
     /// this test.
     #[tokio::test]
     async fn two_clients_exchange_and_resume() {
+        let _serial = ws_guard().await;
         let Some(url) = std::env::var("DATABASE_URL").ok() else {
             eprintln!("SKIPPED: two_clients_exchange_and_resume (DATABASE_URL unset)");
             return;
@@ -1119,6 +1735,697 @@ mod tests {
             quiet.is_err(),
             "expected no duplicate delivery, got {quiet:?}"
         );
+
+        server.abort();
+        pool.close().await;
+    }
+
+    async fn authed_json(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        token: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let body = body.map_or_else(axum::body::Body::empty, |json| {
+            axum::body::Body::from(json.to_string())
+        });
+        let response = app.oneshot(builder.body(body).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    /// Same as `authed_json` but for endpoints with empty bodies (`204 No
+    /// Content`, or `201` without JSON): returns only the status.
+    async fn authed_status(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        token: &str,
+    ) -> StatusCode {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let body = body.map_or_else(axum::body::Body::empty, |json| {
+            axum::body::Body::from(json.to_string())
+        });
+        app.oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Register three HTTP users; returns `(founder, member, stranger)` tokens.
+    /// `prefix` keeps parallel tests on distinct handles.
+    async fn http_users(
+        pool: &sqlx::PgPool,
+        stamp: &str,
+        prefix: &str,
+    ) -> (String, String, String) {
+        for (tag, pw) in [
+            ("phil", "pw-http-1"),
+            ("bob", "pw-http-2"),
+            ("mall", "pw-http-3"),
+        ] {
+            auth::create_user(
+                pool,
+                &format!("{prefix}{tag}{stamp}"),
+                &format!("{prefix}{tag}{stamp}@example.com"),
+                tag,
+                pw,
+            )
+            .await
+            .expect("register user");
+        }
+        let login = |handle: String, pw: &'static str| {
+            let pool = pool.clone();
+            async move { auth::login(&pool, &handle, pw).await.expect("login").token }
+        };
+        // Sequential awaits: no lifetime escapes the closure call.
+        let phil = login(format!("{prefix}phil{stamp}"), "pw-http-1").await;
+        let bob = login(format!("{prefix}bob{stamp}"), "pw-http-2").await;
+        let mallory = login(format!("{prefix}mall{stamp}"), "pw-http-3").await;
+        (phil, bob, mallory)
+    }
+
+    /// Create a workspace plus its `#general` channel through the routes.
+    /// Returns `(workspace_id, conversation_id)`.
+    async fn http_space(state: &AppState, token: &str) -> (String, String) {
+        let (status, workspace) = post_json(
+            build_router(state.clone()),
+            "/v1/workspaces",
+            serde_json::json!({ "name": "HTTP Space" }),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(workspace["my_role"], "owner");
+        let workspace_id = workspace["id"].as_str().expect("workspace id").to_owned();
+        let (status, channel) = post_json(
+            build_router(state.clone()),
+            &format!("/v1/workspaces/{workspace_id}/channels"),
+            serde_json::json!({ "name": "general" }),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let conversation_id = channel["conversation_id"]
+            .as_str()
+            .expect("convo id")
+            .to_owned();
+        (workspace_id, conversation_id)
+    }
+
+    /// Requires a live database; skips honestly without one. Milestone E happy
+    /// path over real routes: workspace → channel → invite → join → channel
+    /// send → history.
+    #[tokio::test]
+    async fn workspace_http_channel_send() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: workspace_http_channel_send (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = || AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (phil, bob, _) = http_users(&pool, &stamp, "ha").await;
+        let (workspace_id, conversation_id) = http_space(&state(), &phil).await;
+
+        // Single-use invite admits Bob exactly once.
+        let (status, invite) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/invites"),
+            serde_json::json!({ "max_uses": 1 }),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = invite["code"].as_str().expect("invite code").to_owned();
+
+        let (status, joined) = post_json(
+            build_router(state()),
+            "/v1/workspaces/join",
+            serde_json::json!({ "code": code }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(joined["my_role"], "member");
+
+        // Bob sends through the channel's backing conversation; both read it.
+        let (status, sent) = post_json(
+            build_router(state()),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": STANDARD.encode(b"channel-bro"),
+            }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(sent["seq"], 1);
+
+        let (status, history) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/messages?conversation_id={conversation_id}"),
+            None,
+            &phil,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history.as_array().expect("history").len(), 1);
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The hostile side
+    /// over real routes: strangers hit the same wall everywhere, spent codes
+    /// stay silent, and bans go dark immediately.
+    #[tokio::test]
+    async fn workspace_http_outsider_ban_audit() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: workspace_http_outsider_ban_audit (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = || AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (phil, bob, mallory) = http_users(&pool, &stamp, "hb").await;
+        let (workspace_id, conversation_id) = http_space(&state(), &phil).await;
+
+        // Open invite admits Bob; Mallory stays a stranger.
+        let (status, invite) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/invites"),
+            serde_json::json!({}),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = invite["code"].as_str().expect("invite code").to_owned();
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/workspaces/join",
+            serde_json::json!({ "code": code }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/workspaces/{workspace_id}"),
+            None,
+            &mallory,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": STANDARD.encode(b"mallory-hi"),
+            }),
+            Some(&mallory),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Founder bans Bob: his history goes dark, his sends die.
+        let bob_id = auth::user_id_by_handle(&pool, &format!("hbbob{stamp}"))
+            .await
+            .expect("bob id");
+        let status = authed_status(
+            build_router(state()),
+            "POST",
+            &format!("/v1/workspaces/{workspace_id}/bans"),
+            Some(serde_json::json!({ "user_id": bob_id, "reason": "spam" })),
+            &phil,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/messages?conversation_id={conversation_id}"),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Audit is founder-visible and carries no envelope bytes.
+        let (status, audit) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/workspaces/{workspace_id}/audit?limit=50"),
+            None,
+            &phil,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = audit.as_array().expect("audit entries");
+        assert!(entries.len() >= 5, "audit has {} entries", entries.len());
+        let actions: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["action"].as_str())
+            .collect();
+        assert!(actions.contains(&"member.banned"));
+        assert!(actions.contains(&"invite.accepted"));
+        for entry in entries {
+            assert!(!entry.to_string().contains("ciphertext"));
+        }
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. No oracles, no
+    /// precedence leaks: strangers get the same workspace-shaped 403 for
+    /// unknown handles, unknown workspaces, and undecodable sends.
+    #[tokio::test]
+    async fn workspace_member_oracle() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: workspace_member_oracle (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = || AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (phil, bob, _) = http_users(&pool, &stamp, "hd").await;
+        let (workspace_id, conversation_id) = http_space(&state(), &phil).await;
+
+        // Unknown handle as a stranger: 403, not the 400 members get.
+        let (status, body) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/members"),
+            serde_json::json!({"user_handle": "nobody-here", "role": "member"}),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["message"], "not a workspace member");
+
+        // Unknown workspace id: identical wall, no existence signal.
+        let (status, _) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/workspaces/{}", Uuid::now_v7()),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Kicked ex-member knows the conversation id: garbage bytes still
+        // meet the membership wall first (403), not a decode error (400).
+        let (status, invite) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/invites"),
+            serde_json::json!({}),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = invite["code"].as_str().expect("code").to_owned();
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/workspaces/join",
+            serde_json::json!({ "code": code }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bob_id = auth::user_id_by_handle(&pool, &format!("hdbob{stamp}"))
+            .await
+            .expect("bob id");
+        let status = authed_status(
+            build_router(state()),
+            "POST",
+            &format!("/v1/workspaces/{workspace_id}/bans"),
+            Some(serde_json::json!({ "user_id": bob_id })),
+            &phil,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": "!!!not-base64!!!",
+            }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. Guests are
+    /// read-only, not blind: history reads succeed, sends are refused, and a
+    /// stranded seat heals on the next read instead of locking them out.
+    #[tokio::test]
+    async fn workspace_guest_reads_but_not_writes() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: workspace_guest_reads_but_not_writes (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = || AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (phil, bob, _) = http_users(&pool, &stamp, "he").await;
+        let (workspace_id, conversation_id) = http_space(&state(), &phil).await;
+
+        let (status, invite) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/invites"),
+            serde_json::json!({ "initial_role": "guest" }),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = invite["code"].as_str().expect("code").to_owned();
+        let (status, joined) = post_json(
+            build_router(state()),
+            "/v1/workspaces/join",
+            serde_json::json!({ "code": code }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(joined["my_role"], "guest");
+
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": STANDARD.encode(b"owner-says-hi"),
+            }),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Guest reads fine…
+        let (status, history) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/messages?conversation_id={conversation_id}"),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history.as_array().expect("history").len(), 1);
+        // …but cannot write.
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/messages",
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "client_msg_id": Uuid::now_v7(),
+                "ciphertext_b64": STANDARD.encode(b"guest-tries"),
+            }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Strand the guest's seat; the next read heals and succeeds.
+        let bob_id = auth::user_id_by_handle(&pool, &format!("hebob{stamp}"))
+            .await
+            .expect("bob id");
+        sqlx::query(
+            "DELETE FROM conversation_participants
+             WHERE conversation_id = $1 AND user_id = $2",
+        )
+        .bind(conversation_id.parse::<Uuid>().expect("convo uuid"))
+        .bind(bob_id)
+        .execute(&pool)
+        .await
+        .expect("strand guest");
+        let (status, history) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/messages?conversation_id={conversation_id}"),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history.as_array().expect("history").len(), 1);
+        pool.close().await;
+    }
+
+    /// Requires a live database; skips honestly without one. The leave path:
+    /// a member exits voluntarily (204, then 403 everywhere); the last owner
+    /// is stopped with a 400.
+    #[tokio::test]
+    async fn workspace_leave_route() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: workspace_leave_route (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+        let state = || AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (phil, bob, _) = http_users(&pool, &stamp, "hf").await;
+        let (workspace_id, _) = http_space(&state(), &phil).await;
+
+        let (status, invite) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/invites"),
+            serde_json::json!({}),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = invite["code"].as_str().expect("code").to_owned();
+        let (status, _) = post_json(
+            build_router(state()),
+            "/v1/workspaces/join",
+            serde_json::json!({ "code": code }),
+            Some(&bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let status = authed_status(
+            build_router(state()),
+            "POST",
+            &format!("/v1/workspaces/{workspace_id}/leave"),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = authed_json(
+            build_router(state()),
+            "GET",
+            &format!("/v1/workspaces/{workspace_id}"),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = post_json(
+            build_router(state()),
+            &format!("/v1/workspaces/{workspace_id}/leave"),
+            serde_json::json!({}),
+            Some(&phil),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        pool.close().await;
+    }
+
+    /// Register one gateway user and return `(token, id)`.
+    async fn gw_login(pool: &sqlx::PgPool, tag: &str, stamp: &str) -> (String, Uuid) {
+        let user = auth::create_user(
+            pool,
+            &format!("{tag}{stamp}"),
+            &format!("{tag}{stamp}@example.com"),
+            tag,
+            "pw-gw-1",
+        )
+        .await
+        .expect("register user");
+        let token = auth::login(pool, &format!("{tag}{stamp}"), "pw-gw-1")
+            .await
+            .expect("login")
+            .token;
+        (token, user.id)
+    }
+
+    /// Requires a live database; skips honestly without one. Gateway parity
+    /// with HTTP: a guest replays channel events it may read, and a banned
+    /// member's open connection goes quiet — kicks take effect live, without
+    /// a reconnect.
+    #[tokio::test]
+    async fn gateway_channel_guest_and_ban() {
+        let _serial = ws_guard().await;
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: gateway_channel_guest_and_ban (DATABASE_URL unset)");
+            return;
+        };
+        let pool = db_pool(&url).await.expect("connect test database");
+        MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let (phil_token, phil_id) = gw_login(&pool, "gwphil", &stamp).await;
+        let (guest_token, guest_id) = gw_login(&pool, "gwguest", &stamp).await;
+        let (victim_token, victim_id) = gw_login(&pool, "gwvic", &stamp).await;
+
+        let workspace = workspaces::create_workspace(&pool, phil_id, "GW Space")
+            .await
+            .expect("create workspace");
+        workspaces::add_member(
+            &pool,
+            phil_id,
+            workspace.id,
+            guest_id,
+            workspaces::Role::Guest,
+        )
+        .await
+        .expect("add guest");
+        workspaces::add_member(
+            &pool,
+            phil_id,
+            workspace.id,
+            victim_id,
+            workspaces::Role::Member,
+        )
+        .await
+        .expect("add victim");
+        let channel = workspaces::create_channel(&pool, phil_id, workspace.id, "general")
+            .await
+            .expect("create channel");
+
+        let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: hub.clone(),
+        };
+        let http_state = AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(HUB_CAPACITY).0,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state))
+                .await
+                .expect("serve test app");
+        });
+        let _worker = tokio::spawn(messaging::outbox_worker(pool.clone(), hub));
+
+        http_send(
+            &http_state,
+            &phil_token,
+            channel.conversation_id,
+            &STANDARD.encode(b"one"),
+        )
+        .await;
+        // Guest replays what it may read; victim replays as a member.
+        let mut guest_ws = connect_identified(&addr, &guest_token, None).await;
+        assert_eq!(
+            ws_next(&mut guest_ws).await["event"]["payload"]["data"]["seq"],
+            1
+        );
+        let mut victim_ws = connect_identified(&addr, &victim_token, None).await;
+        assert_eq!(
+            ws_next(&mut victim_ws).await["event"]["payload"]["data"]["seq"],
+            1
+        );
+
+        // Ban lands live: the victim's open connection goes quiet while the
+        // guest's keeps streaming.
+        workspaces::ban_member(&pool, phil_id, workspace.id, victim_id, "spam")
+            .await
+            .expect("ban victim");
+        http_send(
+            &http_state,
+            &phil_token,
+            channel.conversation_id,
+            &STANDARD.encode(b"two"),
+        )
+        .await;
+        expect_event(&mut guest_ws, 2).await;
+        let quiet =
+            tokio::time::timeout(std::time::Duration::from_secs(3), ws_next(&mut victim_ws)).await;
+        assert!(quiet.is_err(), "banned connection must go quiet");
 
         server.abort();
         pool.close().await;

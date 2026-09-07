@@ -99,3 +99,11 @@ access yet, no spending decisions yet (boxes 3, 4 untouched).
   endpoint carries both keys), sealed-DM E2E test (server stays blind);
   27+8 tests, zero skips; fresh-DB boot verified. Gaps documented: no FS,
   no deniability/groups/transparency yet — MLS follow-up.
+- [x] Milestone E workspaces — `workspaces.rs` (roles, central permission
+  evaluator, channels backed by `channel` conversations, invites, overrides,
+  kick/ban/leave, audit), migrations 0004–0005, 18 routes, workspace gates on
+  send/history/gateway-live; 47+8 tests, zero skips; fresh-DB boot + live curl
+  smoke verified. AuthZ review (2 S1s: gateway bypass, handled; 7 S2s + nits,
+  all fixed with regression tests — guest-read semantics, leave path, locked
+  management txns + owner trigger, race-heal backfill, override cleanup,
+  invite TTL bound, oracle/order/normalization hygiene).

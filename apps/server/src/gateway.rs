@@ -8,8 +8,9 @@
 //! Server → client: `{"op":"ready",...}`, `{"op":"event","event":{...}}`,
 //! `{"op":"heartbeat_ack","seq":n}`, `{"op":"error","code":...}`.
 //!
-//! Auth rides the `?token=` query parameter (bearer). Membership is snapshotted
-//! at `identify`: joining a conversation mid-connection needs a reconnect.
+//! Auth rides the `?token=` query parameter (bearer). Authorization is
+//! evaluated live per event (not snapshotted): a kick/ban mid-connection
+//! stops delivery without a reconnect, and joining mid-connection starts it.
 //! Delivery is at-least-once — clients dedup by `event_id` and resume with
 //! the last one they processed. Heartbeats are currently echoed without
 //! server-side timeout enforcement (documented gap, not a silent guarantee).
@@ -28,7 +29,7 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::messaging::{self, OutboxEntry};
-use crate::{AppError, AppState};
+use crate::{workspaces, AppError, AppState};
 
 /// `GET /v1/gateway?token=...` query.
 #[derive(Debug, Deserialize)]
@@ -144,16 +145,11 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
         }
     };
 
-    // Snapshot membership, then replay-then-subscribe without gaps: replay
-    // covers everything after `resume_after`, and the live loop dedups
-    // anything already sent by tracking the last delivered event id.
-    let members: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT conversation_id FROM conversation_participants WHERE user_id = $1",
-    )
-    .bind(session.user_id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    // Replay-then-subscribe without gaps: replay covers everything after
+    // `resume_after`, and the live loop dedups anything already sent by
+    // tracking the last delivered event id. Participation is healed first so
+    // a join/create race never strands a member out of its own replay.
+    let _ = workspaces::ensure_all_participation(&pool, session.user_id).await;
 
     let connection_id = Uuid::now_v7();
     send_frame(
@@ -168,8 +164,10 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
     let mut last_sent = resume_after;
     if let Ok(missed) = messaging::events_after(&pool, session.user_id, resume_after, 100).await {
         for entry in missed {
-            send_event(&mut sink, &entry).await;
-            last_sent = Some(entry.id);
+            if event_visible(&pool, session.user_id, &entry).await {
+                send_event(&mut sink, &entry).await;
+                last_sent = Some(entry.id);
+            }
         }
     }
 
@@ -200,17 +198,21 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
                         if last_sent.is_some_and(|last| entry.id <= last) {
                             continue; // Already replayed; at-least-once dedup.
                         }
-                        if event_visible(&entry, &members) {
+                        if event_visible(&pool, session.user_id, &entry).await {
                             send_event(&mut sink, &entry).await;
                             last_sent = Some(entry.id);
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // We dropped events: re-anchor from the last one sent.
+                        // We dropped events: heal participation, then re-anchor
+                        // from the last one sent, re-applying the read gate.
+                        let _ = workspaces::ensure_all_participation(&pool, session.user_id).await;
                         if let Ok(missed) = messaging::events_after(&pool, session.user_id, last_sent, 100).await {
                             for entry in missed {
-                                send_event(&mut sink, &entry).await;
-                                last_sent = Some(entry.id);
+                                if event_visible(&pool, session.user_id, &entry).await {
+                                    send_event(&mut sink, &entry).await;
+                                    last_sent = Some(entry.id);
+                                }
                             }
                         }
                     }
@@ -221,15 +223,29 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
     }
 }
 
-/// This connection cares about the event when its conversation is in the
-/// identify-time membership snapshot.
-fn event_visible(entry: &OutboxEntry, members: &[Uuid]) -> bool {
-    entry
+/// Whether `user_id` may currently read this event. Channel events need
+/// workspace membership (reads are member-wide — guests included; `SEND` is
+/// the write gate and is not consulted here); anything else needs
+/// conversation participation. Evaluated live per event so kicks, bans, and
+/// mutes take effect mid-connection. Unknown-shape events fail closed.
+async fn event_visible(pool: &sqlx::PgPool, user_id: Uuid, entry: &OutboxEntry) -> bool {
+    let Some(conversation) = entry
         .payload
         .get("conversation_id")
         .and_then(|value| value.as_str())
         .and_then(|raw| raw.parse::<Uuid>().ok())
-        .is_some_and(|conversation| members.contains(&conversation))
+    else {
+        return false;
+    };
+    match workspaces::channel_by_conversation(pool, conversation).await {
+        Ok(Some(channel)) => workspaces::get_workspace(pool, user_id, channel.workspace_id)
+            .await
+            .is_ok(),
+        Ok(None) => messaging::is_member(pool, conversation, user_id)
+            .await
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 async fn send_frame(
