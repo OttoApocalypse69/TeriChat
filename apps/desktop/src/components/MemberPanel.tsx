@@ -1,18 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
-import { ApiClient } from '../lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ApiClient, type WorkspaceMemberBody } from '../lib/api';
 import {
-  MemberDirectory,
-  friendlyMemberError,
-  gateBan,
-  gateGrant,
-  gateKick,
-  gateSetRole,
-  grantableRoles,
-  roleHas,
-  roleOrGuest,
-  shortId,
-  ROLE_NAMES,
-  type RoleName,
+  friendlyMemberError, gateBan, gateGrant, gateKick, gateSetRole,
+  grantableRoles, normalizeRole, roleHas, roleOrGuest, ROLE_NAMES, type RoleName,
 } from '../lib/members';
 
 interface Props {
@@ -20,311 +10,204 @@ interface Props {
   workspaceId: string;
   myRole: string;
   meId: string;
-  myHandle: string;
   onLeft: (workspaceId: string) => void;
+  onMyRole?: (workspaceId: string, role: string) => void;
 }
 
-/**
- * Member list with roles plus manager actions. Rank-forbidden actions are
- * disabled up front (peers untouchable); server 403s still surface friendly.
- * The server has no list-members endpoint, so seats come from self + session
- * adds + the manager-visible audit log (see MemberDirectory).
- */
-export default function MemberPanel({
-  api,
-  workspaceId,
-  myRole,
-  meId,
-  myHandle,
-  onLeft,
-}: Props) {
-  const actor = roleOrGuest(myRole);
-  const dirRef = useRef<MemberDirectory | null>(null);
-  if (dirRef.current === null) dirRef.current = new MemberDirectory();
-  const dir = dirRef.current;
-  const [, setVersion] = useState(0);
-  const bump = () => setVersion((v) => v + 1);
+// Identity changes discard directory state before rendering another workspace.
+export default function MemberPanel(props: Props) {
+  return <MemberDirectoryPanel key={`${props.workspaceId}:${props.meId}`} {...props} />;
+}
 
+function MemberDirectoryPanel({ api, workspaceId, myRole, meId, onLeft, onMyRole }: Props) {
+  const [members, setMembers] = useState<WorkspaceMemberBody[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [addHandle, setAddHandle] = useState('');
   const [addRole, setAddRole] = useState<RoleName>('member');
   const [unbanId, setUnbanId] = useState('');
   const [drafts, setDrafts] = useState<Record<string, RoleName>>({});
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
+  const epoch = useRef(0);
+  const mutation = useRef(false);
+  const fetching = useRef(false);
+  const failedCursor = useRef<string | undefined>(undefined);
+  const actor = roleOrGuest(members.find(member => member.user_id === meId)?.role ?? myRole);
   const grantable = grantableRoles(actor);
-  const canUnban = roleHas(actor, 'BanMembers');
+  const busy = busyKey !== null || loading;
+
+  const load = useCallback(async (after?: string) => {
+    if (fetching.current) return;
+    const current = epoch.current;
+    fetching.current = true;
+    failedCursor.current = after;
+    setLoading(true);
+    setLoadError(null);
+    if (after === undefined) {
+      setMembers([]);
+      setNextCursor(null);
+      setDrafts({});
+    }
+    try {
+      const page = await api.listMembers(workspaceId, after);
+      if (epoch.current !== current) return;
+      if (page.next_cursor !== null && (page.members.length === 0 || page.next_cursor === after)) {
+        throw new Error('Member page did not advance. Refresh the directory.');
+      }
+      setMembers(previous => [...new Map(
+        [...(after === undefined ? [] : previous), ...page.members]
+          .map(member => [member.user_id, member]),
+      ).values()]);
+      setNextCursor(page.next_cursor);
+      const self = page.members.find(member => member.user_id === meId);
+      if (self) onMyRole?.(workspaceId, self.role);
+    } catch (err) {
+      if (epoch.current === current) setLoadError(friendlyMemberError(err));
+    } finally {
+      if (epoch.current === current) {
+        fetching.current = false;
+        setLoading(false);
+      }
+    }
+  }, [api, workspaceId, meId, onMyRole]);
 
   useEffect(() => {
-    dir.seedSelf(meId, myHandle, actor);
-    bump();
-    let live = true;
-    // Best-effort enrichment: non-managers meet the audit wall (403) and
-    // simply keep self + session seats.
-    void api
-      .listAudit(workspaceId, 100)
-      .then((rows) => {
-        if (!live) return;
-        dir.mergeAudit(rows);
-        bump();
-      })
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, workspaceId]);
+    epoch.current += 1;
+    fetching.current = false;
+    mutation.current = false;
+    setBusyKey(null);
+    setError(null);
+    void load();
+    return () => { epoch.current += 1; };
+  }, [load]);
 
-  async function run(key: string, fn: () => Promise<void>): Promise<void> {
+  async function run(key: string, action: () => Promise<void>, success?: () => void) {
+    if (mutation.current || fetching.current) return;
+    mutation.current = true;
+    const current = epoch.current;
     setBusyKey(key);
     setError(null);
     try {
-      await fn();
-      bump();
+      await action();
+      if (epoch.current !== current) return;
+      success?.();
+      // Mutations invalidate every loaded page; obtain fresh roles and seats.
+      if (key !== 'leave') await load();
     } catch (err) {
-      setError(friendlyMemberError(err));
+      if (epoch.current === current) setError(friendlyMemberError(err));
     } finally {
-      setBusyKey(null);
+      if (epoch.current === current) {
+        mutation.current = false;
+        setBusyKey(null);
+      }
     }
   }
 
-  async function add(e: React.FormEvent): Promise<void> {
-    e.preventDefault();
-    const handle = addHandle.trim();
-    if (!handle) return;
-    const gate = gateGrant(actor, addRole);
-    if (!gate.ok) {
-      setError(gate.reason);
-      return;
-    }
-    await run('add', async () => {
-      await api.addMember(workspaceId, { user_handle: handle, role: addRole });
-      dir.noteAdded(handle, addRole);
-      setAddHandle('');
-    });
-  }
-
-  const rows = dir.list();
-
+  const buttonClass = 'rounded bg-zinc-800 px-1.5 py-1 text-[11px] disabled:opacity-40';
   return (
-    <div className="border-b border-zinc-800 p-2">
-      <h2 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-        Members · you are {actor}
-      </h2>
-      {error && <p className="mb-1 text-xs text-red-400">{error}</p>}
-
+    <section aria-label="Workspace members" className="border-b border-zinc-800 p-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+          Members · you are {actor}
+        </h2>
+        <button type="button" disabled={busy} onClick={() => void load()}
+          className={buttonClass}>Refresh members</button>
+      </div>
+      {error && <p role="alert" className="mb-1 text-xs text-red-400">{error}</p>}
+      {loadError && <div role="alert" className="mb-1 text-xs text-red-400">
+        <p>{loadError}</p>
+        <button type="button" disabled={busy} className={buttonClass}
+          onClick={() => void load(failedCursor.current)}>Retry members</button>
+      </div>}
+      {loading && <p role="status" className="text-xs text-zinc-400">Loading members…</p>}
+      {!loading && !loadError && members.length === 0 &&
+        <p className="text-xs text-zinc-400">No current members.</p>}
       {grantable.length > 0 && (
-        <form onSubmit={add} className="mb-2 flex gap-1">
-          <input
-            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
-            placeholder="handle → add"
-            value={addHandle}
-            onChange={(e) => setAddHandle(e.target.value)}
-          />
-          <select
-            className="shrink-0 rounded bg-zinc-800 px-1 py-1.5 text-sm"
-            value={addRole}
-            onChange={(e) => setAddRole(e.target.value as RoleName)}
-            title="Role for the new member (never owner)"
-          >
-            {grantable.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
+        <form aria-label="Add member" className="mb-2 flex gap-1" onSubmit={event => {
+          event.preventDefault();
+          const handle = addHandle.trim();
+          if (!handle) return;
+          const gate = gateGrant(actor, addRole);
+          if (!gate.ok) { setError(gate.reason); return; }
+          void run('add', () => api.addMember(workspaceId, { user_handle: handle, role: addRole }),
+            () => setAddHandle(''));
+        }}>
+          <input aria-label="Member handle" placeholder="handle → add" value={addHandle}
+            disabled={busy} onChange={event => setAddHandle(event.target.value)}
+            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm" />
+          <select aria-label="New member role" value={addRole} disabled={busy}
+            onChange={event => setAddRole(event.target.value as RoleName)}
+            className="rounded bg-zinc-800 px-1 text-sm">
+            {grantable.map(role => <option key={role}>{role}</option>)}
           </select>
-          <button
-            type="submit"
-            disabled={busyKey === 'add' || !addHandle.trim()}
-            className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs font-semibold disabled:opacity-40"
-          >
-            {busyKey === 'add' ? '…' : 'Add'}
+          <button type="submit" disabled={busy || !addHandle.trim()} className={buttonClass}>
+            {busyKey === 'add' ? 'Adding…' : 'Add'}
           </button>
         </form>
       )}
-
-      <ul className="space-y-1.5">
-        {rows.map((m) => {
-          const isSelf = m.userId === meId;
-          // Local const so narrowing survives the gate calls below.
-          const uid: string | null = isSelf ? null : m.userId;
-          const label = m.handle ?? (m.userId ? shortId(m.userId) : m.key);
-          const setGate =
-            uid !== null
-              ? gateSetRole(actor, m.role, drafts[uid] ?? m.role ?? 'member')
-              : { ok: false, reason: '' };
-          const kickGate =
-            uid !== null ? gateKick(actor, m.role) : { ok: false, reason: '' };
-          const banGate =
-            uid !== null ? gateBan(actor, m.role) : { ok: false, reason: '' };
-          return (
-            <li key={m.key} className="rounded bg-zinc-900 p-1.5">
-              <div className="flex items-center gap-1.5">
-                <span className="min-w-0 flex-1 truncate text-sm">
-                  {label}
-                  {isSelf && (
-                    <span className="ml-1 text-[10px] uppercase text-zinc-500">
-                      you
-                    </span>
-                  )}
-                </span>
-                <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
-                  {m.role ?? 'unknown'}
-                </span>
-                {m.banned && (
-                  <span className="shrink-0 rounded bg-red-900 px-1.5 py-0.5 text-[10px] uppercase text-red-200">
-                    banned
-                  </span>
-                )}
-              </div>
-              {!isSelf && uid !== null && !m.banned && (
-                <div className="mt-1 flex flex-wrap items-center gap-1">
-                  <select
-                    className="rounded bg-zinc-800 px-1 py-1 text-xs"
-                    value={drafts[uid] ?? m.role ?? 'member'}
-                    onChange={(e) =>
-                      setDrafts((d) => ({
-                        ...d,
-                        [uid]: e.target.value as RoleName,
-                      }))
-                    }
-                    disabled={!setGate.ok}
-                    title={setGate.ok ? 'New role' : setGate.reason}
-                  >
-                    {ROLE_NAMES.map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    disabled={!setGate.ok || busyKey === `role:${uid}`}
-                    title={setGate.ok ? 'Apply role' : setGate.reason}
-                    onClick={() => {
-                      const next = drafts[uid] ?? m.role ?? 'member';
-                      const target = uid;
-                      void run(`role:${target}`, async () => {
-                        await api.setMemberRole(workspaceId, target, next);
-                        dir.applyRole(target, next);
-                      });
-                    }}
-                    className="rounded bg-zinc-800 px-1.5 py-1 text-[11px] disabled:opacity-40"
-                  >
-                    {busyKey === `role:${uid}` ? '…' : 'Set role'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!kickGate.ok || busyKey === `kick:${uid}`}
-                    title={kickGate.ok ? 'Kick from workspace' : kickGate.reason}
-                    onClick={() => {
-                      const target = uid;
-                      void run(`kick:${target}`, async () => {
-                        await api.kickMember(workspaceId, target);
-                        dir.removeById(target);
-                      });
-                    }}
-                    className="rounded bg-zinc-800 px-1.5 py-1 text-[11px] disabled:opacity-40"
-                  >
-                    {busyKey === `kick:${uid}` ? '…' : 'Kick'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!banGate.ok || busyKey === `ban:${uid}`}
-                    title={
-                      banGate.ok
-                        ? 'Ban from workspace (empty reason)'
-                        : banGate.reason
-                    }
-                    onClick={() => {
-                      const target = uid;
-                      void run(`ban:${target}`, async () => {
-                        await api.banMember(workspaceId, target);
-                        dir.removeById(target);
-                        dir.markBanned(target, true);
-                      });
-                    }}
-                    className="rounded bg-zinc-800 px-1.5 py-1 text-[11px] text-red-300 disabled:opacity-40"
-                  >
-                    {busyKey === `ban:${uid}` ? '…' : 'Ban'}
-                  </button>
-                </div>
-              )}
-              {!isSelf && uid !== null && m.banned && (
-                <div className="mt-1">
-                  <button
-                    type="button"
-                    disabled={!canUnban || busyKey === `unban:${uid}`}
-                    title={
-                      canUnban ? 'Lift the ban' : 'unbanning requires admin or owner'
-                    }
-                    onClick={() => {
-                      const target = uid;
-                      void run(`unban:${target}`, async () => {
-                        await api.unbanMember(workspaceId, target);
-                        dir.markBanned(target, false);
-                      });
-                    }}
-                    className="rounded bg-zinc-800 px-1.5 py-1 text-[11px] disabled:opacity-40"
-                  >
-                    {busyKey === `unban:${uid}` ? '…' : 'Unban'}
-                  </button>
-                </div>
-              )}
-              {!isSelf && !m.userId && (
-                <p className="mt-1 text-[11px] text-zinc-500">
-                  Just added — id unknown until the server lists the seat.
-                </p>
-              )}
-            </li>
-          );
+      <ul aria-label="Current members" className="space-y-1.5">
+        {members.map(member => {
+          const uid = member.user_id;
+          const self = uid === meId;
+          const role = normalizeRole(member.role);
+          const next = drafts[uid] ?? role ?? 'guest';
+          const setGate = gateSetRole(actor, role, next);
+          const kickGate = gateKick(actor, role);
+          const banGate = gateBan(actor, role);
+          return <li key={uid} data-member-id={uid} className="rounded bg-zinc-900 p-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate text-sm" title={uid}>
+                {member.display_name || member.handle} <span className="text-zinc-500">@{member.handle}</span>
+                {self && <span className="ml-1 text-[10px] uppercase text-zinc-500">you</span>}
+              </span>
+              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
+                {member.role}
+              </span>
+            </div>
+            {!self && <div className="mt-1 flex flex-wrap items-center gap-1">
+              <select aria-label={`Role for ${member.handle}`} value={next}
+                disabled={busy || !gateSetRole(actor, role, role ?? 'guest').ok}
+                className="rounded bg-zinc-800 px-1 py-1 text-xs"
+                onChange={event => setDrafts(previous => ({ ...previous, [uid]: event.target.value as RoleName }))}>
+                {ROLE_NAMES.map(option => <option key={option}>{option}</option>)}
+              </select>
+              <button type="button" disabled={busy || !setGate.ok} title={setGate.reason}
+                onClick={() => void run(`role:${uid}`, () => api.setMemberRole(workspaceId, uid, next))}
+                className={buttonClass}>Set role</button>
+              <button type="button" disabled={busy || !kickGate.ok} title={kickGate.reason}
+                onClick={() => void run(`kick:${uid}`, () => api.kickMember(workspaceId, uid))}
+                className={buttonClass}>Kick</button>
+              <button type="button" disabled={busy || !banGate.ok} title={banGate.reason}
+                onClick={() => void run(`ban:${uid}`, () => api.banMember(workspaceId, uid), () => setUnbanId(uid))}
+                className={`${buttonClass} text-red-300`}>Ban</button>
+            </div>}
+          </li>;
         })}
       </ul>
-
-      {canUnban && (
-        <form
-          className="mt-2 flex gap-1"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const id = unbanId.trim();
-            if (!id) return;
-            void run('unban-form', async () => {
-              await api.unbanMember(workspaceId, id);
-              dir.markBanned(id, false);
-              setUnbanId('');
-            });
-          }}
-        >
-          <input
-            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 font-mono text-xs"
-            placeholder="user id → unban"
-            value={unbanId}
-            onChange={(e) => setUnbanId(e.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={busyKey === 'unban-form' || !unbanId.trim()}
-            className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs font-semibold disabled:opacity-40"
-          >
-            {busyKey === 'unban-form' ? '…' : 'Unban'}
-          </button>
-        </form>
-      )}
-
-      <button
-        type="button"
-        disabled={busyKey === 'leave'}
-        onClick={() =>
-          void run('leave', async () => {
-            await api.leaveWorkspace(workspaceId);
-            onLeft(workspaceId);
-          })
-        }
+      {nextCursor !== null && <button type="button" disabled={busy || loadError !== null}
+        className={`mt-2 ${buttonClass}`} onClick={() => void load(nextCursor)}>Load more members</button>}
+      <p className="mt-1 text-[11px] text-zinc-500">
+        {members.length} loaded{nextCursor !== null ? ' · more available' : ''}. Refresh to check for changes.
+      </p>
+      {roleHas(actor, 'BanMembers') && <form aria-label="Unban member" className="mt-2 flex gap-1"
+        onSubmit={event => {
+          event.preventDefault();
+          const uid = unbanId.trim();
+          if (uid) void run('unban', () => api.unbanMember(workspaceId, uid), () => setUnbanId(''));
+        }}>
+        <input aria-label="User ID to unban" placeholder="user id → unban" value={unbanId} disabled={busy}
+          onChange={event => setUnbanId(event.target.value)}
+          className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 font-mono text-xs" />
+        <button type="submit" disabled={busy || !unbanId.trim()} className={buttonClass}>Unban</button>
+      </form>}
+      <button type="button" disabled={busy}
+        onClick={() => void run('leave', () => api.leaveWorkspace(workspaceId), () => onLeft(workspaceId))}
         className="mt-2 w-full rounded bg-zinc-800 py-1 text-xs text-red-300 disabled:opacity-40"
-        title="Leave this workspace (last owner cannot leave)"
-      >
+        title="Leave this workspace (last owner cannot leave)">
         {busyKey === 'leave' ? 'Leaving…' : 'Leave workspace'}
       </button>
-    </div>
+    </section>
   );
 }

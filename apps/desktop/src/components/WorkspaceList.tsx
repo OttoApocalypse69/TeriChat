@@ -39,7 +39,7 @@ export default function WorkspaceList({
       )}
       {!loading && !error && workspaces.length === 0 && (
         <p className="px-1 py-1 text-xs text-zinc-500">
-          No workspaces yet — ask for an invite.
+          No workspaces yet — create one below or join with an invite.
         </p>
       )}
       <ul className="max-h-32 space-y-0.5 overflow-y-auto">

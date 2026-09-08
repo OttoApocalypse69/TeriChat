@@ -79,6 +79,7 @@ export class WorkspaceStore {
     );
     this.channelsErrorByWorkspace.set(workspaceId, null);
     if (
+      this.selectedWorkspaceId === workspaceId &&
       this.selectedChannelId !== null &&
       !channels.some((c) => c.id === this.selectedChannelId)
     ) {

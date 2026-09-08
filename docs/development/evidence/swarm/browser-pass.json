@@ -1,0 +1,13 @@
+{
+  "head": "38a6a082b0c3924a1daa6df13125e53367efa40c",
+  "scope": "workspace-browser-http-adapter",
+  "result": "PASS",
+  "steps": [
+    "create workspace in UI persists and selects owner workspace",
+    "ordinary member sees authoritative roster without audit permission",
+    "member pagination has no duplicates or private fields; outsider denied",
+    "created channel and message survive client reload; security state stays honest",
+    "role update and kick refresh roster; removed member access revoked"
+  ],
+  "cleanup": "PASS"
+}
