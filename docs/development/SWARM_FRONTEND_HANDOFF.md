@@ -72,3 +72,21 @@ Requires the paired backend `GET /v1/workspaces/{id}/members?limit=100&after=<uu
 ## Handoff
 
 Source commit `559f854046afcc4bb3fb885c6c101696c0fcd2a6` supplied to parent and read-only reviewer. Parent owns integration and `apps/desktop/acceptance/workspaces.mjs`. Frontend source claim is released at completion; no writer remains active after this handoff. Next unblocked task is independent source review and the combined two-account browser/backend scenario, followed by native acceptance as a separate gate. No push, PR, merge or deployment performed by this worker.
+
+## Review correction: SWARM-REVIEW-01-F1
+
+Independent review found an S2 acceptance defect at implementation `559f854`: invalidating a pending initial workspace list after creating B preserved B but could omit existing membership A that had never entered the local store. The same omission affected joining while the first list remained pending.
+
+Fix source head: `92bbd5f3a3a92340bbe9070ffb283fe185220caf`, parented by the documentation-only handoff `3fd10056456656d0c4e3a4e83cf929587ea93322`. Only `apps/desktop/src/App.tsx` and `App.test.tsx` changed in the fix. After create/join succeeds, the client now obtains a fresh authoritative list while preserving the selected returned workspace. Request revision guards also discard an earlier reconciliation if another mutation supersedes it.
+
+The mounted regressions delay initial `[A]`, return fresh `[A,B]`, and assert existing A remains visible while B stays selected, for both create and join. Both fail against source `559f854`. Another mounted regression delays creation's fresh list until a subsequent join completes, confirming the earlier response cannot erase the newly joined workspace or its selection.
+
+| Command | Source | Result | Evidence |
+|---|---|---|---|
+| `npm test -- src/App.test.tsx -t 'refreshes after'` with prior `559f854` App.tsx and new tests; source restored in finally | prior implementation behavior | EXPECTED FAIL; 2 failing regressions | `review-f1-baseline.log` in evidence directory above. |
+| `npm test -- src/App.test.tsx` | fix source tree | PASS; 27 mounted App tests | Agent command output. |
+| `npm test` | source tree committed as `92bbd5f` | PASS; 89 tests in 8 files | `review-f1-tests.log`. |
+| `npm run build` | source tree committed as `92bbd5f` | PASS; includes `tsc --noEmit` | `review-f1-build.log`. |
+| `git diff --check` | source tree committed as `92bbd5f` | PASS | Agent command output. |
+
+The original 87-test evidence remains valid only for the earlier source. Fresh independent review and combined parent verification are required for the corrected head. The reviewer and parent received the exact fix SHA; remaining unrun checks and authority constraints above are unchanged. Source claim is again released after this correction.
