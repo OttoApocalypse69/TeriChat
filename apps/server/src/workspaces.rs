@@ -210,6 +210,30 @@ pub struct Workspace {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Public workspace membership profile; never includes account credentials.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Member {
+    /// Member account id, also used as the stable pagination key.
+    pub user_id: Uuid,
+    /// Public account handle.
+    pub handle: String,
+    /// Public display name.
+    pub display_name: String,
+    /// Current authoritative workspace role.
+    pub role: String,
+    /// Time this membership was created.
+    pub joined_at: DateTime<Utc>,
+}
+
+/// Bounded page of current workspace members.
+#[derive(Debug)]
+pub struct MembersPage {
+    /// Members ordered by ascending account id.
+    pub members: Vec<Member>,
+    /// Last returned account id when another page exists.
+    pub next_cursor: Option<Uuid>,
+}
+
 /// Text channel row with its backing conversation for the message path.
 #[derive(Debug, Clone)]
 pub struct Channel {
@@ -781,6 +805,82 @@ pub async fn get_workspace(
     .map_err(WorkspacesError::Database)?
     .ok_or(WorkspacesError::NotMember)?;
     Ok((to_workspace(row), role))
+}
+
+/// List public membership profiles, including guests, using an exclusive cursor.
+/// The caller's membership is locked through the read: removal, leave and ban
+/// transactions cannot commit between authorization and fetching the page.
+/// Each page reflects its own database snapshot; later joins or departures may
+/// change subsequent pages. Limits above 100 are capped.
+///
+/// # Errors
+///
+/// Returns [`WorkspacesError::NotMember`] for outsiders or missing workspaces,
+/// [`WorkspacesError::Banned`] for banned callers, [`WorkspacesError::BadInput`]
+/// for nonpositive limits, or [`WorkspacesError::Database`] on database failure.
+pub async fn list_members(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    after: Option<Uuid>,
+    limit: i64,
+) -> Result<MembersPage, WorkspacesError> {
+    if limit <= 0 {
+        return Err(WorkspacesError::BadInput(
+            "limit must be positive".to_owned(),
+        ));
+    }
+    // The upper bound also makes fetching one lookahead row overflow-safe.
+    let limit = limit.min(100);
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members
+         WHERE workspace_id = $1 AND user_id = $2 FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(WorkspacesError::Database)?;
+    // Read bans after any lock wait, preserving the existing banned-caller
+    // error even when the banning transaction has just deleted membership.
+    let banned: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM workspace_bans WHERE workspace_id = $1 AND user_id = $2)",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(WorkspacesError::Database)?;
+    if banned {
+        return Err(WorkspacesError::Banned);
+    }
+    member.ok_or(WorkspacesError::NotMember)?;
+    let mut members: Vec<Member> = sqlx::query_as(
+        "SELECT m.user_id, u.handle, u.display_name, m.role, m.joined_at
+         FROM workspace_members m JOIN users u ON u.id = m.user_id
+         WHERE m.workspace_id = $1 AND ($2::uuid IS NULL OR m.user_id > $2)
+           AND NOT EXISTS (SELECT 1 FROM workspace_bans b
+                           WHERE b.workspace_id = m.workspace_id AND b.user_id = m.user_id)
+         ORDER BY m.user_id LIMIT $3",
+    )
+    .bind(workspace_id)
+    .bind(after)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(WorkspacesError::Database)?;
+    let next_cursor = if i64::try_from(members.len()).unwrap_or(i64::MAX) > limit {
+        members.pop();
+        members.last().map(|member| member.user_id)
+    } else {
+        None
+    };
+    tx.commit().await.map_err(WorkspacesError::Database)?;
+    Ok(MembersPage {
+        members,
+        next_cursor,
+    })
 }
 
 /// Rename a workspace. Requires [`Permission::ManageWorkspace`].
@@ -2005,6 +2105,255 @@ pub async fn list_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn member_test_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("SKIPPED: workspace member tests (DATABASE_URL unset)");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect member test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn member_list_keyset_cap_and_exhaustion() {
+        let Some(pool) = member_test_pool().await else {
+            return;
+        };
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "mpowner").await;
+        let workspace = create_workspace(&pool, owner, "Roster pages")
+            .await
+            .expect("workspace");
+        let ids: Vec<Uuid> = (0..101).map(|_| Uuid::now_v7()).collect();
+        // Bulk synthetic accounts avoid hashing 101 passwords for a roster test.
+        sqlx::query(
+            "INSERT INTO users (id, handle, email, display_name)
+             SELECT id, md5(id::text), md5(id::text) || '@example.invalid', 'Page member'
+             FROM unnest($1::uuid[]) AS id",
+        )
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .expect("synthetic profiles");
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role)
+             SELECT $1, id, 'guest' FROM unnest($2::uuid[]) AS id",
+        )
+        .bind(workspace.id)
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .expect("memberships");
+        let mut expected = ids;
+        expected.push(owner);
+        expected.sort_unstable();
+        let first = list_members(&pool, owner, workspace.id, None, i64::MAX)
+            .await
+            .expect("first page");
+        assert_eq!(first.members.len(), 100);
+        assert_eq!(first.next_cursor, Some(expected[99]));
+        assert_eq!(
+            first.members.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+            expected[..100]
+        );
+        let last = list_members(&pool, owner, workspace.id, first.next_cursor, 2)
+            .await
+            .expect("exact full last page");
+        assert_eq!(
+            last.members.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+            expected[100..]
+        );
+        assert!(
+            last.next_cursor.is_none(),
+            "a full final page must be exhausted"
+        );
+        let empty = list_members(&pool, owner, workspace.id, expected.last().copied(), 100)
+            .await
+            .expect("empty page");
+        assert!(empty.members.is_empty());
+        assert!(empty.next_cursor.is_none());
+        for limit in [0, -1] {
+            assert!(matches!(
+                list_members(&pool, owner, workspace.id, None, limit).await,
+                Err(WorkspacesError::BadInput(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn member_list_authoritative_roles_and_revocation() {
+        let Some(pool) = member_test_pool().await else {
+            return;
+        };
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "maowner").await;
+        let guest = user(&pool, stamp, "maguest").await;
+        let outsider = user(&pool, stamp, "maout").await;
+        let workspace = create_workspace(&pool, owner, "Roster authorization")
+            .await
+            .expect("workspace");
+        let other = create_workspace(&pool, outsider, "Other tenant")
+            .await
+            .expect("other workspace");
+        add_member(&pool, owner, workspace.id, guest, Role::Guest)
+            .await
+            .expect("add guest");
+        let page = list_members(&pool, guest, workspace.id, None, 100)
+            .await
+            .expect("guest may read");
+        assert_eq!(page.members.len(), 2);
+        let profile = page
+            .members
+            .iter()
+            .find(|m| m.user_id == guest)
+            .expect("guest profile");
+        assert_eq!(profile.role, "guest");
+        assert_eq!(profile.display_name, "maguest");
+        assert_eq!(profile.handle, format!("maguest{stamp}"));
+        for (caller, space) in [
+            (outsider, workspace.id),
+            (guest, other.id),
+            (guest, Uuid::now_v7()),
+        ] {
+            assert!(matches!(
+                list_members(&pool, caller, space, None, 100).await,
+                Err(WorkspacesError::NotMember)
+            ));
+        }
+        set_role(&pool, owner, workspace.id, guest, Role::Moderator)
+            .await
+            .expect("promote");
+        assert_eq!(
+            list_members(&pool, guest, workspace.id, None, 100)
+                .await
+                .expect("updated roster")
+                .members
+                .iter()
+                .find(|m| m.user_id == guest)
+                .expect("member")
+                .role,
+            "moderator"
+        );
+        remove_member(&pool, owner, workspace.id, guest)
+            .await
+            .expect("kick");
+        assert!(matches!(
+            list_members(&pool, guest, workspace.id, None, 100).await,
+            Err(WorkspacesError::NotMember)
+        ));
+        add_member(&pool, owner, workspace.id, guest, Role::Guest)
+            .await
+            .expect("rejoin");
+        ban_member(&pool, owner, workspace.id, guest, "synthetic ban")
+            .await
+            .expect("ban");
+        assert!(matches!(
+            list_members(&pool, guest, workspace.id, None, 100).await,
+            Err(WorkspacesError::Banned)
+        ));
+        assert_eq!(
+            list_members(&pool, owner, workspace.id, None, 100)
+                .await
+                .expect("remaining roster")
+                .members
+                .len(),
+            1
+        );
+        // Defense in depth: even an inconsistent stale membership cannot override a ban.
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'guest')",
+        )
+        .bind(workspace.id)
+        .bind(guest)
+        .execute(&pool)
+        .await
+        .expect("stale fixture membership");
+        assert!(matches!(
+            list_members(&pool, guest, workspace.id, None, 100).await,
+            Err(WorkspacesError::Banned)
+        ));
+        assert_eq!(
+            list_members(&pool, owner, workspace.id, None, 100)
+                .await
+                .expect("ban-filtered roster")
+                .members
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn member_list_waits_for_revocation_and_rechecks() {
+        let Some(pool) = member_test_pool().await else {
+            return;
+        };
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let owner = user(&pool, stamp, "mrowner").await;
+        let member = user(&pool, stamp, "mrmember").await;
+        let workspace = create_workspace(&pool, owner, "Roster race")
+            .await
+            .expect("workspace");
+        for banned in [false, true] {
+            add_member(&pool, owner, workspace.id, member, Role::Member)
+                .await
+                .expect("add member");
+            let mut revocation = pool.begin().await.expect("revocation transaction");
+            let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *revocation)
+                .await
+                .expect("blocker pid");
+            sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")
+                .bind(workspace.id)
+                .bind(member)
+                .execute(&mut *revocation)
+                .await
+                .expect("pending removal");
+            if banned {
+                sqlx::query("INSERT INTO workspace_bans (workspace_id, user_id, banned_by) VALUES ($1, $2, $3)")
+                    .bind(workspace.id).bind(member).bind(owner).execute(&mut *revocation).await.expect("pending ban");
+            }
+            let reader_pool = pool.clone();
+            let read = tokio::spawn(async move {
+                list_members(&reader_pool, member, workspace.id, None, 100).await
+            });
+            // Observe an actual database lock wait rather than relying on timing.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                    )
+                    .bind(blocker)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("lock wait state");
+                    if waiting {
+                        break;
+                    }
+                    assert!(!read.is_finished(), "read bypassed pending revocation");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("reader must wait on membership revocation");
+            revocation.commit().await.expect("commit revocation");
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+                .await
+                .expect("read completes")
+                .expect("join reader");
+            if banned {
+                assert!(matches!(result, Err(WorkspacesError::Banned)));
+            } else {
+                assert!(matches!(result, Err(WorkspacesError::NotMember)));
+            }
+        }
+    }
 
     /// The matrix is the product's trust core: owner/admin hold everything,
     /// moderators get the safety subset, members send, guests observe.
