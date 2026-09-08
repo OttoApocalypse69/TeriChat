@@ -1,0 +1,142 @@
+{
+  "task": "issue #5 frontend/native acceptance verification",
+  "branch": "test/5-client-acceptance",
+  "head_and_base": "5cf0a590c0298be198eee7095053f0f736d150fb",
+  "dependency": "unmerged PR #23; no commit, push, branch change, merge, or deploy performed",
+  "outcome": "S2 attribution and report-scope findings fixed. New browser and native Windows full campaigns PASS the fail-closed validator; real probes return PROBE_PASS and are rejected as full acceptance. No production application or default native permission changes.",
+  "harness_sha256": "7b64efd2b72e0b2d86c0f1dade6f082657082bcc3b99d05e4508e81e0d4113f4",
+  "commands_from_apps_desktop": {
+    "npm ci": "PASS; existing locked dependencies installed before discovering missing browser automation",
+    "npm install --save-dev --save-exact playwright-core": "PASS; adds pinned playwright-core 1.63.0; existing installed Edge used, no browser download",
+    "node acceptance/run.mjs --probe-only": "PASS; isolated backend readiness HTTP 200, database connected",
+    "node acceptance/run.mjs --native --ui-probe": "PROBE_PASS 2026-09-08T07-22-01-498Z; full acceptance validator rejects",
+    "npm run test:acceptance": "PASS new S2 browser full run 2026-09-08T07-22-26-124Z",
+    "npm run test:acceptance:native": "PASS new S2 native full run 2026-09-08T07-23-06-743Z",
+    "node acceptance/inspect-native.mjs": "PASS final diagnostic native-diagnostic-2026-09-08T06-55-24-020Z; isolated profile removed",
+    "npm test && npm run build && npm audit --audit-level=high && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && git diff --check": "PASS exit 0; 69 tests in 6 files; TypeScript/Vite build; zero npm vulnerabilities; existing Vite/PostCSS module-format warnings remain",
+    "node --check acceptance/run.mjs && node --check acceptance/inspect-native.mjs": "PASS",
+    "node acceptance/run.mjs --native --probe-only": "PROBE_PASS 2026-09-08T07-21-57-222Z; full acceptance validator rejects",
+    "node --test acceptance/report.test.mjs": "PASS 16 tests; RED history 1 pass/6 fail; history GREEN 7 pass; RED legacy result-only consumption 8 pass/8 fail; final GREEN 16 pass. Logs s2-history-{red,green}.log and s2-scope-{red,green}.log.",
+    "node acceptance/verify-evidence.mjs <browser-result> <native-result> <backend-probe-result> <ui-probe-result>": "PASS; exact inputs and eight real-report/mutation checks in s2-real-evidence-verification.json. Mutations in memory only; original reports never rewritten.",
+    "npm test && npm run build && git diff --check (S2 rerun)": "PASS exit 0; 69 tests in 6 files; TypeScript and Vite build. Existing Vite/PostCSS module-format warnings remain."
+  },
+  "verified_scenarios": [
+    "Two real mounted clients log in using actual backend accounts; A sends bro through the client composer; B receives a real gateway event and renders it live.",
+    "B disconnects while A sends 125 additional unique messages through the actual client composer. B reconnects and renders exact expected bodies and sequence 1..126, with no gaps or duplicates and multi-page history drainage.",
+    "Second reconnect sends an observed non-null resume identify and preserves exact history.",
+    "Quiet DM receives an event while HTTP history is intentionally unavailable. Reconnect restores its missing message without another message or replayed quiet event.",
+    "Account switch removes previous-account private conversation text; new account restores its own history.",
+    "Full renderer reload and re-login restores all 126 messages without duplicates.",
+    "Explicit demo-plaintext/not-end-to-end-encrypted notice is visible. No E2EE claim is made."
+  ],
+  "transport_scope": {
+    "browser": "Unmodified App/ApiClient/GatewayClient with a test-only plugin-http-to-browser-fetch adapter and CORS response bridge; all successful HTTP data and WebSocket frames originate from the actual backend.",
+    "native": "Actual Tauri executable, Windows WebView2, unmodified Rust HTTP plugin and real gateway. Test build overrides only application identifier, frontend asset directory, and capability URL to the exact auto-selected synthetic loopback endpoint. Debug CDP enabled only in spawned test processes. Not an installer or release-package certification."
+  },
+  "native_artifact": {
+    "path": "apps/desktop/.acceptance/native-target/debug/terichat-desktop.exe",
+    "sha256": "2af0555d847910e68a4fd3a2d16b2cd194119375ef9db3eec8eb0a3efd9cfd78",
+    "build": "node node_modules/@tauri-apps/cli/tauri.js build --debug --no-bundle --config .acceptance/tauri-acceptance.json -- --locked",
+    "existing_user_executable": "Not overwritten or launched"
+  },
+  "cleanup": "Final reports read back containerRemoved=true, volumesRemoved=true, cleanupErrors=[]; exact reserved container absent and no owned WebView/diagnostic profile directories remain. Build caches and the evidence-linked acceptance executable are retained under ignored .acceptance.",
+  "preserved_harness_failures": {
+    "2026-09-08T06-40-25-976Z": "Wrong /readyz route; source exposes /ready. Original timeout/backend logs retained.",
+    "2026-09-08T06-43-44-060Z": "Unix-socket pg_isready accepted temporary init server; backend connect failed UnexpectedEof during restart. Fixed with TCP readiness, child-exit diagnostics, then successful probe before continuing.",
+    "2026-09-08T06-46-24-679Z": "Native compilation succeeded, but absolute Windows frontendDist became file URL/directory listing. Relative test override fixed it. Original DOM/screenshot retained under native-diagnostic.",
+    "native-diagnostic": "Initial diagnostic parent-only process termination left a transient locked profile cleanup failure. Exact owned profiles were subsequently removed; process-tree cleanup implemented and verified by the later diagnostic and native campaigns.",
+    "2026-09-08T06-54-49-829Z": "Unhandled Vite EBUSY watcher crash on generated native profile. watcher-failure.txt preserves observed exception and exact-owned manual cleanup evidence. Narrow generated-directory exclusion and source-watcher assertion verified by final browser run."
+  },
+  "changed_paths": [
+    "apps/desktop/.gitignore",
+    "apps/desktop/package.json",
+    "apps/desktop/package-lock.json",
+    "apps/desktop/acceptance/run.mjs",
+    "apps/desktop/acceptance/browser-http.mjs",
+    "apps/desktop/acceptance/inspect-native.mjs",
+    "apps/desktop/evidence/client-acceptance/**",
+    "apps/desktop/acceptance/report.mjs",
+    "apps/desktop/acceptance/report.test.mjs",
+    "apps/desktop/acceptance/verify-evidence.mjs",
+    "apps/desktop/acceptance/README.md",
+    "apps/desktop/evidence/client-acceptance/publication-manifest.json"
+  ],
+  "evidence": "Publish only publication-manifest.json entries, protected by an exact .gitignore allowlist. Historical raw logs, command files, screenshots, DOM dumps, diagnostics and profiles remain local and excluded; no raw evidence was deleted or rewritten. No credential files read. Pattern scan of the curated set is not a complete secret-scanner certification.",
+  "remaining": [
+    "Parent integration and independent review of S2 repair pending; no commit, push, branch change, merge or deploy.",
+    "Human-operated usability/sign-off not claimed.",
+    "Signed release, MSI/NSIS install/update, default-config release artifact, other operating systems, full native process restart campaign, and real MLS/E2EE are not verified here.",
+    "No Rust application code changed; full backend Clippy/test matrix and dedicated secret-scanner invocation were not run by this frontend workstream."
+  ],
+  "report_validator_sha256": "85b18c929e47b6739a30ed75a2c7db01aa952f306eace8d0bbe72221adaedd49",
+  "parent_verification_runs": {
+    "2026-09-08T07-11-42-115Z": {
+      "mode": "browser-test-only-fetch-adapter",
+      "result": "PASS",
+      "harness_sha256": "28d32d1939cdd1f743bc5e7a53f1e06426f080f4a9b4f0a27dfe889617f222aa",
+      "disposition": "Historical pre-S2 evidence preserved unchanged; not accepted by new full-report validator because scope/attribution fields were absent."
+    },
+    "2026-09-08T07-12-23-885Z": {
+      "mode": "native-webview2-plugin-http",
+      "result": "PASS",
+      "harness_sha256": "28d32d1939cdd1f743bc5e7a53f1e06426f080f4a9b4f0a27dfe889617f222aa",
+      "disposition": "Historical pre-S2 evidence preserved unchanged; not accepted by new full-report validator because scope/attribution fields were absent."
+    }
+  },
+  "s2_verification_runs": {
+    "2026-09-08T07-21-57-222Z": {
+      "mode": "native-webview2-plugin-http",
+      "result": "PROBE_PASS",
+      "scope": "backend-probe",
+      "arguments": [
+        "--native",
+        "--probe-only"
+      ],
+      "fullCampaignComplete": false,
+      "containerRemoved": true,
+      "volumesRemoved": true,
+      "cleanupErrors": []
+    },
+    "2026-09-08T07-22-01-498Z": {
+      "mode": "native-webview2-plugin-http",
+      "result": "PROBE_PASS",
+      "scope": "ui-probe",
+      "arguments": [
+        "--native",
+        "--ui-probe"
+      ],
+      "fullCampaignComplete": false,
+      "containerRemoved": true,
+      "volumesRemoved": true,
+      "cleanupErrors": []
+    },
+    "2026-09-08T07-22-26-124Z": {
+      "mode": "browser-test-only-fetch-adapter",
+      "result": "PASS",
+      "scope": "full-campaign",
+      "arguments": [],
+      "fullCampaignComplete": true,
+      "containerRemoved": true,
+      "volumesRemoved": true,
+      "cleanupErrors": []
+    },
+    "2026-09-08T07-23-06-743Z": {
+      "mode": "native-webview2-plugin-http",
+      "result": "PASS",
+      "scope": "full-campaign",
+      "arguments": [
+        "--native"
+      ],
+      "fullCampaignComplete": true,
+      "containerRemoved": true,
+      "volumesRemoved": true,
+      "cleanupErrors": []
+    }
+  },
+  "s2_details": [
+    "History records non-secret client instance a/b and request-start phase, conversation, cursor, limit, actual HTTP status and parsed response-array size. Client labels are bound to in-memory session tokens during sequential, connected login; labels survive reconnect and never use token values in evidence.",
+    "Validator requires B backlog-reconnect successful pages (since=1,limit=100,size=100), then (since=101,limit=100,size=25); A live/offline requests cannot satisfy it. Existing exact 126 bodies/sequence and quiet/account/reload assertions retained.",
+    "Reports explicitly persist recognized arguments, scope, and fullCampaignComplete. Probe result is PROBE_PASS, not PASS. Machine consumers must run acceptance/report.mjs, which rejects probes, missing scenario steps, wrong attribution, old schema, and cleanup failures.",
+    "Test-only native capability still replaces the configured capability for one exact synthetic loopback endpoint. Default-config, release, signing, installers, other OS, and full executable restart remain excluded."
+  ]
+}

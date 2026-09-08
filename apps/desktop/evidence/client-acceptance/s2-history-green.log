@@ -1,0 +1,15 @@
+✔ B reconnect successful pages use exact cursors and response sizes (1.7204ms)
+✔ reject wrong client (0.4877ms)
+✔ reject wrong phase (0.1265ms)
+✔ reject unsuccessful response (0.1182ms)
+✔ reject wrong first cursor (0.6979ms)
+✔ reject wrong page size (0.2607ms)
+✔ reject reversed page progression (0.2177ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 70.9367

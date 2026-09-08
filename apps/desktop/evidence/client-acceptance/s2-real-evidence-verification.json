@@ -1,0 +1,44 @@
+{
+  "checks": [
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-22-26-124Z/result.json",
+      "check": "real full campaign",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-22-26-124Z/result.json",
+      "check": "in-memory wrong-client mutation rejected",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-22-26-124Z/result.json",
+      "check": "in-memory wrong-phase mutation rejected",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-23-06-743Z/result.json",
+      "check": "real full campaign",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-23-06-743Z/result.json",
+      "check": "in-memory wrong-client mutation rejected",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-23-06-743Z/result.json",
+      "check": "in-memory wrong-phase mutation rejected",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-21-57-222Z/result.json",
+      "check": "real probe rejected, including legacy PASS mutation",
+      "result": "PASS"
+    },
+    {
+      "filename": "evidence/client-acceptance/2026-09-08T07-22-01-498Z/result.json",
+      "check": "real probe rejected, including legacy PASS mutation",
+      "result": "PASS"
+    }
+  ]
+}

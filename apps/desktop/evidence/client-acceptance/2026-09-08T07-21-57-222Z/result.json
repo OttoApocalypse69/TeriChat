@@ -1,0 +1,43 @@
+{
+  "arguments": [
+    "--native",
+    "--probe-only"
+  ],
+  "scope": "backend-probe",
+  "fullCampaignComplete": false,
+  "mode": "native-webview2-plugin-http",
+  "steps": [
+    {
+      "name": "isolated backend startup and readiness",
+      "backend": "http://127.0.0.1:65282",
+      "databaseBinding": "127.0.0.1:65281",
+      "pid": 13876,
+      "lastConnectionError": "fetch failed",
+      "readiness": {
+        "status": 200,
+        "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+      }
+    }
+  ],
+  "history": [],
+  "frames": {
+    "a": [],
+    "b": []
+  },
+  "head": "5cf0a590c0298be198eee7095053f0f736d150fb",
+  "harnessSha256": "7b64efd2b72e0b2d86c0f1dade6f082657082bcc3b99d05e4508e81e0d4113f4",
+  "startup": {
+    "backend": "http://127.0.0.1:65282",
+    "databaseBinding": "127.0.0.1:65281",
+    "pid": 13876,
+    "lastConnectionError": "fetch failed",
+    "readiness": {
+      "status": 200,
+      "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+    }
+  },
+  "result": "PROBE_PASS",
+  "containerRemoved": true,
+  "volumesRemoved": true,
+  "cleanupErrors": []
+}
