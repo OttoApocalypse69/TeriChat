@@ -340,6 +340,9 @@ function AuthenticatedApp({ session, onLogout }: {
     wsStoreRef.current.selectWorkspace(created.id);
     setSelectedId(null);
     bump();
+    // The discarded initial list may contain other memberships not yet loaded.
+    // Read again after the write, retaining the selected created workspace.
+    await refreshWorkspaces();
   }
 
   const handleMyRole = useCallback((workspaceId: string, role: string) => {
@@ -362,6 +365,7 @@ function AuthenticatedApp({ session, onLogout }: {
     wsStoreRef.current.setWorkspaces(rows);
     wsStoreRef.current.selectWorkspace(joined.id);
     bump();
+    await refreshWorkspaces();
     await refreshChannels(joined.id);
     return joined.id;
   }

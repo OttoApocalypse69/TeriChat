@@ -249,6 +249,7 @@ it('resolves peer metadata for a first inbound DM without logging in again', asy
 it('creates a workspace, selects its owner context and permits creating its first channel', async () => {
   const created = { ...workspace('New Space'), id: 'new-space' };
   vi.spyOn(ApiClient.prototype, 'createWorkspace').mockResolvedValue(created);
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValueOnce([]).mockResolvedValue([created]);
   vi.spyOn(ApiClient.prototype, 'createChannel').mockResolvedValue({ ...channel('general'), workspace_id: created.id });
   await login();
   await submitInput('new workspace name', '  New Space  ');
@@ -266,6 +267,7 @@ it('preserves the workspace name and exposes create failure for retry, preventin
   const pending = deferred<ReturnType<typeof workspace>>();
   const create = vi.spyOn(ApiClient.prototype, 'createWorkspace').mockReturnValueOnce(pending.promise)
     .mockResolvedValueOnce(workspace('Retry Space'));
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValueOnce([]).mockResolvedValue([workspace('Retry Space')]);
   await login();
   await submitInput('new workspace name', 'Retry Space');
   await flush(() => input('new workspace name').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
@@ -279,15 +281,37 @@ it('preserves the workspace name and exposes create failure for retry, preventin
   expect(host.textContent).not.toContain('workspace creation failed');
 });
 
-it('does not let a workspace list started before creation erase the new workspace', async () => {
+it.each(['create', 'join'] as const)('refreshes after %s to retain existing memberships from a discarded initial list', async action => {
   const pending = deferred<ReturnType<typeof workspace>[]>();
-  vi.mocked(ApiClient.prototype.listWorkspaces).mockReturnValueOnce(pending.promise);
-  vi.spyOn(ApiClient.prototype, 'createWorkspace').mockResolvedValue(workspace('Created During Load'));
+  const existing = { ...workspace('Existing Space'), id: 'existing' };
+  const created = workspace('Created During Load');
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockReturnValueOnce(pending.promise)
+    .mockResolvedValueOnce([existing, created]);
+  vi.spyOn(ApiClient.prototype, 'createWorkspace').mockResolvedValue(created);
+  vi.spyOn(ApiClient.prototype, 'joinWorkspace').mockResolvedValue(created);
   await login();
-  await submitInput('new workspace name', 'Created During Load');
-  await flush(() => pending.resolve([]));
+  await submitInput(action === 'create' ? 'new workspace name' : 'paste invite', 'Created During Load');
+  await flush(() => pending.resolve([existing]));
+  expect(ApiClient.prototype.listWorkspaces).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toContain('Existing Space');
   expect(host.textContent).toContain('Channels · Created During Load');
   expect(host.textContent).toContain('Members · you are owner');
+});
+
+it('ignores a creation refresh superseded by a later joined workspace', async () => {
+  const firstRefresh = deferred<ReturnType<typeof workspace>[]>();
+  const first = { ...workspace('First Created'), id: 'first' };
+  const second = { ...workspace('Second Joined'), id: 'second' };
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValueOnce([])
+    .mockReturnValueOnce(firstRefresh.promise).mockResolvedValueOnce([first, second]);
+  vi.spyOn(ApiClient.prototype, 'createWorkspace').mockResolvedValue(first);
+  vi.spyOn(ApiClient.prototype, 'joinWorkspace').mockResolvedValue(second);
+  await login();
+  await submitInput('new workspace name', 'First Created');
+  await submitInput('paste invite', 'synthetic-invite');
+  await flush(() => firstRefresh.resolve([first]));
+  expect(host.textContent).toContain('Channels · Second Joined');
+  expect(host.textContent).toContain('First Created');
 });
 
 it.each(['success', 'failure'] as const)('isolates workspace creation %s from the next account', async outcome => {
