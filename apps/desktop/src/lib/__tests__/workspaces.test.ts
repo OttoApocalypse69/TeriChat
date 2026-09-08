@@ -78,6 +78,16 @@ describe('workspace selection', () => {
 });
 
 describe('channel switching clears composer state', () => {
+  it('a late channel list for another workspace preserves the current channel selection', () => {
+    const store = new WorkspaceStore();
+    store.setWorkspaces([ws({ id: 'old' }), ws({ id: 'current' })]);
+    store.selectWorkspace('current');
+    store.setChannels('current', [ch({ id: 'selected', workspace_id: 'current' })]);
+    store.selectChannel('selected');
+    store.setChannels('old', [ch({ id: 'old-channel', workspace_id: 'old' })]);
+    expect(store.selectedChannelConversationId()).toBe('conv-selected');
+  });
+
   it('flags a draft reset whenever the conversation id changes', () => {
     expect(shouldClearComposer('conv-a', 'conv-b')).toBe(true);
     expect(shouldClearComposer('conv-a', 'conv-a')).toBe(false);

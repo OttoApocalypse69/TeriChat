@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../api';
 import {
-  MemberDirectory,
   canUseInvitePanel,
   friendlyMemberError,
   gateBan,
@@ -192,59 +191,5 @@ describe('403 surfacing on invite/member errors', () => {
   it('falls back for non-API errors', () => {
     expect(friendlyMemberError(new Error('boom'))).toBe('boom');
     expect(friendlyMemberError('nope')).toBe('request failed');
-  });
-});
-
-describe('local member directory (no server list endpoint)', () => {
-  function audit(
-    action: string,
-    target: string | null,
-    detail: Record<string, unknown> = {},
-  ) {
-    return {
-      id: `a-${action}-${target ?? 'none'}`,
-      workspace_id: 'ws-1',
-      actor_id: 'actor-1',
-      action,
-      target_id: target,
-      detail,
-      created_at: '2026-01-01T00:00:00Z',
-    };
-  }
-
-  it('seeds self, folds audit seats, and sorts self first', () => {
-    const dir = new MemberDirectory();
-    dir.seedSelf('me', 'alice', 'admin');
-    dir.mergeAudit([
-      audit('member.added', 'u2', { role: 'member' }),
-      audit('invite.accepted', 'u3'),
-      audit('member.role_changed', 'u2', { from: 'member', to: 'moderator' }),
-    ]);
-    const rows = dir.list();
-    expect(rows[0]).toMatchObject({ userId: 'me', role: 'admin' });
-    expect(rows.find((r) => r.userId === 'u2')).toMatchObject({
-      role: 'moderator',
-    });
-    // invite.accepted carries no role: the seat is known but role stays null.
-    expect(rows.find((r) => r.userId === 'u3')).toMatchObject({ role: null });
-  });
-
-  it('removes kicked/left seats and tracks bans for unban', () => {
-    const dir = new MemberDirectory();
-    dir.seedSelf('me', 'alice', 'admin');
-    dir.mergeAudit([
-      audit('member.added', 'u2', { role: 'member' }),
-      audit('member.banned', 'u2', { reason: '' }),
-    ]);
-    expect(dir.list().find((r) => r.userId === 'u2')).toMatchObject({
-      banned: true,
-    });
-    dir.mergeAudit([audit('member.unbanned', 'u2', {})]);
-    expect(dir.list().find((r) => r.userId === 'u2')).toMatchObject({
-      banned: false,
-    });
-    dir.mergeAudit([audit('member.added', 'u9', { role: 'guest' })]);
-    dir.mergeAudit([audit('member.kicked', 'u9', {})]);
-    expect(dir.list().find((r) => r.userId === 'u9')).toBeUndefined();
   });
 });

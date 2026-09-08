@@ -3,6 +3,7 @@ import ChannelList from './components/ChannelList';
 import ConnectionIndicator from './components/ConnectionIndicator';
 import ConversationList from './components/ConversationList';
 import ConversationView from './components/ConversationView';
+import CreateWorkspace from './components/CreateWorkspace';
 import InvitePanel from './components/InvitePanel';
 import JoinWorkspace from './components/JoinWorkspace';
 import LoginView from './components/LoginView';
@@ -77,6 +78,7 @@ function AuthenticatedApp({ session, onLogout }: {
   const [wsLoading, setWsLoading] = useState(false);
   const [wsError, setWsError] = useState<string | null>(null);
   const [chLoading, setChLoading] = useState(false);
+  const workspaceListRevision = useRef(0);
 
   const store = storeRef.current;
   const wsStore = wsStoreRef.current;
@@ -179,11 +181,12 @@ function AuthenticatedApp({ session, onLogout }: {
 
   const refreshWorkspaces = useCallback(async () => {
     if (!live.current) return;
+    const revision = ++workspaceListRevision.current;
     setWsLoading(true);
     setWsError(null);
     try {
       const rows = await api.listWorkspaces();
-      if (!live.current) return;
+      if (!live.current || workspaceListRevision.current !== revision) return;
       wsStoreRef.current.setWorkspaces(rows);
       // Auto-select the first workspace on first load for an Alpha-sized
       // one-click path into channels.
@@ -198,9 +201,9 @@ function AuthenticatedApp({ session, onLogout }: {
       }
       bump();
     } catch (err) {
-      if (live.current) setWsError(err instanceof Error ? err.message : 'workspaces failed');
+      if (live.current && workspaceListRevision.current === revision) setWsError(err instanceof Error ? err.message : 'workspaces failed');
     } finally {
-      if (live.current) setWsLoading(false);
+      if (live.current && workspaceListRevision.current === revision) setWsLoading(false);
     }
   }, [api, bump, token]);
 
@@ -324,10 +327,34 @@ function AuthenticatedApp({ session, onLogout }: {
     bump();
   }
 
+  async function createWorkspace(name: string): Promise<void> {
+    const created = await api.createWorkspace(name);
+    if (!live.current) return;
+    // A list begun before creation must not erase the new workspace.
+    workspaceListRevision.current += 1;
+    setWsLoading(false);
+    setWsError(null);
+    wsStoreRef.current.setWorkspaces([
+      ...wsStoreRef.current.workspaces.filter(workspace => workspace.id !== created.id), created,
+    ]);
+    wsStoreRef.current.selectWorkspace(created.id);
+    setSelectedId(null);
+    bump();
+  }
+
+  const handleMyRole = useCallback((workspaceId: string, role: string) => {
+    if (!live.current) return;
+    wsStoreRef.current.setWorkspaces(wsStoreRef.current.workspaces.map(workspace =>
+      workspace.id === workspaceId ? { ...workspace, my_role: role } : workspace));
+    bump();
+  }, [bump]);
+
   /** Redeem an invite code and land in the workspace (select + channels). */
   async function joinByCode(code: string): Promise<string> {
     const joined = await api.joinWorkspace(code.trim());
     if (!live.current) return joined.id;
+    workspaceListRevision.current += 1;
+    setWsLoading(false);
     const rows = [
       ...wsStoreRef.current.workspaces.filter((w) => w.id !== joined.id),
       joined,
@@ -342,6 +369,8 @@ function AuthenticatedApp({ session, onLogout }: {
   /** Drop a left workspace from local state and clear its selection. */
   function handleLeftWorkspace(workspaceId: string): void {
     if (!live.current) return;
+    workspaceListRevision.current += 1;
+    setWsLoading(false);
     wsStoreRef.current.setWorkspaces(
       wsStore.workspaces.filter((w) => w.id !== workspaceId),
     );
@@ -370,6 +399,7 @@ function AuthenticatedApp({ session, onLogout }: {
       const current = wsStoreRef.current.channelsFor(workspaceId);
       wsStoreRef.current.setChannels(workspaceId, [...current, channel]);
       storeRef.current.addConversation(channelToConversation(channel));
+      if (wsStoreRef.current.selectedWorkspaceId !== workspaceId) return;
       wsStoreRef.current.selectChannel(channel.id);
       setSelectedId(channel.conversation_id);
       bump();
@@ -432,11 +462,13 @@ function AuthenticatedApp({ session, onLogout }: {
               onRetry={() => void refreshWorkspaces()}
             />
           </div>
+          <CreateWorkspace onCreate={createWorkspace} />
           <div className="shrink-0 border-b border-zinc-800">
             <JoinWorkspace onJoin={joinByCode} />
           </div>
           <div className="max-h-64 shrink-0 overflow-y-auto">
             <ChannelList
+              key={selectedWorkspaceId ?? 'no-workspace'}
               workspaceName={selectedWorkspace?.name ?? null}
               channels={channels}
               selectedChannelId={wsStore.selectedChannelId}
@@ -482,8 +514,8 @@ function AuthenticatedApp({ session, onLogout }: {
               workspaceId={selectedWorkspace.id}
               myRole={selectedWorkspace.my_role}
               meId={meId}
-              myHandle={handle}
               onLeft={handleLeftWorkspace}
+              onMyRole={handleMyRole}
             />
             <InvitePanel
               key={`invites-${selectedWorkspace.id}`}

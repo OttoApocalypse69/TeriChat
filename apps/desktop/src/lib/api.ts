@@ -73,6 +73,19 @@ export interface ChannelBody {
   created_at: string;
 }
 
+export interface WorkspaceMemberBody {
+  user_id: string;
+  handle: string;
+  display_name: string;
+  role: string;
+  joined_at: string;
+}
+
+export interface WorkspaceMembersPage {
+  members: WorkspaceMemberBody[];
+  next_cursor: string | null;
+}
+
 export interface InviteBody {
   id: string;
   workspace_id: string;
@@ -225,6 +238,18 @@ export class ApiClient {
 
   listWorkspaces(): Promise<WorkspaceBody[]> {
     return this.req<WorkspaceBody[]>('GET', '/v1/workspaces');
+  }
+
+  createWorkspace(name: string): Promise<WorkspaceBody> {
+    return this.req<WorkspaceBody>('POST', '/v1/workspaces', { name });
+  }
+
+  listMembers(workspaceId: string, after?: string): Promise<WorkspaceMembersPage> {
+    const query = new URLSearchParams({ limit: '100' });
+    if (after !== undefined) query.set('after', after);
+    return this.req<WorkspaceMembersPage>(
+      'GET', `/v1/workspaces/${workspaceId}/members?${query.toString()}`,
+    );
   }
 
   listChannels(workspaceId: string): Promise<ChannelBody[]> {

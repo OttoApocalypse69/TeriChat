@@ -50,6 +50,7 @@ beforeEach(async () => {
   vi.spyOn(ApiClient.prototype, 'history').mockResolvedValue([]);
   vi.spyOn(ApiClient.prototype, 'listChannels').mockResolvedValue([]);
   vi.spyOn(ApiClient.prototype, 'listAudit').mockResolvedValue([]);
+  vi.spyOn(ApiClient.prototype, 'listMembers').mockResolvedValue({ members: [], next_cursor: null });
   vi.spyOn(ApiClient.prototype, 'listInvites').mockResolvedValue([]);
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
   await flush(() => root.render(<App />));
@@ -242,4 +243,60 @@ it('resolves peer metadata for a first inbound DM without logging in again', asy
   expect(host.textContent).toContain('Incoming Friend');
   await click('@Incoming Friend');
   expect(host.querySelector('main')!.textContent).toContain('body-1');
+});
+
+
+it('creates a workspace, selects its owner context and permits creating its first channel', async () => {
+  const created = { ...workspace('New Space'), id: 'new-space' };
+  vi.spyOn(ApiClient.prototype, 'createWorkspace').mockResolvedValue(created);
+  vi.spyOn(ApiClient.prototype, 'createChannel').mockResolvedValue({ ...channel('general'), workspace_id: created.id });
+  await login();
+  await submitInput('new workspace name', '  New Space  ');
+  expect(ApiClient.prototype.createWorkspace).toHaveBeenCalledWith('New Space');
+  expect(host.textContent).toContain('Channels · New Space');
+  expect(host.textContent).toContain('Members · you are owner');
+  expect(ApiClient.prototype.listChannels).toHaveBeenCalledWith(created.id);
+  expect(input('new workspace name').value).toBe('');
+  await submitInput('new channel name', 'general');
+  expect(ApiClient.prototype.createChannel).toHaveBeenCalledWith(created.id, 'general');
+  expect(host.textContent).toContain('#general');
+});
+
+it('preserves the workspace name and exposes create failure for retry, preventing duplicate submits', async () => {
+  const pending = deferred<ReturnType<typeof workspace>>();
+  const create = vi.spyOn(ApiClient.prototype, 'createWorkspace').mockReturnValueOnce(pending.promise)
+    .mockResolvedValueOnce(workspace('Retry Space'));
+  await login();
+  await submitInput('new workspace name', 'Retry Space');
+  await flush(() => input('new workspace name').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(host.textContent).toContain('Creating…');
+  await flush(() => pending.reject(new Error('workspace creation failed')));
+  expect(host.textContent).toContain('workspace creation failed');
+  expect(input('new workspace name').value).toBe('Retry Space');
+  await submitInput('new workspace name', 'Retry Space');
+  expect(host.textContent).toContain('Channels · Retry Space');
+  expect(host.textContent).not.toContain('workspace creation failed');
+});
+
+it('does not let a workspace list started before creation erase the new workspace', async () => {
+  const pending = deferred<ReturnType<typeof workspace>[]>();
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockReturnValueOnce(pending.promise);
+  vi.spyOn(ApiClient.prototype, 'createWorkspace').mockResolvedValue(workspace('Created During Load'));
+  await login();
+  await submitInput('new workspace name', 'Created During Load');
+  await flush(() => pending.resolve([]));
+  expect(host.textContent).toContain('Channels · Created During Load');
+  expect(host.textContent).toContain('Members · you are owner');
+});
+
+it.each(['success', 'failure'] as const)('isolates workspace creation %s from the next account', async outcome => {
+  const pending = deferred<ReturnType<typeof workspace>>();
+  vi.spyOn(ApiClient.prototype, 'createWorkspace').mockReturnValueOnce(pending.promise);
+  await login(); await submitInput('new workspace name', 'private old workspace');
+  await click('Log out'); await login('b');
+  const before = host.innerHTML;
+  await flush(() => outcome === 'success'
+    ? pending.resolve(workspace('private old workspace')) : pending.reject(new Error('private old error')));
+  expect(host.innerHTML).toBe(before);
 });
