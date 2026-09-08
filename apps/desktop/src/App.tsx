@@ -72,6 +72,20 @@ function AuthenticatedApp({ session, onLogout }: {
 
   const [status, setStatus] = useState<GatewayStatus>('disconnected');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Presentation only: hiding a pane must not unmount its composer or panels.
+  const [pane, setPane] = useState<'navigation' | 'conversation' | 'details'>('navigation');
+  const navigationRef = useRef<HTMLElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
+  const detailsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (pane === 'conversation') conversationRef.current?.focus();
+    if (pane === 'navigation') (navigationRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]') ?? navigationRef.current)?.focus();
+    if (pane === 'details') detailsRef.current?.focus();
+  }, [pane, selectedId]);
+  function openConversation(id: string) {
+    setSelectedId(id);
+    setPane('conversation');
+  }
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -316,7 +330,7 @@ function AuthenticatedApp({ session, onLogout }: {
     const conv = await api.createDm(peerHandle);
     if (!live.current) return;
     storeRef.current.addConversation(conv);
-    setSelectedId(conv.id);
+    openConversation(conv.id);
     bump();
     await refreshConversations();
     await refreshHistory(conv.id);
@@ -381,6 +395,7 @@ function AuthenticatedApp({ session, onLogout }: {
     if (wsStoreRef.current.selectedWorkspaceId === workspaceId) {
       wsStoreRef.current.selectWorkspace(null);
     }
+    if (!wsStoreRef.current.selectedWorkspaceId) setPane('navigation');
     bump();
   }
 
@@ -389,7 +404,7 @@ function AuthenticatedApp({ session, onLogout }: {
     const channel = wsStoreRef.current.selectedChannel();
     if (channel) {
       storeRef.current.addConversation(channelToConversation(channel));
-      setSelectedId(channel.conversation_id);
+      openConversation(channel.conversation_id);
       bump();
     }
   }
@@ -405,7 +420,7 @@ function AuthenticatedApp({ session, onLogout }: {
       storeRef.current.addConversation(channelToConversation(channel));
       if (wsStoreRef.current.selectedWorkspaceId !== workspaceId) return;
       wsStoreRef.current.selectChannel(channel.id);
-      setSelectedId(channel.conversation_id);
+      openConversation(channel.conversation_id);
       bump();
       await refreshHistory(channel.conversation_id);
     } catch (err) {
@@ -438,10 +453,10 @@ function AuthenticatedApp({ session, onLogout }: {
   }, [selectedId]);
 
   return (
-    <div className="flex h-full flex-col bg-zinc-950 text-zinc-100">
-      <header className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-        <span className="text-sm font-semibold">
-          UnknownChat <span className="text-zinc-500">· {handle}</span>
+    <div className="chat-shell flex h-full flex-col bg-zinc-950 text-zinc-100" data-pane={pane}>
+      <header className="app-header flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+        <span className="min-w-0 text-sm font-semibold">
+          <span className="brand-name">UnknownChat</span> <span className="account-handle block truncate text-xs font-normal text-zinc-400">@{handle}</span>
         </span>
         <span className="flex items-center gap-3">
           <ConnectionIndicator status={status} />
@@ -454,9 +469,12 @@ function AuthenticatedApp({ session, onLogout }: {
           </button>
         </span>
       </header>
-      <div className="flex min-h-0 flex-1">
-        <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800">
-          <div className="max-h-48 shrink-0 overflow-y-auto">
+      <div className="chat-layout flex min-h-0 flex-1">
+        <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation flex shrink-0 flex-col border-r border-zinc-800">
+          <h1 className="px-4 pb-2 pt-4 text-lg font-semibold">Conversations</h1>
+          {selectedWorkspace && <button type="button" className="details-toggle nav-action mx-3 mb-2" onClick={() => setPane('details')}>Workspace details</button>}
+          {selected && <button type="button" className="mobile-only nav-action mx-3 mb-2" onClick={() => setPane('conversation')}>Return to conversation</button>}
+          <div className="shrink-0">
             <WorkspaceList
               workspaces={wsStore.workspaces}
               selectedWorkspaceId={selectedWorkspaceId}
@@ -470,30 +488,35 @@ function AuthenticatedApp({ session, onLogout }: {
           <div className="shrink-0 border-b border-zinc-800">
             <JoinWorkspace onJoin={joinByCode} />
           </div>
-          <div className="max-h-64 shrink-0 overflow-y-auto">
+          <div className="shrink-0">
             <ChannelList
               key={selectedWorkspaceId ?? 'no-workspace'}
               workspaceName={selectedWorkspace?.name ?? null}
               channels={channels}
-              selectedChannelId={wsStore.selectedChannelId}
+              selectedChannelId={selected?.kind === 'channel' ? wsStore.selectedChannelId : null}
               loading={chLoading}
               error={channelsError}
               onSelect={selectChannel}
               onCreateChannel={createChannel}
             />
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="shrink-0">
             <ConversationList
               conversations={dmConversations}
               messagesByConversation={store.messages}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={openConversation}
               onOpenDm={openDm}
             />
           </div>
         </aside>
-        <main className="min-w-0 flex-1" key={selectedId ?? 'none'}>
+        <main ref={conversationRef} tabIndex={-1} aria-label="Conversation" className="chat-main min-w-0 flex-1" key={selectedId ?? 'none'}>
+          <div className="pane-toolbar">
+            <button type="button" className="mobile-only nav-action" onClick={() => setPane('navigation')}>← Back to conversations</button>
+            {selectedWorkspace && <button type="button" className="details-toggle nav-action" aria-controls="workspace-details" onClick={() => setPane('details')}>Workspace details</button>}
+          </div>
           <ConversationView
+            isActivePane={pane === 'conversation'}
             conversation={selected}
             messages={messages}
             meId={meId}
@@ -502,11 +525,12 @@ function AuthenticatedApp({ session, onLogout }: {
             sending={sending}
             error={error}
             onSend={send}
-            title={channelTitle}
+            title={selected?.kind === 'channel' ? channelTitle : null}
           />
         </main>
         {selectedWorkspace && (
-          <aside className="w-80 shrink-0 overflow-y-auto border-l border-zinc-800">
+          <aside ref={detailsRef} tabIndex={-1} id="workspace-details" aria-label="Workspace details" className="workspace-details shrink-0 overflow-y-auto border-l border-zinc-800">
+            <button type="button" className="details-toggle nav-action m-3" onClick={() => setPane(selected ? 'conversation' : 'navigation')}>← Back</button>
             <div className="border-b border-zinc-800 p-2">
               <h2 className="truncate text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
                 {selectedWorkspace.name} · {selectedWorkspace.my_role}

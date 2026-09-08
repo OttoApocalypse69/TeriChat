@@ -7,3 +7,90 @@ body,
 #root {
   height: 100%;
 }
+
+@layer base {
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #09090b; }
+  button, input, select { font: inherit; }
+  button:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid #6ee7b7;
+    outline-offset: 3px;
+  }
+  button:disabled { cursor: not-allowed; }
+  input { min-width: 0; }
+  input::placeholder { color: #a1a1aa; }
+}
+
+/* Pane visibility is CSS-only, so resizing/back navigation keeps local drafts
+   and workspace panels mounted. Conversation/session keys still reset them. */
+.chat-shell { height: 100dvh; }
+.app-header { flex-shrink: 0; background: #101113; }
+.brand-name { letter-spacing: -0.025em; }
+.brand-name::before {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 8px;
+  border-radius: 3px;
+  background: #34d399;
+}
+.account-handle { max-width: 24rem; }
+.chat-navigation { width: 288px; overflow-y: auto; background: #111214; }
+.chat-main { display: flex; flex-direction: column; }
+.workspace-details { width: 288px; background: #111214; overflow-wrap: anywhere; }
+.chat-navigation > *, .workspace-details > * { min-width: 0; }
+.chat-navigation h2, .workspace-details h2 { overflow-wrap: anywhere; }
+.chat-navigation button, .workspace-details button, .app-header button { min-height: 36px; }
+.chat-navigation input, .workspace-details input { min-height: 40px; }
+.chat-navigation .text-zinc-500, .workspace-details .text-zinc-500 { color: #a1a1aa; }
+.chat-navigation button[aria-current='page'] {
+  box-shadow: inset 3px 0 #34d399;
+  color: #ecfdf5;
+}
+.conversation-row { border: 1px solid transparent; }
+.conversation-row[aria-current='page'] { border-color: #245344; }
+.conversation-header { background: #111214; }
+.conversation-header .text-zinc-500 { color: #a1a1aa; }
+.message-history { scrollbar-gutter: stable; }
+.message-bubble { width: fit-content; max-width: min(80%, 48rem); overflow-wrap: anywhere; }
+.message-meta { font-size: 11px; line-height: 1.5; }
+.message-composer { padding-bottom: max(16px, env(safe-area-inset-bottom)); background: #111214; }
+.message-composer input { font-size: 16px; }
+.nav-action { border: 1px solid #3f3f46; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #d4d4d8; }
+.nav-action:hover { background: #27272a; color: #fafafa; }
+.mobile-only, .details-toggle, .pane-toolbar { display: none; }
+
+@media (max-width: 1199px) {
+  .workspace-details { display: none; }
+  .details-toggle { display: inline-block; }
+  .pane-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #27272a; }
+  .pane-toolbar:has(:only-child.mobile-only) { display: none; }
+  .chat-shell[data-pane='details'] .workspace-details { display: block; flex: 1; min-width: 0; }
+  .chat-shell[data-pane='details'] .chat-main { display: none; }
+}
+
+@media (max-width: 639px) {
+  .app-header { padding: 10px 12px; }
+  .app-header > span:last-child { gap: 8px; flex-shrink: 0; }
+  .app-header button { min-height: 40px; }
+  .account-handle { max-width: 36vw; }
+  .chat-navigation { display: none; width: 100%; border-right: 0; }
+  .chat-main { display: none; }
+  .mobile-only { display: inline-block; }
+  .pane-toolbar, .pane-toolbar:has(:only-child.mobile-only) { display: flex; }
+  .chat-shell[data-pane='navigation'] .chat-navigation { display: flex; }
+  .chat-shell[data-pane='conversation'] .chat-main { display: flex; }
+  .chat-shell[data-pane='details'] .workspace-details { border-left: 0; }
+  .chat-navigation button, .workspace-details button, .nav-action { min-height: 44px; }
+  .conversation-header { padding: 12px; }
+  .conversation-header > span:last-child { display: none; } /* status remains in app header */
+  .plaintext-warning { padding: 8px 12px; }
+  .message-history { padding: 12px; }
+  .message-bubble { max-width: 92%; padding: 10px 12px; }
+  .message-composer { padding: 12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-shell .animate-pulse { animation: none; }
+}

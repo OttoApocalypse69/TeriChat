@@ -4,13 +4,14 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer as httpServer, request } from 'node:http';
 import { createServer as netServer } from 'node:net';
-import { mkdirSync, writeFileSync, createWriteStream, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, createWriteStream, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { createServer, build } from 'vite';
 import react from '@vitejs/plugin-react';
 import { validateHistory, validateFullAcceptance } from './report.mjs';
+import { verifyChatLayout } from './chat-layout.mjs';
 
 const desktop = fileURLToPath(new URL('../', import.meta.url));
 const repo = path.resolve(desktop, '../..');
@@ -122,6 +123,9 @@ function observe(page, key) {
 try {
   // Fail rather than commandeer an existing container with the reserved name.
   observations.head = command('git', ['rev-parse', 'HEAD'], { cwd: repo });
+  const sourceFiles = readdirSync(path.join(desktop, 'src'), { recursive: true }).filter(name => /\.(tsx?|css)$/.test(name)).sort();
+  observations.sourceSha256 = Object.fromEntries(sourceFiles.map(name => [name, createHash('sha256').update(readFileSync(path.join(desktop, 'src', name))).digest('hex')]));
+  observations.layoutHarnessSha256 = createHash('sha256').update(readFileSync(path.join(desktop, 'acceptance/chat-layout.mjs'))).digest('hex');
   observations.harnessSha256 = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
   assert.equal(command('docker', ['ps', '-a', '--filter', `name=^/${container}$`, '--format', '{{.ID}}']), '', 'reserved container already exists');
   await child('cargo', ['build', '--locked', '-p', 'terichat-server', '--manifest-path', path.join(repo, 'Cargo.toml'), '--target-dir', path.join(runtime, 'server-target')], 'server-build', {}, true);
@@ -310,9 +314,14 @@ try {
   await openDm(b, 'acceptance_b'); await bodies(b, expected);
   step('account switch clears other account private conversation and restores own history');
   phase = 'renderer-reload';
+  // Additional real synthetic fixtures for the three-pane/responsive UI checks.
+  const layoutWorkspace = await api(backend, 'POST', '/v1/workspaces', { name: 'Acceptance Studio' }, accounts.acceptance_b.token);
+  await api(backend, 'POST', `/v1/workspaces/${layoutWorkspace.id}/channels`, { name: 'general' }, accounts.acceptance_b.token);
   await b.reload(); await login(b, 'acceptance_b'); await openDm(b, 'acceptance_a'); await bodies(b, expected);
   step('full renderer reload/login restores all history without duplicates');
   await b.screenshot({ path: path.join(artifact, 'final.png') });
+  observations.chatLayout = await verifyChatLayout(b, artifact, send, native, text => send(a, text));
+  step('responsive chat navigation, wrapping, composer and draft preservation');
   observations.fullCampaignComplete = true;
   } else step(`${native ? 'native' : 'browser'} login DOM and screenshot verified`);
   }
@@ -323,7 +332,14 @@ try {
 } finally {
   const cleanupErrors = [];
   const cleanup = async fn => { try { await fn(); } catch (error) { cleanupErrors.push(error.message); process.exitCode = 1; } };
-  for (const browser of browsers) await browser.close().catch(() => {});
+  // Drain browser-adapter requests before disposing their request contexts.
+  // A failing assertion can otherwise race route.fetch and abort all cleanup.
+  for (const browser of browsers) {
+    for (const context of browser.contexts()) for (const page of context.pages()) {
+      await cleanup(() => page.unrouteAll({ behavior: 'wait' }));
+    }
+    await browser.close().catch(() => {});
+  }
   for (const p of children.reverse()) if (p.exitCode === null) {
     await cleanup(async () => {
       command('taskkill.exe', ['/PID', String(p.pid), '/T', '/F']);

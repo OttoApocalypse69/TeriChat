@@ -69,9 +69,10 @@ export default function ChannelList({
             <button
               type="button"
               onClick={() => onSelect(c.id)}
+              aria-current={c.id === selectedChannelId ? 'page' : undefined}
               className={`w-full truncate rounded px-2 py-1.5 text-left text-sm ${
                 c.id === selectedChannelId
-                  ? 'bg-zinc-700 font-semibold'
+                  ? 'bg-emerald-950 font-semibold'
                   : 'hover:bg-zinc-800'
               }`}
               title={`#${c.name}`}
@@ -90,6 +91,7 @@ export default function ChannelList({
       <form onSubmit={create} className="mt-2 flex gap-1">
         <input
           className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          aria-label="New channel name"
           placeholder="new channel name"
           value={name}
           onChange={(e) => setName(e.target.value)}
