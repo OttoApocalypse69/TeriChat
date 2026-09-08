@@ -736,7 +736,7 @@ pub async fn list_workspaces(
     user_id: Uuid,
 ) -> Result<Vec<(Workspace, Role)>, WorkspacesError> {
     let rows: Vec<(WorkspaceRow, String)> = sqlx::query_as(
-        "SELECT w.id, w.name, w.owner_id, w.created_at, w.updated_at, m.role
+        "SELECT ROW(w.id, w.name, w.owner_id, w.created_at, w.updated_at), m.role
          FROM workspaces w JOIN workspace_members m ON m.workspace_id = w.id
          WHERE m.user_id = $1 ORDER BY w.created_at DESC",
     )

@@ -38,6 +38,7 @@ export default function ConversationView({
   title,
 }: Props) {
   const [draft, setDraft] = useState('');
+  const draftRevision = useRef(0);
   const [sendError, setSendError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -57,11 +58,12 @@ export default function ConversationView({
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    if (!draft.trim()) return;
+    if (sending || !draft.trim()) return;
+    const revision = draftRevision.current;
     setSendError(null);
     try {
       await onSend(draft.trim());
-      setDraft('');
+      if (draftRevision.current === revision) setDraft('');
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'send failed');
     }
@@ -152,7 +154,10 @@ export default function ConversationView({
           className="flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
           placeholder="Message (demo plaintext → opaque envelope)"
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            draftRevision.current += 1;
+            setDraft(e.target.value);
+          }}
         />
         <button
           type="submit"

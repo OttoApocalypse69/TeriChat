@@ -4,7 +4,7 @@ This file is the engineering priority source of truth.
 
 ## Engineering setup backlog — Rounds 1 and 2
 
-**All items below are pending implementation/verification.** Documentation acceptance is not completion. Use this queue alongside the product milestones; retain the P0 recovery/security decision work. `P*` means roadmap urgency, never review severity.
+**Status reconciliation is in progress.** Several baseline components below are implemented, but the original checkboxes are not a reliable live completion dashboard. Use [the implementation evidence snapshot](docs/development/IMPLEMENTATION_STATUS.md) and linked issues to distinguish implemented, verified, and outstanding acceptance criteria. Do not infer whole-milestone completion from merged code or green unit tests. Documentation acceptance is not completion. Retain the P0 recovery/security decision work. `P*` means roadmap urgency, never review severity.
 
 | ID | Priority | Accountable party | Task and acceptance evidence | Dependencies |
 |---|---|---|---|---|

@@ -113,6 +113,40 @@ describe('gateway frames + resume replay without duplicates', () => {
     expect(store.lastEventId).toBe('e3');
   });
 
+  it('bounds transport dedup while notifying opt-in callers of retained duplicates', () => {
+    const socket = mockSocket();
+    const onEvent = vi.fn();
+    const onDuplicateEvent = vi.fn();
+    const gw = new GatewayClient({
+      httpBase: 'http://127.0.0.1:3001', token: 'synthetic',
+      getResumeAfter: () => null, onStatus: () => {},
+      onEvent, onDuplicateEvent, wsFactory: () => socket, heartbeatMs: 0,
+    });
+    const deliver = (id: string) => socket.peerText(JSON.stringify({
+      op: 'event', event: { event_id: id, topic: 'message.created', payload: {} },
+    }));
+    try {
+      gw.connect();
+      for (let i = 0; i < 1025; i++) deliver(`e${i}`);
+      expect(gw.seenEventIds.size).toBe(1024);
+      expect(gw.seenEventIds.has('e0')).toBe(false);
+      expect(onEvent).toHaveBeenCalledTimes(1025);
+      deliver('e1024');
+      expect(onDuplicateEvent).toHaveBeenCalledExactlyOnceWith({ id: 'e1024', topic: 'message.created', payload: {} });
+      expect(onEvent).toHaveBeenCalledTimes(1025);
+      // Eviction permits redelivery; application effects still need their own dedup.
+      deliver('e0');
+      expect(onEvent).toHaveBeenCalledTimes(1026);
+      expect(onDuplicateEvent).toHaveBeenCalledTimes(1);
+      expect(gw.seenEventIds.size).toBe(1024);
+      gw.close();
+      deliver('e0');
+      expect(onDuplicateEvent).toHaveBeenCalledTimes(1);
+    } finally {
+      gw.close();
+    }
+  });
+
   it('gateway client sends resume_after on reconnect and ignores redelivery', () => {
     vi.useFakeTimers();
     try {

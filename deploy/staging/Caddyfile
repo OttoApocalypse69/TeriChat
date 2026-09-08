@@ -7,8 +7,11 @@
 # host port remains a publish detail and :443 migration stays trivial.
 http://{$STAGING_HOST}, http://chat.unknownchat.xyz {
     # API + gateway WebSocket (upgrade handled automatically).
-    # /health is explicit so edge checks never fall through to the SPA.
+    # Health/readiness must preserve API status, never SPA's misleading 200.
     handle /health {
+        reverse_proxy api:3001
+    }
+    handle /ready {
         reverse_proxy api:3001
     }
     handle /v1/* {

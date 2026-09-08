@@ -67,7 +67,22 @@ Final logo, exact boost prices, Kubernetes, marketplace economics, enterprise ce
 
 ---
 
-## Implementation progress (agent-maintained — Teri reads this, not the five boxes above)
+## Current implementation status
+
+The merged baseline is `c325b4c90df5087a6f10ff6b5a2bc24787a88ec1` (PR #22). The application is branded **UnknownChat**; repository and internal identifiers remain TeriChat. Read [the evidence snapshot](docs/development/IMPLEMENTATION_STATUS.md) for current tests and outstanding acceptance criteria.
+
+- [x] UI polish and visible rename merged in PR #22.
+- [x] Fresh local web build/typecheck and 46 frontend tests passed on the same source tree as this baseline.
+- [x] Read-only acceptance audits completed; findings are recorded in the evidence snapshot.
+- [ ] Repair desktop #5 account-switch/history/draft defects, Stats #7 late-commit loss, and staging #9 gaps with targeted regression evidence.
+- [ ] Maintainer disposition for #10: reviewer found criteria met; issue has not been closed.
+- [ ] Implement and verify MLS/device state (#6) and recovery mnemonic format (#11). Current client envelopes are demo plaintext, not E2EE.
+- [ ] Verify encrypted off-machine backup and a restore drill for #9. A reachable staging URL is insufficient.
+- [ ] Resume ledger #8 after the P0 security/client gaps and dependencies are resolved.
+
+## Historical implementation notes
+
+The notes below record earlier development checkpoints. Test counts, open-PR statements, machine state, access invitations, and protection claims are historical, not fresh verification. The current snapshot above takes precedence for implementation status.
 
 Remote: [OttoApocalypse69/TeriChat](https://github.com/OttoApocalypse69/TeriChat) (private).
 `main` + `setup/baseline` pushed; PR #1 open (backend A–C, CI green). No Ryan

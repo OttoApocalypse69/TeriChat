@@ -452,7 +452,7 @@ mod tests {
         // Fold the event the background worker would have folded.
         let event: (Uuid, String, serde_json::Value) = sqlx::query_as(
             "SELECT id, topic, payload FROM outbox
-             WHERE (payload->>'conversation_id')::uuid = $1
+             WHERE payload->>'conversation_id' = CAST($1 AS UUID)::text
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(dm.id)
@@ -730,6 +730,219 @@ mod tests {
             "expected no duplicate delivery, got {quiet:?}"
         );
 
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_replay_drains_all_pages_and_quiet_conversation() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("service-enabled regression requires DATABASE_URL");
+        let pool = db_pool(&url).await.unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let tag = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap()
+            .to_string();
+        let (owner_token, token, user, dm) = ws_fixture(&pool, &tag).await;
+        let quiet = messaging::create_conversation(&pool, user, "group", &[])
+            .await
+            .unwrap()
+            .id;
+        let owner = auth::authenticate(&pool, &owner_token)
+            .await
+            .unwrap()
+            .user_id;
+        let hidden_ws = workspaces::create_workspace(&pool, owner, "hidden")
+            .await
+            .unwrap();
+        let hidden = workspaces::create_channel(&pool, owner, hidden_ws.id, "hidden")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_participants(conversation_id,user_id) VALUES ($1,$2)",
+        )
+        .bind(hidden.conversation_id)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for _ in 0..101 {
+            sqlx::query("INSERT INTO outbox(id,topic,payload,published_at) VALUES ($1,'message.created',$2,now())")
+                .bind(Uuid::now_v7()).bind(serde_json::json!({"conversation_id":hidden.conversation_id,"data":{"seq":-1}}))
+                .execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO outbox(id,topic,payload,published_at) VALUES ($1,'message.created',$2,now())")
+            .bind(Uuid::now_v7()).bind(serde_json::json!({"conversation_id":"not-a-uuid"}))
+            .execute(&pool).await.unwrap();
+        for seq in 1..=102 {
+            let conversation = if seq == 102 { quiet } else { dm };
+            sqlx::query("INSERT INTO outbox(id,topic,payload,published_at) VALUES ($1,'message.created',$2,now())")
+                .bind(Uuid::now_v7())
+                .bind(serde_json::json!({"conversation_id":conversation,"data":{"seq":seq}}))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let mut ws = connect_identified(&addr, &token, None).await;
+        for seq in 1..=102 {
+            expect_event(&mut ws, seq).await;
+        }
+        ws_send(&mut ws, serde_json::json!({"op":"heartbeat","seq":77})).await;
+        assert_eq!(ws_next(&mut ws).await["op"], "heartbeat_ack");
+        ws.close(None).await.unwrap();
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_live_delivers_reversed_commits() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("service-enabled regression requires DATABASE_URL");
+        let pool = db_pool(&url).await.unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let tag = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap()
+            .to_string();
+        let (_, token, _, dm) = ws_fixture(&pool, &tag).await;
+        let low = Uuid::now_v7();
+        let high = Uuid::now_v7();
+        assert!(low < high);
+        let entry = |id, seq| messaging::OutboxEntry {
+            id,
+            topic: "message.created".into(),
+            payload: serde_json::json!({"conversation_id":dm,"data":{"seq":seq}}),
+        };
+        let low_entry = entry(low, 1);
+        let high_entry = entry(high, 2);
+        let mut first = pool.begin().await.unwrap();
+        let mut second = pool.begin().await.unwrap();
+        for (tx, event) in [(&mut first, &low_entry), (&mut second, &high_entry)] {
+            sqlx::query(
+                "INSERT INTO outbox(id,topic,payload,published_at) VALUES ($1,$2,$3,now())",
+            )
+            .bind(event.id)
+            .bind(&event.topic)
+            .bind(&event.payload)
+            .execute(&mut **tx)
+            .await
+            .unwrap();
+        }
+        second.commit().await.unwrap();
+        let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: hub.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let mut ws = connect_identified(&addr, &token, None).await;
+        assert_eq!(expect_event(&mut ws, 2).await, high);
+        first.commit().await.unwrap();
+        hub.send(low_entry).unwrap();
+        assert_eq!(expect_event(&mut ws, 1).await, low);
+        hub.send(high_entry).unwrap();
+        ws_send(&mut ws, serde_json::json!({"op":"heartbeat","seq":19})).await;
+        assert_eq!(ws_next(&mut ws).await["op"], "heartbeat_ack");
+        ws.close(None).await.unwrap();
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_lag_recovers_more_than_one_page() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("service-enabled regression requires DATABASE_URL");
+        let pool = db_pool(&url).await.unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let tag = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap()
+            .to_string();
+        let (_, token, user, dm) = ws_fixture(&pool, &tag).await;
+        let quiet = messaging::create_conversation(&pool, user, "group", &[])
+            .await
+            .unwrap()
+            .id;
+        let (hub, _) = broadcast::channel(1);
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: hub.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let mut ws = connect_identified(&addr, &token, None).await;
+        for seq in 1..=102 {
+            let conversation = if seq == 102 { quiet } else { dm };
+            sqlx::query("INSERT INTO outbox(id,topic,payload,published_at) VALUES ($1,'message.created',$2,now())")
+                .bind(Uuid::now_v7()).bind(serde_json::json!({"conversation_id":conversation,"data":{"seq":seq}}))
+                .execute(&pool).await.unwrap();
+        }
+        // Current-thread runtime, no await between sends: capacity one must
+        // report Lagged before either frame can be consumed by the server.
+        for _ in 0..2 {
+            hub.send(messaging::OutboxEntry {
+                id: Uuid::now_v7(),
+                topic: "irrelevant".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        }
+        for seq in 1..=102 {
+            expect_event(&mut ws, seq).await;
+        }
+        ws.close(None).await.unwrap();
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_identify_has_a_deadline() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("service-enabled regression requires DATABASE_URL");
+        let pool = db_pool(&url).await.unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let tag = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap()
+            .to_string();
+        let (_, token, _, _) = ws_fixture(&pool, &tag).await;
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub: broadcast::channel(1).0,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+                .await
+                .unwrap();
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(7), ws.next()).await;
+        assert!(
+            closed.is_ok(),
+            "unidentified connection must be closed within the deadline"
+        );
+        assert!(!matches!(closed.unwrap(), Some(Ok(WsMessage::Text(_)))));
         server.abort();
         pool.close().await;
     }
@@ -1393,6 +1606,9 @@ mod tests {
         )
         .await;
         // Guest replays what it may read; victim replays as a member.
+        workspaces::ensure_all_participation(&pool, guest_id)
+            .await
+            .expect("heal guest before replay");
         let mut guest_ws = connect_identified(&addr, &guest_token, None).await;
         assert_eq!(
             ws_next(&mut guest_ws).await["event"]["payload"]["data"]["seq"],

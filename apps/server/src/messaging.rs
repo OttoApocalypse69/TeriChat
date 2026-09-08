@@ -554,8 +554,13 @@ pub async fn mark_published(pool: &sqlx::PgPool, ids: &[Uuid]) -> Result<(), Mes
 }
 
 /// Events visible to `user_id` after `after` (exclusive, `None` = from the
-/// start), oldest first. Drives gateway resume; `UUIDv7` ids are the global
-/// order. Membership-filtered through participants.
+/// start), allocation-ordered. This is a scan cursor, NOT a commit watermark:
+/// late commits below `after` require client history reconciliation on resume.
+/// The gateway subscribes before scanning, never UUID-filters live events,
+/// and rescans retained history on broadcast lag. Membership prefiltered via
+/// participants; the gateway applies authoritative visibility before sending.
+/// Compare text rather than casting untrusted payload fields to UUID: malformed
+/// unrelated events must not abort every user's replay.
 pub async fn events_after(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -564,8 +569,8 @@ pub async fn events_after(
 ) -> Result<Vec<OutboxEntry>, MessagingError> {
     let rows: Vec<(Uuid, String, serde_json::Value)> = sqlx::query_as(
         r"SELECT o.id, o.topic, o.payload FROM outbox o
-          WHERE (payload->>'conversation_id')::uuid IN (
-              SELECT conversation_id FROM conversation_participants WHERE user_id = $1
+          WHERE payload->>'conversation_id' IN (
+              SELECT conversation_id::text FROM conversation_participants WHERE user_id = $1
           )
           AND (CAST($2 AS UUID) IS NULL OR o.id > CAST($2 AS UUID))
           ORDER BY o.id ASC LIMIT $3",
@@ -691,19 +696,25 @@ mod tests {
         assert_eq!(first.ciphertext, b"bro");
 
         // Retried send returns the original without a new sequence or event.
-        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox")
-            .fetch_one(&pool)
-            .await
-            .expect("count outbox");
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox WHERE payload->>'conversation_id' = $1",
+        )
+        .bind(dm.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count outbox");
         let (retry, created) = send_message(&pool, alice.id, dm.id, key, b"bro", None)
             .await
             .expect("retry send");
         assert!(!created);
         assert_eq!(retry.id, first.id);
-        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox")
-            .fetch_one(&pool)
-            .await
-            .expect("count outbox");
+        let after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox WHERE payload->>'conversation_id' = $1",
+        )
+        .bind(dm.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count outbox");
         assert_eq!(before, after, "retry must not emit an event");
 
         // Bob reads history; Mallory hits the membership wall either way.

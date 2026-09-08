@@ -7,6 +7,24 @@ on:
 jobs:
   baseline:
     runs-on: ubuntu-latest
+    # The workspace suite includes mandatory service-backed regressions.
+    # Provision a synthetic database rather than allowing tests to skip.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: baseline_test
+          POSTGRES_PASSWORD: baseline_synthetic_only
+          POSTGRES_DB: baseline_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U baseline_test -d baseline_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://baseline_test:baseline_synthetic_only@localhost:5432/baseline_test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
