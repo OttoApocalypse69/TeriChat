@@ -1,0 +1,8 @@
+{
+  "head": "3c501c70356ed16af8c3c0b419835f24a9a8802a",
+  "scope": "workspace-browser-http-adapter",
+  "result": "FAIL",
+  "steps": [],
+  "error": "locator.fill: Timeout 15000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByLabel('Workspace name', { exact: true })\u001b[22m\n",
+  "cleanup": "PASS"
+}
