@@ -41,17 +41,22 @@ jobs:
         run: cargo build --workspace
 
   arm64-verify:
-    # This runner shares the Oracle A1 host with staging services, so keep the
-    # job compile-only: no Docker socket, sudo, staging credentials, or DB access.
-    # Fork PRs are deliberately excluded from the persistent self-hosted host.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Owner-approved trusted-main verification only on the shared Oracle host.
+    # Compilation executes build scripts/macros: compile-only is NOT isolation.
+    # Never schedule PRs (including same-repository PRs), tags or feature pushes.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, ARM64, oracle-a1]
+    concurrency:
+      group: arm64-trusted-main-${{ github.repository }}
+      cancel-in-progress: true
     timeout-minutes: 30
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: "1.97"
       - name: Runner identity
@@ -59,9 +64,9 @@ jobs:
           uname -a
           rustc -vV
       - name: ARM64 workspace check
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
       - name: Compile test targets
-        run: cargo test --workspace --no-run
+        run: cargo test --workspace --no-run --locked
 
   db-tests:
     runs-on: ubuntu-latest
