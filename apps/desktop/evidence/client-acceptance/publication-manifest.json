@@ -1,0 +1,83 @@
+{
+  "scope": "Curated synthetic acceptance text only; paths relative to this manifest. Manifest itself is the control file and excluded from its self-hash.",
+  "files": [
+    {
+      "path": "handoff.json",
+      "sha256": "5424f08b8669baef17902dc3c54ebb926fd4cf6d2ce9b1d428719d4e99336a8d",
+      "bytes": 10869
+    },
+    {
+      "path": "s2-history-red.log",
+      "sha256": "319bbe9208df7d3a832ca2073b719ea68af4ff95a5b7dc56e27c5e2872652110",
+      "bytes": 5514
+    },
+    {
+      "path": "s2-history-green.log",
+      "sha256": "5a3e17b7a2bbcd23bc427111aafaa522e56d07924161c38688a1af47f354cb45",
+      "bytes": 433
+    },
+    {
+      "path": "s2-scope-red.log",
+      "sha256": "8544bca588834e558359fa6b792e368b0fedfdb536011aab286ce051c57d8d25",
+      "bytes": 7971
+    },
+    {
+      "path": "s2-scope-green.log",
+      "sha256": "8c87da3ed661804ad3dba8b133dff1cc9d820df8b832c67bd40b7461cd882dae",
+      "bytes": 999
+    },
+    {
+      "path": "s2-real-evidence-verification.json",
+      "sha256": "c544a6d2dadf6c9a26fe327c6e52a0040b67745c6bf686ea0c98bb8a0eebab0a",
+      "bytes": 1437
+    },
+    {
+      "path": "2026-09-08T07-11-42-115Z/result.json",
+      "sha256": "b63332c53876b15ce472fe984f3cdc46a4a9e0701e9ad52000acfb7dec370568",
+      "bytes": 94290
+    },
+    {
+      "path": "2026-09-08T07-12-23-885Z/result.json",
+      "sha256": "3766be89a231fcd109a6d4462f97ce9087a02c12e4e104e2477b6de430abbd0a",
+      "bytes": 92079
+    },
+    {
+      "path": "2026-09-08T07-21-57-222Z/result.json",
+      "sha256": "dbd684bea28fc862337628515dd81610fae59cb1e508ab7b7993f0199e90d3d8",
+      "bytes": 1094
+    },
+    {
+      "path": "2026-09-08T07-22-01-498Z/result.json",
+      "sha256": "62e120ee369ebe15b96149627c30f7255993da6194418e54c47fa20c9f2fde91",
+      "bytes": 1550
+    },
+    {
+      "path": "2026-09-08T07-22-26-124Z/result.json",
+      "sha256": "d3bd397021de7eac98a178d012fbb6e3b61384a975548bea46fc6684f5ebf1a2",
+      "bytes": 110969
+    },
+    {
+      "path": "2026-09-08T07-23-06-743Z/result.json",
+      "sha256": "3fe651f0cb9b9fdfc50fb3d363cc2dc48dc5de682b151fb939499d1467b020e2",
+      "bytes": 106739
+    }
+  ],
+  "source_sha256": {
+    "acceptance/run.mjs": "7b64efd2b72e0b2d86c0f1dade6f082657082bcc3b99d05e4508e81e0d4113f4",
+    "acceptance/report.mjs": "85b18c929e47b6739a30ed75a2c7db01aa952f306eace8d0bbe72221adaedd49",
+    "acceptance/report.test.mjs": "3c72ef7c90ba942f49adfe5dfb0424f6acc26fd8d338199212e9ed525a76d428",
+    "acceptance/verify-evidence.mjs": "aab60ff888c9dcb3e619c8926af3613fe38bd536739081047f9d4da9593fccec"
+  },
+  "scan": {
+    "result": "PASS",
+    "patterns": [
+      "private-key",
+      "bearer-value",
+      "credential-json-value",
+      "credential-url",
+      "common-provider-token"
+    ],
+    "limitations": "Bounded pattern scan of the explicit publication files only; not comprehensive secret-scanner certification. No raw logs, profiles, dumps or credential files read."
+  },
+  "excluded": "All unlisted evidence, raw logs/commands, screenshots, diagnostic pages/HTML, DB dumps, profiles, runtime builds and credentials. Do not force-add ignored files."
+}

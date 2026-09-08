@@ -1,0 +1,24 @@
+✔ B reconnect successful pages use exact cursors and response sizes (1.8039ms)
+✔ reject wrong client (0.5861ms)
+✔ reject wrong phase (0.1422ms)
+✔ reject unsuccessful response (0.1288ms)
+✔ reject wrong first cursor (1.4164ms)
+✔ reject wrong page size (0.4239ms)
+✔ reject reversed page progression (0.2626ms)
+✔ complete campaign accepted (0.3272ms)
+✔ full acceptance rejects native backend probe despite legacy PASS/mode (0.3279ms)
+✔ full acceptance rejects UI probe despite legacy PASS (0.2047ms)
+✔ full acceptance rejects probe arguments with forged completion (0.1714ms)
+✔ full acceptance rejects missing completion (0.622ms)
+✔ full acceptance rejects missing steps (0.1285ms)
+✔ full acceptance rejects wrong-client full report (0.1223ms)
+✔ full acceptance rejects wrong-phase full report (0.1002ms)
+✔ full acceptance rejects cleanup failure (0.208ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 83.6079

@@ -1,0 +1,59 @@
+{
+  "arguments": [
+    "--native",
+    "--ui-probe"
+  ],
+  "scope": "ui-probe",
+  "fullCampaignComplete": false,
+  "mode": "native-webview2-plugin-http",
+  "steps": [
+    {
+      "name": "isolated backend startup and readiness",
+      "backend": "http://127.0.0.1:65292",
+      "databaseBinding": "127.0.0.1:65291",
+      "pid": 27788,
+      "lastConnectionError": "fetch failed",
+      "readiness": {
+        "status": 200,
+        "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+      }
+    },
+    {
+      "name": "native a window",
+      "Id": 28392,
+      "MainWindowHandle": 1771916,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "native b window",
+      "Id": 3900,
+      "MainWindowHandle": 4721586,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "native login DOM and screenshot verified"
+    }
+  ],
+  "history": [],
+  "frames": {
+    "a": [],
+    "b": []
+  },
+  "head": "5cf0a590c0298be198eee7095053f0f736d150fb",
+  "harnessSha256": "7b64efd2b72e0b2d86c0f1dade6f082657082bcc3b99d05e4508e81e0d4113f4",
+  "startup": {
+    "backend": "http://127.0.0.1:65292",
+    "databaseBinding": "127.0.0.1:65291",
+    "pid": 27788,
+    "lastConnectionError": "fetch failed",
+    "readiness": {
+      "status": 200,
+      "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+    }
+  },
+  "nativeExecutableSha256": "3e76fc485d5ad1c2cbfc6932f5762c61faef19822de3f2b23defcc2ea3135e7c",
+  "result": "PROBE_PASS",
+  "containerRemoved": true,
+  "volumesRemoved": true,
+  "cleanupErrors": []
+}

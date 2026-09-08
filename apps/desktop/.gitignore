@@ -4,3 +4,27 @@ dist/
 # Rust/Tauri build outputs and generated schemas.
 src-tauri/target/
 src-tauri/gen/
+# Isolated acceptance build outputs and WebView profiles (never user profiles).
+.acceptance/
+
+# Publication is opt-in: raw logs, dumps, screenshots and profiles stay local.
+evidence/client-acceptance/**
+!evidence/client-acceptance/publication-manifest.json
+!evidence/client-acceptance/handoff.json
+!evidence/client-acceptance/s2-history-red.log
+!evidence/client-acceptance/s2-history-green.log
+!evidence/client-acceptance/s2-scope-red.log
+!evidence/client-acceptance/s2-scope-green.log
+!evidence/client-acceptance/s2-real-evidence-verification.json
+!evidence/client-acceptance/2026-09-08T07-11-42-115Z/
+!evidence/client-acceptance/2026-09-08T07-11-42-115Z/result.json
+!evidence/client-acceptance/2026-09-08T07-12-23-885Z/
+!evidence/client-acceptance/2026-09-08T07-12-23-885Z/result.json
+!evidence/client-acceptance/2026-09-08T07-21-57-222Z/
+!evidence/client-acceptance/2026-09-08T07-21-57-222Z/result.json
+!evidence/client-acceptance/2026-09-08T07-22-01-498Z/
+!evidence/client-acceptance/2026-09-08T07-22-01-498Z/result.json
+!evidence/client-acceptance/2026-09-08T07-22-26-124Z/
+!evidence/client-acceptance/2026-09-08T07-22-26-124Z/result.json
+!evidence/client-acceptance/2026-09-08T07-23-06-743Z/
+!evidence/client-acceptance/2026-09-08T07-23-06-743Z/result.json
