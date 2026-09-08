@@ -1,7 +1,12 @@
 # Platform Spec Pack — v3
 
-**Temporary codename:** TeriChat. **Public name:** still open.  
+**Current application branding:** UnknownChat (merged in PR #22). **Repository/internal identifiers:** TeriChat, unchanged.
+
 **Security suite:** TeriCrypt-4096™. **Updated:** 2026-09-06. **Pack revision:** v4.
+
+## Implementation status
+
+This pack describes the target architecture, not completed functionality. See [the current evidence snapshot](docs/development/IMPLEMENTATION_STATUS.md) for the implemented Alpha 0 baseline, verification, and outstanding gates. UnknownChat currently uses demo-plaintext client envelopes; it is not ready for sensitive communications.
 
 ## Choose your entry point
 

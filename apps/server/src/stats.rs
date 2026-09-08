@@ -13,9 +13,9 @@
 //! duplicate deliveries race on that insert and exactly one wins the count,
 //! so outbox retries and worker restarts are safe.
 //!
-//! Isolation: this branch has no workspaces module, so isolation is
-//! per-user/per-conversation and the query endpoints serve only the requesting
-//! user's own rollup. Workspace scoping is a follow-up once workspaces land.
+//! Isolation: endpoints return only the caller's own counters. Channel scope
+//! uses authoritative workspace read membership (including guests), not stale
+//! transport participation. DMs/groups require conversation membership.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -242,11 +242,29 @@ pub async fn conversation_stats(
     caller_id: Uuid,
     conversation_id: Uuid,
 ) -> Result<ConversationStats, StatsError> {
-    if !crate::messaging::is_member(pool, conversation_id, caller_id)
+    let map_scope = |err| match err {
+        crate::workspaces::WorkspacesError::Database(inner) => StatsError::Database(inner),
+        _ => StatsError::NotMember,
+    };
+    match crate::workspaces::channel_by_conversation(pool, conversation_id)
         .await
-        .map_err(StatsError::from)?
+        .map_err(map_scope)?
     {
-        return Err(StatsError::NotMember);
+        Some(channel) => {
+            // Read access is workspace-wide, including guests. SEND grants
+            // never gate counters; stale transport participation is not auth.
+            crate::workspaces::get_workspace(pool, caller_id, channel.workspace_id)
+                .await
+                .map_err(map_scope)?;
+        }
+        None => {
+            if !crate::messaging::is_member(pool, conversation_id, caller_id)
+                .await
+                .map_err(StatsError::from)?
+            {
+                return Err(StatsError::NotMember);
+            }
+        }
     }
     let row: Option<(i64, Option<DateTime<Utc>>)> = sqlx::query_as(
         "SELECT message_count, last_message_at FROM user_conversation_stats
@@ -280,9 +298,11 @@ pub async fn stats_worker(pool: sqlx::PgPool) {
     }
 }
 
-/// Fold every outbox row after `last_seen` (exclusive), advancing it past each
-/// row visited — including skipped ones, so poison never blocks the cursor.
-/// Returns rows newly counted.
+/// Fold a bounded batch without a commit-order watermark. UUIDs allocated by
+/// uncommitted transactions can arrive below any previously seen id. Durable
+/// success/rejection receipts, not the diagnostic `last_seen`, select work.
+/// Irrelevant topics are filtered before LIMIT; poison receives a content-free
+/// rejection receipt so neither class can starve later valid records.
 ///
 /// # Errors
 ///
@@ -293,25 +313,27 @@ async fn fold_new_events(
     last_seen: &mut Option<Uuid>,
 ) -> Result<u64, StatsError> {
     let rows: Vec<(Uuid, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, topic, payload FROM outbox
-         WHERE (CAST($1 AS UUID) IS NULL OR id > CAST($1 AS UUID))
-         ORDER BY id ASC LIMIT $2",
+        "SELECT o.id, o.topic, o.payload FROM outbox o
+         WHERE o.topic = 'message.created'
+           AND NOT EXISTS (SELECT 1 FROM stats_processed_events p WHERE p.event_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM stats_rejected_events r WHERE r.event_id = o.id)
+         ORDER BY o.id ASC LIMIT $1",
     )
-    .bind(*last_seen)
     .bind(STATS_BATCH)
     .fetch_all(pool)
     .await
     .map_err(StatsError::Database)?;
     let mut folded = 0_u64;
     for (id, topic, payload) in &rows {
-        // The cursor advances only past attempted rows: successes, duplicates,
-        // and warned skips. A database error returns WITHOUT advancing, so the
-        // next round retries the same row instead of dropping it and every row
-        // fetched after it.
+        // Database failures retain eligibility for retry. Success receipts and
+        // counter updates are atomic; rejected payloads receive a separate
+        // durable receipt and never count.
         match process_event(pool, *id, topic, payload).await {
             Ok(true) => folded += 1,
             Ok(false) => {}
             Err(StatsError::BadInput(detail)) => {
+                sqlx::query("INSERT INTO stats_rejected_events(event_id) VALUES ($1) ON CONFLICT DO NOTHING")
+                    .bind(id).execute(pool).await.map_err(StatsError::Database)?;
                 tracing::warn!(event_id = %id, "stats skipping malformed event: {detail}");
             }
             Err(err) => return Err(err),
@@ -324,6 +346,188 @@ async fn fold_new_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn isolated_pool() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .expect("service-enabled regression requires DATABASE_URL");
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("stats_{}", Uuid::now_v7().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .unwrap();
+        crate::MIGRATOR.run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn reversed_commits_are_not_lost() {
+        let pool = isolated_pool().await;
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap();
+        let user = stats_user(&pool, stamp, "late").await;
+        let peer = stats_user(&pool, stamp, "latepeer").await;
+        let dm = crate::messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let low = Uuid::now_v7();
+        let high = Uuid::now_v7();
+        assert!(low < high);
+        let payload = serde_json::json!({"actor_id":user,"conversation_id":dm.id});
+        let mut first = pool.begin().await.unwrap();
+        let mut second = pool.begin().await.unwrap();
+        for (tx, id) in [(&mut first, low), (&mut second, high)] {
+            sqlx::query("INSERT INTO outbox(id,topic,payload) VALUES ($1,'message.created',$2)")
+                .bind(id)
+                .bind(&payload)
+                .execute(&mut **tx)
+                .await
+                .unwrap();
+        }
+        second.commit().await.unwrap();
+        let mut cursor = None;
+        // Independent transactions and schema: one poll sees only the high id.
+        fold_new_events(&pool, &mut cursor).await.unwrap();
+        assert_eq!(own_stats(&pool, user).await.unwrap().message_count, 1);
+        first.commit().await.unwrap();
+        fold_new_events(&pool, &mut cursor).await.unwrap();
+        assert_eq!(
+            own_stats(&pool, user).await.unwrap().message_count,
+            2,
+            "lower UUID committed after the high-water mark must still count"
+        );
+        fold_new_events(&pool, &mut cursor).await.unwrap();
+        assert_eq!(own_stats(&pool, user).await.unwrap().message_count, 2);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn poison_batch_cannot_starve_valid_events() {
+        let pool = isolated_pool().await;
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap();
+        let user = stats_user(&pool, stamp, "poison").await;
+        let peer = stats_user(&pool, stamp, "poisonpeer").await;
+        let dm = crate::messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        for _ in 0..201 {
+            sqlx::query("INSERT INTO outbox(id,topic,payload) VALUES ($1,'message.created','{}'),($2,'irrelevant','{}')")
+                .bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+        }
+        sent_event(&pool, user, dm.id, b"after poison").await;
+        let mut cursor = None;
+        for _ in 0..2 {
+            fold_new_events(&pool, &mut cursor).await.unwrap();
+        }
+        assert_eq!(
+            own_stats(&pool, user).await.unwrap().message_count,
+            1,
+            "poison batch must drain"
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn workspace_role_channel_isolation_uses_authoritative_membership() {
+        use crate::workspaces::{self, Role};
+        let pool = isolated_pool().await;
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap();
+        let owner = stats_user(&pool, stamp, "scopeowner").await;
+        let member = stats_user(&pool, stamp, "scopemember").await;
+        let guest = stats_user(&pool, stamp, "scopeguest").await;
+        let outsider = stats_user(&pool, stamp, "scopeoutside").await;
+        let one = workspaces::create_workspace(&pool, owner, "one")
+            .await
+            .unwrap();
+        let two = workspaces::create_workspace(&pool, outsider, "two")
+            .await
+            .unwrap();
+        workspaces::add_member(&pool, owner, one.id, member, Role::Member)
+            .await
+            .unwrap();
+        workspaces::add_member(&pool, owner, one.id, guest, Role::Guest)
+            .await
+            .unwrap();
+        let a = workspaces::create_channel(&pool, owner, one.id, "a")
+            .await
+            .unwrap();
+        let b = workspaces::create_channel(&pool, owner, one.id, "b")
+            .await
+            .unwrap();
+        let other = workspaces::create_channel(&pool, outsider, two.id, "other")
+            .await
+            .unwrap();
+        for (user, conversation) in [
+            (owner, a.conversation_id),
+            (member, a.conversation_id),
+            (owner, b.conversation_id),
+            (outsider, other.conversation_id),
+        ] {
+            let (id, topic, payload) = sent_event(&pool, user, conversation, b"synthetic").await;
+            process_event(&pool, id, &topic, &payload).await.unwrap();
+        }
+        for (user, count) in [(owner, 1), (member, 1), (guest, 0)] {
+            assert_eq!(
+                conversation_stats(&pool, user, a.conversation_id)
+                    .await
+                    .unwrap()
+                    .message_count,
+                count
+            );
+        }
+        assert_eq!(
+            conversation_stats(&pool, member, b.conversation_id)
+                .await
+                .unwrap()
+                .message_count,
+            0
+        );
+        assert!(matches!(
+            conversation_stats(&pool, owner, other.conversation_id).await,
+            Err(StatsError::NotMember)
+        ));
+        // Simulate stale participation left by a join/remove race: transport
+        // membership must never confer workspace authority.
+        sqlx::query(
+            "INSERT INTO conversation_participants(conversation_id,user_id) VALUES ($1,$2)",
+        )
+        .bind(a.conversation_id)
+        .bind(outsider)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                conversation_stats(&pool, outsider, a.conversation_id).await,
+                Err(StatsError::NotMember)
+            ),
+            "stale participation must fail closed"
+        );
+        // Conversely, a legitimate read-only guest remains authorized while
+        // participation healing catches up with a concurrent channel create.
+        sqlx::query(
+            "DELETE FROM conversation_participants WHERE conversation_id=$1 AND user_id=$2",
+        )
+        .bind(a.conversation_id)
+        .bind(guest)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            conversation_stats(&pool, guest, a.conversation_id)
+                .await
+                .unwrap()
+                .message_count,
+            0
+        );
+        pool.close().await;
+    }
 
     /// Raw stats rows dumped for the no-plaintext assertion.
     type UserStatsRow = (String, i64, Option<DateTime<Utc>>, DateTime<Utc>);
@@ -365,7 +569,7 @@ mod tests {
         .expect("send message");
         sqlx::query_as(
             "SELECT id, topic, payload FROM outbox
-             WHERE (payload->>'conversation_id')::uuid = $1
+             WHERE payload->>'conversation_id' = CAST($1 AS UUID)::text
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(conversation)
@@ -374,20 +578,11 @@ mod tests {
         .expect("outbox row")
     }
 
-    /// Requires a live database; skips honestly without one. One send folds
+    /// Requires a live database; fails if unavailable. One send folds
     /// to exactly one count, globally and per-conversation.
     #[tokio::test]
     async fn send_counts_once() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: send_counts_once (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "cntone").await;
@@ -410,20 +605,11 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. The same event
+    /// Requires a live database; fails if unavailable. The same event
     /// delivered twice still counts once; the retry reports `false`.
     #[tokio::test]
     async fn duplicate_delivery_is_idempotent() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: duplicate_delivery_is_idempotent (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "dupone").await;
@@ -446,20 +632,11 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. A retry storm —
+    /// Requires a live database; fails if unavailable. A retry storm —
     /// the same event 25 times — still counts exactly once.
     #[tokio::test]
     async fn retry_storm_counts_once() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: retry_storm_counts_once (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "stormone").await;
@@ -488,20 +665,11 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. Ten concurrent
+    /// Requires a live database; fails if unavailable. Ten concurrent
     /// deliveries of the same event count exactly once.
     #[tokio::test]
     async fn concurrent_duplicates_count_once() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: concurrent_duplicates_count_once (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "raceone").await;
@@ -532,21 +700,12 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. Counts stay with
+    /// Requires a live database; fails if unavailable. Counts stay with
     /// their sender and conversation: no cross-user leakage, and outsiders
     /// cannot probe conversations they are not in.
     #[tokio::test]
     async fn per_user_and_conversation_isolation() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: per_user_and_conversation_isolation (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let alice = stats_user(&pool, stamp, "isoalice").await;
@@ -618,21 +777,12 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. Stats tables
+    /// Requires a live database; fails if unavailable. Stats tables
     /// hold ids, counts, and timestamps only — no content columns and no
     /// content values — and the consumed payload itself carries no content.
     #[tokio::test]
     async fn stats_store_no_plaintext() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: stats_store_no_plaintext (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "plainone").await;
@@ -657,7 +807,7 @@ mod tests {
         // Only id/count/timestamp columns exist on stats tables.
         let columns: Vec<(String, String)> = sqlx::query_as(
             "SELECT column_name, data_type FROM information_schema.columns
-             WHERE table_name IN ('user_message_stats', 'user_conversation_stats', 'stats_processed_events')",
+             WHERE table_name IN ('user_message_stats', 'user_conversation_stats', 'stats_processed_events', 'stats_rejected_events')",
         )
         .fetch_all(&pool)
         .await
@@ -672,7 +822,8 @@ mod tests {
                     "message_count",
                     "last_message_at",
                     "updated_at",
-                    "processed_at"
+                    "processed_at",
+                    "rejected_at"
                 ]
                 .contains(&name.as_str()),
                 "unexpected stats column {name}"
@@ -706,23 +857,14 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. The worker fold
+    /// Requires a live database; fails if unavailable. The worker fold
     /// counts real events, warns past a malformed row without stalling (a
     /// later message still counts), and a second round recounts nothing.
     /// Assertions are per-user deltas, so parallel tests sharing the database
     /// cannot flake them.
     #[tokio::test]
     async fn fold_skips_poison_and_advances() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: fold_skips_poison_and_advances (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "foldone").await;
@@ -756,20 +898,11 @@ mod tests {
         pool.close().await;
     }
 
-    /// Requires a live database; skips honestly without one. Foreign topics
+    /// Requires a live database; fails if unavailable. Foreign topics
     /// are ignored and malformed payloads are rejected without counting.
     #[tokio::test]
     async fn foreign_and_malformed_events_do_not_count() {
-        let Some(url) = std::env::var("DATABASE_URL").ok() else {
-            eprintln!("SKIPPED: foreign_and_malformed_events_do_not_count (DATABASE_URL unset)");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect test database");
-        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+        let pool = isolated_pool().await;
 
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let user = stats_user(&pool, stamp, "oddone").await;

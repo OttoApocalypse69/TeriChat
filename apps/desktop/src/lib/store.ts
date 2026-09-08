@@ -264,6 +264,23 @@ export class ChatStore {
     return this.mergeHistory(message.conversation_id, [message]);
   }
 
+  // Only completed, ordered history pages advance this cursor. An outgoing
+  // response may be arbitrarily far ahead of the last fetched page.
+  historySeq = new Map<string, number>();
+
+  historyCursor(conversationId: string): number {
+    return this.historySeq.get(conversationId) ?? 0;
+  }
+
+  mergeHistoryPage(conversationId: string, incoming: ChatMessage[]): void {
+    this.mergeHistory(conversationId, incoming);
+    const cursor = incoming.reduce(
+      (seq, m) => Math.max(seq, m.seq),
+      this.historyCursor(conversationId),
+    );
+    this.historySeq.set(conversationId, cursor);
+  }
+
   maxSeq(conversationId: string): number {
     const list = this.messages.get(conversationId) ?? [];
     return list.reduce((m, x) => Math.max(m, x.seq), 0);

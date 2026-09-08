@@ -14,25 +14,61 @@ import {
   encodeOpaqueText,
   newClientMsgId,
 } from './lib/api';
-import { GatewayClient, type GatewayStatus } from './lib/gateway';
-import { ChatStore, sortConversations, toChatMessage } from './lib/store';
+import { GatewayClient, type GatewayOutboxEvent, type GatewayStatus } from './lib/gateway';
+import {
+  ChatStore,
+  gatewayEventInfo,
+  sortConversations,
+  toChatMessage,
+} from './lib/store';
 import {
   WorkspaceStore,
   channelToConversation,
   friendlyChannelError,
 } from './lib/workspaces';
 
+interface Session {
+  token: string;
+  meId: string;
+  handle: string;
+}
+
 export default function App() {
-  const api = useMemo(() => new ApiClient(apiBaseUrl()), []);
+  const loginApi = useMemo(() => new ApiClient(apiBaseUrl()), []);
+  const [session, setSession] = useState<Session | null>(null);
+  if (!session) {
+    return (
+      <LoginView
+        api={loginApi}
+        onAuthed={(token, meId, handle) => setSession({ token, meId, handle })}
+      />
+    );
+  }
+  // The entire authenticated tree, its stores and transport belong to one
+  // login. Old async callbacks can never acquire the next account's state
+  // or bearer token, including callbacks owned by workspace child panels.
+  return (
+    <AuthenticatedApp
+      key={session.token}
+      session={session}
+      onLogout={() => setSession(null)}
+    />
+  );
+}
+
+function AuthenticatedApp({ session, onLogout }: {
+  session: Session;
+  onLogout: () => void;
+}) {
+  const { token, meId, handle } = session;
+  const api = useMemo(() => new ApiClient(apiBaseUrl(), token), [token]);
   const storeRef = useRef(new ChatStore());
   const wsStoreRef = useRef(new WorkspaceStore());
   const gatewayRef = useRef<GatewayClient | null>(null);
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
-  const [token, setToken] = useState<string | null>(null);
-  const [meId, setMeId] = useState('');
-  const [handle, setHandle] = useState('');
+
   const [status, setStatus] = useState<GatewayStatus>('disconnected');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -72,45 +108,82 @@ export default function App() {
   const selectedChannel = wsStore.selectedChannel();
   const channelTitle = selectedChannel ? `#${selectedChannel.name}` : null;
 
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  const historyJobs = useRef(
+    new Map<string, { again: boolean; promise: Promise<void> }>(),
+  );
+
   const refreshHistory = useCallback(
-    async (conversationId: string) => {
-      if (!token) return;
+    (conversationId: string): Promise<void> => {
+      if (!live.current) return Promise.resolve();
+      const existing = historyJobs.current.get(conversationId);
+      if (existing) {
+        existing.again = true;
+        return existing.promise;
+      }
+      const job = { again: false, promise: Promise.resolve() };
+      historyJobs.current.set(conversationId, job);
       setLoading(true);
       setError(null);
-      try {
-        const since = storeRef.current.maxSeq(conversationId);
-        const page = await api.history(conversationId, since, 100);
-        storeRef.current.mergeHistory(
-          conversationId,
-          page.map(toChatMessage),
-        );
-        bump();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'history failed');
-      } finally {
-        setLoading(false);
-      }
+      job.promise = (async () => {
+        try {
+          do {
+            job.again = false;
+            setError(null);
+            try {
+              let fullPage: boolean;
+              do {
+                const since = storeRef.current.historyCursor(conversationId);
+                const page = await api.history(conversationId, since, 100);
+                if (!live.current) return;
+                storeRef.current.mergeHistoryPage(conversationId, page.map(toChatMessage));
+                bump();
+                fullPage = page.length === 100;
+                if (fullPage && storeRef.current.historyCursor(conversationId) <= since) {
+                  throw new Error('history did not advance');
+                }
+              } while (fullPage && live.current);
+            } catch (err) {
+              if (live.current) setError(err instanceof Error ? err.message : 'history failed');
+            }
+            // A reconnect/event queued during a failing request still earns
+            // one retry. Without another trigger a persistent failure stops.
+          } while (job.again && live.current);
+        } finally {
+          historyJobs.current.delete(conversationId);
+          if (live.current) setLoading(historyJobs.current.size > 0);
+        }
+      })();
+      return job.promise;
     },
-    [api, bump, token],
+    [api, bump],
   );
 
   const refreshConversations = useCallback(async () => {
-    if (!token) return;
+    if (!live.current) return;
     try {
       const rows = await api.listConversations();
+      if (!live.current) return;
       for (const row of rows) storeRef.current.addConversation(row);
       bump();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'conversations failed');
+      if (live.current) setError(err instanceof Error ? err.message : 'conversations failed');
     }
   }, [api, bump, token]);
 
   const refreshWorkspaces = useCallback(async () => {
-    if (!token) return;
+    if (!live.current) return;
     setWsLoading(true);
     setWsError(null);
     try {
       const rows = await api.listWorkspaces();
+      if (!live.current) return;
       wsStoreRef.current.setWorkspaces(rows);
       // Auto-select the first workspace on first load for an Alpha-sized
       // one-click path into channels.
@@ -125,18 +198,19 @@ export default function App() {
       }
       bump();
     } catch (err) {
-      setWsError(err instanceof Error ? err.message : 'workspaces failed');
+      if (live.current) setWsError(err instanceof Error ? err.message : 'workspaces failed');
     } finally {
-      setWsLoading(false);
+      if (live.current) setWsLoading(false);
     }
   }, [api, bump, token]);
 
   const refreshChannels = useCallback(
     async (workspaceId: string) => {
-      if (!token) return;
+      if (!live.current) return;
       setChLoading(true);
       try {
         const rows = await api.listChannels(workspaceId);
+        if (!live.current) return;
         wsStoreRef.current.setChannels(workspaceId, rows);
         // Register channel conversations so gateway events + history reuse
         // the existing DM message flow keyed by conversation_id.
@@ -145,13 +219,14 @@ export default function App() {
         }
         bump();
       } catch (err) {
+        if (!live.current) return;
         wsStoreRef.current.setChannelsError(
           workspaceId,
           err instanceof Error ? err.message : 'channels failed',
         );
         bump();
       } finally {
-        setChLoading(false);
+        if (live.current) setChLoading(false);
       }
     },
     [api, bump, token],
@@ -159,33 +234,50 @@ export default function App() {
 
   // Gateway lifecycle: connect on login, resume with last event id.
   useEffect(() => {
-    if (!token) return;
-    api.setToken(token);
+    if (!live.current) return;
+
+    const onEvent = (event: GatewayOutboxEvent) => {
+      if (!live.current) return;
+      const fresh = storeRef.current.applyGatewayEvent(event);
+      const replay = fresh ? null : gatewayEventInfo(event);
+      // Deduplicate event effects, not an unfinished history fetch.
+      const info = fresh ?? (
+        replay && storeRef.current.historyCursor(replay.conversationId) < replay.seq
+          ? replay
+          : null
+      );
+      bump();
+      if (info) {
+        // Events carry ids only; use the same serialized page drain as selection.
+        void refreshHistory(info.conversationId);
+        const conv = storeRef.current.conversations.find(
+          c => c.id === info.conversationId,
+        );
+        if (conv?.kind === 'dm' && !conv.peer_handle) void refreshConversations();
+      }
+    };
+
     const gw = new GatewayClient({
       httpBase: apiBaseUrl(),
       token,
       getResumeAfter: () => storeRef.current.lastEventId,
-      onStatus: setStatus,
-      onEvent: (event) => {
-        const info = storeRef.current.applyGatewayEvent(event);
-        bump();
-        if (info) {
-          // Events carry ids only — pull the opaque bytes via history.
+      onStatus: (next) => {
+        if (!live.current) return;
+        setStatus(next);
+        if (next === 'connected') {
+          // Resume acknowledges event delivery, not successful history fetches.
+          // Reconcile even if the server has no newer event to replay.
           void (async () => {
-            try {
-              const since = storeRef.current.maxSeq(info.conversationId);
-              const page = await api.history(info.conversationId, since, 100);
-              storeRef.current.mergeHistory(
-                info.conversationId,
-                page.map(toChatMessage),
-              );
-              bump();
-            } catch {
-              // History retry happens on next event / selection.
+            await refreshConversations();
+            for (const conv of storeRef.current.conversations) {
+              if (!live.current) return;
+              await refreshHistory(conv.id);
             }
           })();
         }
       },
+      onEvent,
+      onDuplicateEvent: onEvent,
     });
     gatewayRef.current = gw;
     gw.connect();
@@ -193,7 +285,7 @@ export default function App() {
       gw.close();
       gatewayRef.current = null;
     };
-  }, [api, bump, token]);
+  }, [api, bump, token, refreshHistory, refreshConversations]);
 
   // Load conversations + workspaces once per login so DMs survive reload
   // with peer names (not UUIDs).
@@ -210,31 +302,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedWorkspaceId, token]);
 
-  function onAuthed(nextToken: string, userId: string, userHandle: string) {
-    api.setToken(nextToken);
-    setToken(nextToken);
-    setMeId(userId);
-    setHandle(userHandle);
-  }
-
   function logout() {
+    live.current = false;
     gatewayRef.current?.close();
     void api.logout().catch(() => undefined);
-    api.setToken(null);
-    storeRef.current = new ChatStore();
-    wsStoreRef.current = new WorkspaceStore();
-    setToken(null);
-    setMeId('');
-    setHandle('');
-    setSelectedId(null);
-    setStatus('disconnected');
-    setError(null);
-    setWsError(null);
-    bump();
+    onLogout();
   }
 
   async function openDm(peerHandle: string): Promise<void> {
     const conv = await api.createDm(peerHandle);
+    if (!live.current) return;
     storeRef.current.addConversation(conv);
     setSelectedId(conv.id);
     bump();
@@ -250,6 +327,7 @@ export default function App() {
   /** Redeem an invite code and land in the workspace (select + channels). */
   async function joinByCode(code: string): Promise<string> {
     const joined = await api.joinWorkspace(code.trim());
+    if (!live.current) return joined.id;
     const rows = [
       ...wsStoreRef.current.workspaces.filter((w) => w.id !== joined.id),
       joined,
@@ -263,6 +341,7 @@ export default function App() {
 
   /** Drop a left workspace from local state and clear its selection. */
   function handleLeftWorkspace(workspaceId: string): void {
+    if (!live.current) return;
     wsStoreRef.current.setWorkspaces(
       wsStore.workspaces.filter((w) => w.id !== workspaceId),
     );
@@ -287,6 +366,7 @@ export default function App() {
     if (!workspaceId) throw new Error('select a workspace first');
     try {
       const channel = await api.createChannel(workspaceId, name);
+      if (!live.current) return;
       const current = wsStoreRef.current.channelsFor(workspaceId);
       wsStoreRef.current.setChannels(workspaceId, [...current, channel]);
       storeRef.current.addConversation(channelToConversation(channel));
@@ -310,10 +390,11 @@ export default function App() {
         client_msg_id: newClientMsgId(),
         ciphertext_b64: encodeOpaqueText(text),
       });
+      if (!live.current) return;
       storeRef.current.mergeOutgoing(toChatMessage(sent));
       bump();
     } finally {
-      setSending(false);
+      if (live.current) setSending(false);
     }
   }
 
@@ -321,8 +402,6 @@ export default function App() {
     if (selectedId) void refreshHistory(selectedId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
-
-  if (!token) return <LoginView api={api} onAuthed={onAuthed} />;
 
   return (
     <div className="flex h-full flex-col bg-zinc-950 text-zinc-100">
@@ -377,7 +456,7 @@ export default function App() {
             />
           </div>
         </aside>
-        <main className="min-w-0 flex-1" key={`${version}-${selectedId ?? 'none'}`}>
+        <main className="min-w-0 flex-1" key={selectedId ?? 'none'}>
           <ConversationView
             conversation={selected}
             messages={messages}

@@ -1,0 +1,42 @@
+npm notice run terichat-desktop@0.1.0 test
+npm notice run vitest run src/lib/__tests__/gateway.test.ts
+[33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (vite.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v5.0.0 C:/Users/TeRiRi/Documents/GitHub/TeriChat-docs-status/apps/desktop
+
+(node:15812) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/TeRiRi/Documents/GitHub/TeriChat-docs-status/apps/desktop/postcss.config.js?t=1788848841562 is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\TeRiRi\Documents\GitHub\TeriChat-docs-status\apps\desktop\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/__tests__/gateway.test.ts (7 tests | 1 failed) 19ms
+   ❯ gateway frames + resume replay without duplicates (5)
+     × bounds transport dedup while notifying opt-in callers of retained duplicates 10ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/__tests__/gateway.test.ts > gateway frames + resume replay without duplicates > bounds transport dedup while notifying opt-in callers of retained duplicates
+AssertionError: expected 1025 to be 1024 // Object.is equality
+
+- Expected
++ Received
+
+- 1024
++ 1025
+
+ ❯ src/lib/__tests__/gateway.test.ts:131:36
+    129|       gw.connect();
+    130|       for (let i = 0; i < 1025; i++) deliver(`e${i}`);
+    131|       expect(gw.seenEventIds.size).toBe(1024);
+       |                                    ^
+    132|       expect(gw.seenEventIds.has('e0')).toBe(false);
+    133|       expect(onEvent).toHaveBeenCalledTimes(1025);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 6 passed (7)
+   Start at  09:27:21
+   Duration  563ms (transform 56%, tests 21%, import 17%, worker 6%)

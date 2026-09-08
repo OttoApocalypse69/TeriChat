@@ -143,6 +143,9 @@ export interface GatewayOptions {
   token: string;
   getResumeAfter: () => string | null;
   onEvent: (event: GatewayOutboxEvent) => void;
+  /** Redelivery is not proof that application effects completed. Optional retry
+   * notification; onEvent retains its existing transport-deduplicated contract. */
+  onDuplicateEvent?: (event: GatewayOutboxEvent) => void;
   onStatus: (status: GatewayStatus) => void;
   wsFactory?: WsFactory;
   baseMs?: number;
@@ -163,6 +166,7 @@ export class GatewayClient {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private heartTimer: ReturnType<typeof setInterval> | null = null;
   private heartSeq = 0;
+  /** Bounded transport cache; application state owns durable-effect dedup. */
   readonly seenEventIds = new Set<string>();
 
   constructor(opts: GatewayOptions) {
@@ -213,8 +217,14 @@ export class GatewayClient {
         this.attempt = 0;
         this.opts.onStatus('connected');
       } else if (frame.kind === 'event') {
-        if (this.seenEventIds.has(frame.event.id)) return; // at-least-once dedup
+        if (this.seenEventIds.has(frame.event.id)) {
+          this.opts.onDuplicateEvent?.(frame.event);
+          return;
+        }
         this.seenEventIds.add(frame.event.id);
+        if (this.seenEventIds.size > 1024) {
+          this.seenEventIds.delete(this.seenEventIds.values().next().value!);
+        }
         this.opts.onEvent(frame.event);
       }
       // heartbeat_ack / error / unknown: stay connected, nothing to do.
