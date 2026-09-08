@@ -529,6 +529,57 @@ mod tests {
         pool.close().await;
     }
 
+    #[tokio::test]
+    async fn ban_revokes_stats_access_without_erasing_or_recounting_history() {
+        use crate::workspaces::{self, Role};
+        let pool = isolated_pool().await;
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap();
+        let owner = stats_user(&pool, stamp, "banowner").await;
+        let member = stats_user(&pool, stamp, "banmember").await;
+        let workspace = workspaces::create_workspace(&pool, owner, "stats lifecycle")
+            .await
+            .unwrap();
+        workspaces::add_member(&pool, owner, workspace.id, member, Role::Member)
+            .await
+            .unwrap();
+        let channel = workspaces::create_channel(&pool, owner, workspace.id, "history")
+            .await
+            .unwrap();
+        let (id, topic, payload) =
+            sent_event(&pool, member, channel.conversation_id, b"synthetic").await;
+        assert!(process_event(&pool, id, &topic, &payload).await.unwrap());
+        workspaces::ban_member(&pool, owner, workspace.id, member, "synthetic test")
+            .await
+            .unwrap();
+        assert!(matches!(
+            conversation_stats(&pool, member, channel.conversation_id).await,
+            Err(StatsError::NotMember)
+        ));
+        assert!(!process_event(&pool, id, &topic, &payload).await.unwrap());
+        assert_eq!(own_stats(&pool, member).await.unwrap().message_count, 1);
+        workspaces::unban(&pool, owner, workspace.id, member)
+            .await
+            .unwrap();
+        // Lifting a ban is not membership restoration.
+        assert!(matches!(
+            conversation_stats(&pool, member, channel.conversation_id).await,
+            Err(StatsError::NotMember)
+        ));
+        workspaces::add_member(&pool, owner, workspace.id, member, Role::Guest)
+            .await
+            .unwrap();
+        assert_eq!(
+            conversation_stats(&pool, member, channel.conversation_id)
+                .await
+                .unwrap()
+                .message_count,
+            1
+        );
+        assert!(!process_event(&pool, id, &topic, &payload).await.unwrap());
+        assert_eq!(own_stats(&pool, member).await.unwrap().message_count, 1);
+        pool.close().await;
+    }
+
     /// Raw stats rows dumped for the no-plaintext assertion.
     type UserStatsRow = (String, i64, Option<DateTime<Utc>>, DateTime<Utc>);
     /// Raw per-conversation rows dumped for the no-plaintext assertion.
