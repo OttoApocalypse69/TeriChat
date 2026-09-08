@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { decodeOpaqueText } from '../lib/api';
 import type { GatewayStatus } from '../lib/gateway';
 import {
@@ -24,6 +24,7 @@ interface Props {
   error: string | null;
   onSend: (text: string) => Promise<void>;
   title?: string | null;
+  isActivePane?: boolean;
 }
 
 export default function ConversationView({
@@ -36,6 +37,7 @@ export default function ConversationView({
   error,
   onSend,
   title,
+  isActivePane = true,
 }: Props) {
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
@@ -50,11 +52,29 @@ export default function ConversationView({
     setSendError(null);
   }, [conversationId]);
 
-  // Real-chat-app behavior: follow the tail as new messages arrive.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+  // Hidden mounted panes have no scroll box. Reconcile pending follows when
+  // navigation or CSS breakpoint layout reveals this conversation, not on focus.
+  const pendingTail = useRef(false);
+  useLayoutEffect(() => {
+    pendingTail.current = true;
   }, [messages.length, conversationId]);
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const followPendingTail = () => {
+      if (pendingTail.current && el.clientHeight > 0) {
+        el.scrollTop = el.scrollHeight;
+        pendingTail.current = false;
+      }
+    };
+    followPendingTail();
+    // ResizeObserver also fires when display:none becomes a real layout box.
+    // Consumed pending state leaves readers alone on ordinary viewport resizes.
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(followPendingTail);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [messages.length, conversationId, isActivePane]);
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -71,8 +91,9 @@ export default function ConversationView({
 
   if (!conversation) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-        Select a conversation.
+      <div className="conversation-empty flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-zinc-400">
+        <span className="text-lg font-semibold text-zinc-100">Your conversations, in one place</span>
+        <span>Select a conversation or open a DM to start chatting.</span>
       </div>
     );
   }
@@ -82,15 +103,15 @@ export default function ConversationView({
 
   let lastDay = '';
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
+    <div className="conversation-view flex min-h-0 flex-1 flex-col">
+      <div className="conversation-header flex shrink-0 items-center gap-3 border-b border-zinc-800 px-5 py-4">
         <span
           aria-hidden
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold text-zinc-200"
         >
           {avatarInitial(conversation)}
         </span>
-        <span className="min-w-0">
+        <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold text-zinc-100">
             {heading}
           </span>
@@ -104,11 +125,11 @@ export default function ConversationView({
           <ConnectionIndicator status={status} />
         </span>
       </div>
-      <p className="border-b border-zinc-800/60 bg-zinc-900/40 px-3 py-1 text-[11px] text-zinc-500">
+      <p className="plaintext-warning shrink-0 border-b border-amber-900/40 bg-amber-950/20 px-5 py-2 text-xs leading-relaxed text-amber-200/90">
         Alpha demo: envelopes carry demo plaintext — not end-to-end encrypted.
       </p>
-      <div ref={scrollRef} className="flex-1 space-y-1 overflow-y-auto p-3">
-        {loading && <p className="text-xs text-zinc-500">Loading history…</p>}
+      <div ref={scrollRef} className="message-history min-h-0 flex-1 space-y-3 overflow-y-auto p-5" aria-label="Message history">
+        {loading && <p className="text-sm text-zinc-400">Loading history…</p>}
         {messages.map((m) => {
           const divider =
             dayKey(m.sent_at) !== lastDay ? dayLabel(m.sent_at) : null;
@@ -122,16 +143,16 @@ export default function ConversationView({
                 </p>
               )}
               <div
-                className={`max-w-[80%] rounded px-2 py-1 text-sm ${
+                className={`message-bubble max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed ${
                   mine
                     ? 'ml-auto bg-emerald-900 text-emerald-50'
                     : 'bg-zinc-800 text-zinc-100'
                 }`}
               >
-                <p className="whitespace-pre-wrap break-words">
+                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                   {decodeOpaqueText(m.ciphertext_b64)}
                 </p>
-                <p className="mt-0.5 text-[10px] opacity-60">
+                <p className="message-meta mt-2 text-[10px] text-zinc-300">
                   #{m.seq} {senderLabel(meId, m.sender_id, conversation)}
                   {formatClockTime(m.sent_at)
                     ? ` · ${formatClockTime(m.sent_at)}`
@@ -142,16 +163,17 @@ export default function ConversationView({
           );
         })}
         {!loading && messages.length === 0 && (
-          <p className="text-xs text-zinc-500">
+          <p className="text-sm text-zinc-400">
             No messages yet — say bro.
           </p>
         )}
       </div>
-      {error && <p className="px-3 text-xs text-red-400">{error}</p>}
-      {sendError && <p className="px-3 text-xs text-red-400">{sendError}</p>}
-      <form onSubmit={submit} className="flex gap-2 border-t border-zinc-800 p-2">
+      {error && <p role="alert" className="px-4 py-1 text-sm text-red-400">{error}</p>}
+      {sendError && <p role="alert" className="px-4 py-1 text-sm text-red-400">{sendError}</p>}
+      <form onSubmit={submit} className="message-composer flex shrink-0 gap-2 border-t border-zinc-800 p-4">
         <input
-          className="flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          aria-label="Message"
+          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-sm"
           placeholder="Message (demo plaintext → opaque envelope)"
           value={draft}
           onChange={(e) => {
@@ -162,7 +184,7 @@ export default function ConversationView({
         <button
           type="submit"
           disabled={sending || !draft.trim()}
-          className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-semibold disabled:opacity-40"
+          className="shrink-0 rounded-lg bg-emerald-400 px-4 py-3 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         >
           {sending ? '…' : 'Send'}
         </button>

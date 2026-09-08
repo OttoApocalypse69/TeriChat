@@ -48,6 +48,22 @@ accepting probes. GREEN tests use the exported full validator. The separate
 real-evidence verification exercises new reports, including wrong-client/phase
 mutations and probes relabeled with legacy `PASS`, in memory only.
 
+## Responsive chat checks
+
+Full campaigns also run `chat-layout.mjs` against the same mounted client and real
+synthetic backend. A synthetic workspace/channel exercises the details panel.
+The checks cover 1440px desktop, 768px tablet, 390px/320px phone widths and a
+short viewport: one phone pane at a time, back/reopen and details navigation,
+draft retention across hiding/resizing, real incoming sends while the mounted phone
+history is hidden (list and details paths), tail visibility on navigation return or a
+CSS-only phone-to-desktop breakpoint reveal without another message, retained
+history/composer DOM and draft, and no forced tail scroll on later reader resizes.
+Checks retain usable keyboard focus, unbroken message wrapping, and composer/
+Send bounds. Screenshots and `layout-measurements.json` stay in the local run
+folder. Native viewport checks use CDP emulation, not a physical mobile device.
+`sourceSha256`, `layoutHarnessSha256` and `harnessSha256` bind these uncommitted
+worktree runs to their source; compare these fields across browser/native runs.
+
 ## Scope and publication
 
 Browser mode uses a test-only plugin-http/fetch alias and CORS response bridge

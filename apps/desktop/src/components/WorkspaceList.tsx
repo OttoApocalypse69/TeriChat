@@ -48,6 +48,7 @@ export default function WorkspaceList({
             <button
               type="button"
               onClick={() => onSelect(w.id)}
+              aria-pressed={w.id === selectedWorkspaceId}
               className={`w-full truncate rounded px-2 py-1.5 text-left text-sm ${
                 w.id === selectedWorkspaceId
                   ? 'bg-zinc-700 font-semibold'

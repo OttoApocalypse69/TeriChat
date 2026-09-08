@@ -51,10 +51,12 @@ export default function ConversationList({
   const ordered = sortConversations(conversations, messagesByConversation);
 
   return (
-    <div className="flex h-full flex-col">
-      <form onSubmit={open} className="space-y-1 border-b border-zinc-800 p-2">
+    <div className="conversation-list flex flex-col">
+      <h2 className="px-3 pb-1 pt-4 text-xs font-semibold uppercase tracking-wide text-zinc-400">Direct messages</h2>
+      <form onSubmit={open} className="space-y-2 p-3">
         <input
           className="w-full rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          aria-label="Peer handle"
           placeholder="peer handle → open DM"
           value={peer}
           onChange={(e) => setPeer(e.target.value)}
@@ -86,15 +88,16 @@ export default function ConversationList({
               <button
                 type="button"
                 onClick={() => onSelect(c.id)}
-                className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
+                aria-current={c.id === selectedId ? 'page' : undefined}
+                className={`conversation-row flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
                   c.id === selectedId
-                    ? 'bg-zinc-700 font-semibold'
+                    ? 'bg-emerald-950 font-semibold'
                     : 'hover:bg-zinc-800'
                 }`}
               >
                 <span
                   aria-hidden
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold text-zinc-200"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold text-zinc-200"
                 >
                   {avatarInitial(c)}
                 </span>
@@ -102,12 +105,12 @@ export default function ConversationList({
                   <span className="flex items-baseline justify-between gap-2">
                     <span className="truncate">{conversationLabel(c)}</span>
                     {when && (
-                      <span className="shrink-0 text-[10px] font-normal text-zinc-500">
+                      <span className="shrink-0 text-[10px] font-normal text-zinc-400">
                         {when}
                       </span>
                     )}
                   </span>
-                  <span className="block truncate text-xs font-normal text-zinc-500">
+                  <span className="block truncate text-xs font-normal text-zinc-400">
                     {sub ? `${sub} · ` : ''}
                     {preview}
                   </span>
@@ -120,7 +123,7 @@ export default function ConversationList({
           );
         })}
         {ordered.length === 0 && (
-          <li className="px-2 py-4 text-xs text-zinc-500">
+          <li className="px-2 py-4 text-xs text-zinc-400">
             No conversations yet — open a DM above.
           </li>
         )}

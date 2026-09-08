@@ -210,6 +210,48 @@ it('retries a failed history fetch when the same event is replayed', async () =>
   expect(host.querySelector('main')!.textContent).toContain('body-1');
 });
 
+it('returns to navigation after leaving the workspace details pane', async () => {
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.spyOn(ApiClient.prototype, 'leaveWorkspace').mockResolvedValue(undefined);
+  await login(); await click('Workspace details');
+  expect(host.querySelector('[data-pane]')?.getAttribute('data-pane')).toBe('details');
+  await click('Leave workspace');
+  expect(host.querySelector('[data-pane]')?.getAttribute('data-pane')).toBe('navigation');
+});
+
+it('clears drafts between DMs and channels but not when visiting workspace details', async () => {
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.mocked(ApiClient.prototype.listChannels).mockResolvedValue([channel('general')]);
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), row('second', 'Second')]);
+  await login(); await click('@Peer'); await type('Message', 'first draft');
+  await click('Workspace details');
+  await flush(() => host.querySelector<HTMLButtonElement>('#workspace-details button')!.click());
+  expect(input('Message').value).toBe('first draft');
+  await click('Back to conversations'); await click('@Second');
+  expect(input('Message').value).toBe('');
+  await type('Message', 'second draft');
+  await click('Back to conversations'); await click('#general');
+  expect(input('Message').value).toBe('');
+  await type('Message', 'channel draft');
+  await click('Back to conversations'); await click('@Peer');
+  expect(input('Message').value).toBe('');
+  expect(host.querySelector('main')!.textContent).not.toContain('#general');
+});
+
+it('returns to navigation and reopens the same conversation without losing its draft', async () => {
+  await login(); await click('@Peer');
+  await type('Message', 'unfinished mobile draft');
+  const composer = input('Message');
+  await click('Back to conversations');
+  expect(host.querySelector('[data-pane]')?.getAttribute('data-pane')).toBe('navigation');
+  expect(host.querySelector('button[aria-current="page"]')).toBe(document.activeElement);
+  await click('@Peer');
+  expect(host.querySelector('[data-pane]')?.getAttribute('data-pane')).toBe('conversation');
+  expect(input('Message')).toBe(composer);
+  expect(composer.value).toBe('unfinished mobile draft');
+  expect(document.activeElement?.getAttribute('aria-label')).toBe('Conversation');
+});
+
 it('preserves composer draft and focus through a gateway/history rerender', async () => {
   await login(); await click('@Peer');
   await type('Message', 'unfinished draft');
