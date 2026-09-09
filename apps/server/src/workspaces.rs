@@ -547,7 +547,7 @@ where
 
 /// Fresh roles for `actor` and `target` with both rows locked (`FOR UPDATE`,
 /// deterministic `user_id` order so concurrent managers cannot deadlock).
-/// Management transactions re-check ranks on these values, never on the
+/// Management transactions re-check permissions and ranks on these values, never on the
 /// pre-transaction reads — a promotion racing a kick cannot slip through.
 ///
 /// # Errors
@@ -1005,8 +1005,11 @@ pub async fn set_role(
     let (actor_opt, target_opt) = locked_roles(&mut *tx, workspace_id, actor_id, target_id).await?;
     let actor = actor_opt.ok_or(WorkspacesError::NotMember)?;
     let current = target_opt.ok_or(WorkspacesError::NotMember)?;
-    // The pre-transaction permission stands only if the actor still outranks;
-    // re-check on fresh rows (a demotion racing this call must win).
+    // Rank alone is insufficient: a demoted moderator can still outrank
+    // the target while no longer having permission to change roles.
+    if !role_has(actor, Permission::ManageRoles) {
+        return Err(WorkspacesError::Forbidden);
+    }
     check_rank(actor, current, Some(new_role))?;
     if current == Role::Owner
         && new_role != Role::Owner
@@ -1062,6 +1065,9 @@ pub async fn remove_member(
     let (actor_opt, target_opt) = locked_roles(&mut *tx, workspace_id, actor_id, target_id).await?;
     let actor = actor_opt.ok_or(WorkspacesError::NotMember)?;
     let current = target_opt.ok_or(WorkspacesError::NotMember)?;
+    if !role_has(actor, Permission::KickMembers) {
+        return Err(WorkspacesError::Forbidden);
+    }
     check_rank(actor, current, None)?;
     if current == Role::Owner && owner_count(&mut *tx, workspace_id).await? < 2 {
         return Err(WorkspacesError::BadInput(
@@ -1164,6 +1170,9 @@ pub async fn ban_member(
     let (actor_opt, target_opt) = locked_roles(&mut *tx, workspace_id, actor_id, target_id).await?;
     let actor = actor_opt.ok_or(WorkspacesError::NotMember)?;
     let current = target_opt.ok_or(WorkspacesError::NotMember)?;
+    if !role_has(actor, Permission::BanMembers) {
+        return Err(WorkspacesError::Forbidden);
+    }
     check_rank(actor, current, None)?;
     if current == Role::Owner && owner_count(&mut *tx, workspace_id).await? < 2 {
         return Err(WorkspacesError::BadInput(
@@ -1217,6 +1226,13 @@ pub async fn unban(
 ) -> Result<(), WorkspacesError> {
     require(pool, workspace_id, actor_id, Permission::BanMembers).await?;
     let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    // Lock actor membership before touching the ban row, matching ban's
+    // membership-before-ban ordering. Hold authority through delete and audit.
+    let (actor, _) = locked_roles(&mut *tx, workspace_id, actor_id, actor_id).await?;
+    let actor = actor.ok_or(WorkspacesError::NotMember)?;
+    if !role_has(actor, Permission::BanMembers) {
+        return Err(WorkspacesError::Forbidden);
+    }
     let removed =
         sqlx::query("DELETE FROM workspace_bans WHERE workspace_id = $1 AND user_id = $2")
             .bind(workspace_id)
