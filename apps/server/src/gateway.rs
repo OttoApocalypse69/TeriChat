@@ -121,6 +121,8 @@ pub async fn gateway_handler(
 async fn identify(
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     stream: &mut futures_util::stream::SplitStream<WebSocket>,
+    pool: &sqlx::PgPool,
+    session: &auth::AuthSession,
 ) -> Option<Option<Uuid>> {
     // A fixed deadline, not a sliding one: pre-identify heartbeats cannot
     // keep an otherwise idle authenticated socket alive indefinitely.
@@ -130,6 +132,9 @@ async fn identify(
             incoming = stream.next() => incoming,
             () = tokio::time::sleep_until(identify_deadline) => return None,
         };
+        if !session_live(pool, session).await {
+            return None;
+        }
         match incoming {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientFrame>(&text) {
                 Ok(ClientFrame::Identify { resume_after }) => return Some(resume_after),
@@ -167,7 +172,7 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
     let pool = pool.clone();
     let mut hub_rx = state.hub.subscribe();
 
-    let Some(resume_after) = identify(&mut sink, &mut stream).await else {
+    let Some(resume_after) = identify(&mut sink, &mut stream, &pool, &session).await else {
         return;
     };
 
@@ -176,6 +181,9 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
         return;
     };
     let mut seen = std::collections::VecDeque::new();
+    if !session_live(&pool, &session).await {
+        return;
+    }
     if !send_frame(
         &mut sink,
         &ServerFrame::Ready {
@@ -187,43 +195,30 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
     {
         return;
     }
+    let mut validity_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    validity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let entry = tokio::select! {
-            incoming = stream.next() => {
-                match incoming {
-                    Some(Ok(Message::Text(text))) => {
-                        let frame = match serde_json::from_str::<ClientFrame>(&text) {
-                            Ok(ClientFrame::Heartbeat { seq }) => ServerFrame::HeartbeatAck { seq },
-                            Ok(ClientFrame::Identify { .. }) => ServerFrame::Error { code: "already_identified" },
-                            Err(_) => ServerFrame::Error { code: "bad_frame" },
-                        };
-                        if !send_frame(&mut sink, &frame).await { return; }
-                    }
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-                    _ => {}
-                }
+        let entry = match next_delivery(
+            &mut sink,
+            &mut stream,
+            &pool,
+            &session,
+            &mut replay,
+            &mut hub_rx,
+            &mut validity_tick,
+        )
+        .await
+        {
+            Some(Delivery::Event(entry)) => entry,
+            Some(Delivery::ReplayEnd) => continue,
+            Some(Delivery::Lagged) => {
+                let Some(scan) = Replay::start(&pool, session.user_id, None).await else {
+                    return;
+                };
+                replay = scan;
                 continue;
             }
-            page = tokio::time::timeout(IO_TIMEOUT, replay.next(&pool, session.user_id)), if !replay.done => {
-                match page {
-                    Ok(Ok(Some(entry))) => entry,
-                    Ok(Ok(None)) => continue,
-                    _ => return, // Never silently hand off an incomplete replay.
-                }
-            }
-            live = hub_rx.recv(), if replay.done => {
-                match live {
-                    Ok(entry) => entry,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // UUID cursors cannot recover late commits below a
-                        // watermark. On lag rescan retained history instead.
-                        let Some(scan) = Replay::start(&pool, session.user_id, None).await else { return; };
-                        replay = scan;
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                }
-            }
+            None => return,
         };
         if seen.contains(&entry.id) {
             continue;
@@ -234,6 +229,9 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
             return;
         };
         if visible {
+            if !session_live(&pool, &session).await {
+                return;
+            }
             if !send_event(&mut sink, &entry).await {
                 return;
             }
@@ -243,6 +241,75 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
             seen.push_back(entry.id);
         }
     }
+}
+
+enum Delivery {
+    Event(OutboxEntry),
+    ReplayEnd,
+    Lagged,
+}
+
+/// Keep a pending replay query and its deadline alive while servicing inbound
+/// frames and validity ticks. Neither traffic nor ticks may restart the read.
+async fn next_delivery(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+    pool: &sqlx::PgPool,
+    session: &auth::AuthSession,
+    replay: &mut Replay,
+    hub: &mut broadcast::Receiver<OutboxEntry>,
+    validity_tick: &mut tokio::time::Interval,
+) -> Option<Delivery> {
+    let pending = async {
+        if replay.done {
+            match hub.recv().await {
+                Ok(entry) => Some(Delivery::Event(entry)),
+                Err(broadcast::error::RecvError::Lagged(_)) => Some(Delivery::Lagged),
+                Err(broadcast::error::RecvError::Closed) => None,
+            }
+        } else {
+            match tokio::time::timeout(IO_TIMEOUT, replay.next(pool, session.user_id)).await {
+                Ok(Ok(Some(entry))) => Some(Delivery::Event(entry)),
+                Ok(Ok(None)) => Some(Delivery::ReplayEnd),
+                _ => None,
+            }
+        }
+    };
+    tokio::pin!(pending);
+    loop {
+        tokio::select! {
+            delivery = &mut pending => return delivery,
+            _ = validity_tick.tick() => {
+                if !session_live(pool, session).await { return None; }
+            }
+            incoming = stream.next() => {
+                if !session_live(pool, session).await { return None; }
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        let frame = match serde_json::from_str::<ClientFrame>(&text) {
+                            Ok(ClientFrame::Heartbeat { seq }) => ServerFrame::HeartbeatAck { seq },
+                            Ok(ClientFrame::Identify { .. }) => ServerFrame::Error { code: "already_identified" },
+                            Err(_) => ServerFrame::Error { code: "bad_frame" },
+                        };
+                        if !send_frame(sink, &frame).await { return None; }
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Recheck account session validity for each application frame and at bounded
+/// idle intervals. Fail closed on timeout/database errors. Frames already in
+/// flight at revocation are not retractable; this does not revoke MLS keys.
+async fn session_live(pool: &sqlx::PgPool, session: &auth::AuthSession) -> bool {
+    matches!(tokio::time::timeout(IO_TIMEOUT,
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > statement_timestamp())"
+        ).bind(session.session_id).bind(session.user_id).fetch_one(pool)
+    ).await, Ok(Ok(true)))
 }
 
 const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -344,4 +411,308 @@ async fn send_frame(
         tokio::time::timeout(IO_TIMEOUT, sink.send(Message::Text(text.into()))).await,
         Ok(Ok(()))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_management::tests::{fixture, session};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn next(
+        socket: &mut Socket,
+    ) -> Option<Result<ClientMessage, tokio_tungstenite::tungstenite::Error>> {
+        tokio::time::timeout(std::time::Duration::from_secs(7), socket.next())
+            .await
+            .expect("bounded gateway response")
+    }
+
+    async fn closed(socket: &mut Socket) {
+        assert!(
+            matches!(
+                next(socket).await,
+                None | Some(Err(_) | Ok(ClientMessage::Close(_)))
+            ),
+            "invalid session must receive no application frame"
+        );
+    }
+
+    async fn identify(socket: &mut Socket) {
+        socket
+            .send(ClientMessage::Text(r#"{"op":"identify"}"#.into()))
+            .await
+            .unwrap();
+        let Some(Ok(ClientMessage::Text(text))) = next(socket).await else {
+            panic!("expected ready");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["op"],
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_revoked_or_expired_sessions_close_real_sockets() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::build_router(state))
+                .await
+                .unwrap();
+        });
+        // Upgrade is insufficient authorization: revocation before identify
+        // suppresses Ready and all retained history.
+        let (id, token) = session(&pool, user).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        socket
+            .send(ClientMessage::Text(r#"{"op":"identify"}"#.into()))
+            .await
+            .unwrap();
+        closed(&mut socket).await;
+        assert!(
+            connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+                .await
+                .is_err()
+        );
+
+        // Quiet sockets close on periodic validation without client traffic.
+        let (id, token) = session(&pool, user).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .unwrap();
+        identify(&mut socket).await;
+        sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        closed(&mut socket).await;
+
+        // Expired sessions cannot elicit heartbeat ACKs after identification.
+        let (id, token) = session(&pool, user).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .unwrap();
+        identify(&mut socket).await;
+        socket
+            .send(ClientMessage::Text(r#"{"op":"heartbeat","seq":12}"#.into()))
+            .await
+            .unwrap();
+        let Some(Ok(ClientMessage::Text(text))) = next(&mut socket).await else {
+            panic!("heartbeat response");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["op"],
+            "heartbeat_ack"
+        );
+        sqlx::query("UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        socket
+            .send(ClientMessage::Text(r#"{"op":"heartbeat","seq":13}"#.into()))
+            .await
+            .unwrap();
+        closed(&mut socket).await;
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_revocation_suppresses_live_and_replay_delivery() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let Some((other_pool, _, peer)) = fixture().await else {
+            panic!("database disappeared");
+        };
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let hub = state.hub.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::build_router(state))
+                .await
+                .unwrap();
+        });
+        let (id, token) = session(&pool, user).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .unwrap();
+        identify(&mut socket).await;
+        // Publish directly to this test's hub: no competing global outbox worker.
+        messaging::send_message(
+            &pool,
+            peer,
+            dm.id,
+            Uuid::now_v7(),
+            b"synthetic-envelope",
+            None,
+        )
+        .await
+        .unwrap();
+        let (id_event, topic, payload): (Uuid, String, serde_json::Value) = sqlx::query_as("SELECT id, topic, payload FROM outbox WHERE payload->>'conversation_id' = $1 ORDER BY id DESC LIMIT 1")
+            .bind(dm.id.to_string()).fetch_one(&pool).await.unwrap();
+        let entry = OutboxEntry {
+            id: id_event,
+            topic,
+            payload,
+        };
+        sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _ = hub.send(entry);
+        closed(&mut socket).await;
+
+        // Hold replay's initial outbox read, revoke while it is waiting, then
+        // release it. The post-read check must suppress Ready and the event.
+        let (id, token) = session(&pool, user).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .unwrap();
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        socket
+            .send(ClientMessage::Text(r#"{"op":"identify"}"#.into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query = 'SELECT id FROM outbox ORDER BY id DESC LIMIT 1')").fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("gateway waiting for replay query");
+        sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        blocker.commit().await.unwrap();
+        closed(&mut socket).await;
+        server.abort();
+        other_pool.close().await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_pending_replay_survives_ticks_and_heartbeats() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let Some((other_pool, _, peer)) = fixture().await else {
+            panic!("database disappeared");
+        };
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        messaging::send_message(
+            &pool,
+            peer,
+            dm.id,
+            Uuid::now_v7(),
+            b"synthetic-delayed-envelope",
+            None,
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::build_router(state))
+                .await
+                .unwrap();
+        });
+        for revoke in [false, true] {
+            let (id, token) = session(&pool, user).await;
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE conversation_participants IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+                .await
+                .unwrap();
+            identify(&mut socket).await;
+            let wait_query = "SELECT pid, query_start FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT o.id, o.topic, o.payload FROM outbox o%'";
+            let original: (i32, chrono::DateTime<chrono::Utc>) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if let Some(row) = sqlx::query_as(wait_query)
+                            .fetch_optional(&pool)
+                            .await
+                            .unwrap()
+                        {
+                            break row;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("replay waiting after Ready");
+            socket
+                .send(ClientMessage::Text(r#"{"op":"heartbeat","seq":7}"#.into()))
+                .await
+                .unwrap();
+            let Some(Ok(ClientMessage::Text(text))) = next(&mut socket).await else {
+                panic!("heartbeat during replay");
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap()["op"],
+                "heartbeat_ack"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            let current: (i32, chrono::DateTime<chrono::Utc>) =
+                sqlx::query_as(wait_query).fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                original, current,
+                "ticks and heartbeat must preserve the original pending query"
+            );
+            if revoke {
+                sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                // Periodic validation closes even while replay is still blocked.
+                closed(&mut socket).await;
+                blocker.commit().await.unwrap();
+            } else {
+                blocker.commit().await.unwrap();
+                let Some(Ok(ClientMessage::Text(text))) = next(&mut socket).await else {
+                    panic!("delayed valid replay must progress");
+                };
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap()["op"],
+                    "event"
+                );
+                socket.close(None).await.unwrap();
+            }
+        }
+        server.abort();
+        other_pool.close().await;
+        pool.close().await;
+    }
 }
