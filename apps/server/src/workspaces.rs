@@ -2103,6 +2103,273 @@ pub async fn list_audit(
 }
 
 #[cfg(test)]
+mod moderation_race_tests {
+    use super::*;
+
+    struct Fixture {
+        pool: sqlx::PgPool,
+        workspace: Uuid,
+        actor: Uuid,
+        target: Uuid,
+    }
+
+    async fn fixture() -> Option<Fixture> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("SKIPPED: moderation permission race (DATABASE_URL unset)");
+            return None;
+        };
+        let setup = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("synthetic database");
+        let schema = format!("modrace_{}", Uuid::now_v7().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&setup)
+            .await
+            .unwrap();
+        setup.close().await;
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(6)
+            .after_connect(move |connection, _| {
+                let schema = schema.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false), set_config('application_name', $1, false)")
+                        .bind(schema).execute(connection).await?;
+                    Ok(())
+                })
+            }).connect(&url).await.unwrap();
+        crate::MIGRATOR.run(&pool).await.unwrap();
+        let owner = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let target = Uuid::now_v7();
+        sqlx::query("INSERT INTO users (id, handle, email, display_name) SELECT id, md5(id::text), id::text || '@example.invalid', 'Synthetic' FROM unnest($1::uuid[]) AS id")
+            .bind(vec![owner, actor, target]).execute(&pool).await.unwrap();
+        let workspace = create_workspace(&pool, owner, "Permission race")
+            .await
+            .unwrap()
+            .id;
+        sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'member')")
+            .bind(workspace).bind(actor).bind(target).execute(&pool).await.unwrap();
+        Some(Fixture {
+            pool,
+            workspace,
+            actor,
+            target,
+        })
+    }
+
+    async fn lock_actor(f: &Fixture) -> (sqlx::Transaction<'_, sqlx::Postgres>, i32) {
+        let mut blocker = f.pool.begin().await.unwrap();
+        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        sqlx::query("SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE")
+            .bind(f.workspace).bind(f.actor).execute(&mut *blocker).await.unwrap();
+        (blocker, pid)
+    }
+
+    async fn waiting(pool: &sqlx::PgPool, blocker_pid: i32) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND application_name = current_setting('application_name') AND wait_event_type = 'Lock')")
+                    .bind(blocker_pid).fetch_one(pool).await.unwrap();
+                if blocked { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("mutation reached held row after initial permission check");
+    }
+
+    async fn demote(blocker: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fixture) {
+        sqlx::query("UPDATE workspace_members SET role = 'moderator' WHERE workspace_id = $1 AND user_id = $2")
+            .bind(f.workspace).bind(f.actor).execute(&mut **blocker).await.unwrap();
+    }
+
+    async fn audit_count(f: &Fixture) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM workspace_audit WHERE workspace_id = $1 AND actor_id = $2",
+        )
+        .bind(f.workspace)
+        .bind(f.actor)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn demotion_blocks_mutation(ban: bool) {
+        let Some(f) = fixture().await else {
+            return;
+        };
+        let (mut blocker, pid) = lock_actor(&f).await;
+        let pool = f.pool.clone();
+        let (workspace, actor, target) = (f.workspace, f.actor, f.target);
+        let mutation = tokio::spawn(async move {
+            if ban {
+                ban_member(&pool, actor, workspace, target, "synthetic reason").await
+            } else {
+                set_role(&pool, actor, workspace, target, Role::Guest).await
+            }
+        });
+        waiting(&f.pool, pid).await;
+        demote(&mut blocker, &f).await;
+        blocker.commit().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), mutation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(WorkspacesError::Forbidden)),
+            "demoted actor must lose permission, got {result:?}"
+        );
+        assert_eq!(
+            role_of(&f.pool, workspace, target).await.unwrap(),
+            Some(Role::Member)
+        );
+        assert!(!is_banned(&f.pool, workspace, target).await.unwrap());
+        assert_eq!(audit_count(&f).await, 0);
+        f.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn ban_rechecks_permission_after_actor_demotion() {
+        demotion_blocks_mutation(true).await;
+    }
+
+    #[tokio::test]
+    async fn set_role_rechecks_permission_after_actor_demotion() {
+        demotion_blocks_mutation(false).await;
+    }
+
+    #[tokio::test]
+    async fn kick_rechecks_permission_after_actor_demotion() {
+        let Some(f) = fixture().await else {
+            return;
+        };
+        sqlx::query("UPDATE workspace_members SET role = CASE WHEN user_id = $2 THEN 'moderator' ELSE 'guest' END WHERE workspace_id = $1 AND user_id IN ($2, $3)")
+            .bind(f.workspace).bind(f.actor).bind(f.target).execute(&f.pool).await.unwrap();
+        let (mut blocker, pid) = lock_actor(&f).await;
+        let pool = f.pool.clone();
+        let (workspace, actor, target) = (f.workspace, f.actor, f.target);
+        let mutation =
+            tokio::spawn(async move { remove_member(&pool, actor, workspace, target).await });
+        waiting(&f.pool, pid).await;
+        sqlx::query(
+            "UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace)
+        .bind(actor)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+        blocker.commit().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), mutation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(WorkspacesError::Forbidden)),
+            "demoted moderator must lose KickMembers, got {result:?}"
+        );
+        assert_eq!(
+            role_of(&f.pool, workspace, target).await.unwrap(),
+            Some(Role::Guest)
+        );
+        assert_eq!(audit_count(&f).await, 0);
+        f.pool.close().await;
+    }
+
+    async fn membership_loss_blocks_unban(remove: bool) {
+        let Some(f) = fixture().await else {
+            return;
+        };
+        ban_member(&f.pool, f.actor, f.workspace, f.target, "synthetic ban")
+            .await
+            .unwrap();
+        let audit_before = audit_count(&f).await;
+        let (mut blocker, pid) = lock_actor(&f).await;
+        // Baseline waits on the ban row; fixed code waits on the actor row.
+        // Holding both lets the same test establish the race in either version.
+        sqlx::query("SELECT user_id FROM workspace_bans WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE")
+            .bind(f.workspace).bind(f.target).execute(&mut *blocker).await.unwrap();
+        let pool = f.pool.clone();
+        let (workspace, actor, target) = (f.workspace, f.actor, f.target);
+        let mutation = tokio::spawn(async move { unban(&pool, actor, workspace, target).await });
+        waiting(&f.pool, pid).await;
+        if remove {
+            sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")
+                .bind(workspace)
+                .bind(actor)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+        } else {
+            demote(&mut blocker, &f).await;
+        }
+        blocker.commit().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), mutation)
+            .await
+            .unwrap()
+            .unwrap();
+        if remove {
+            assert!(
+                matches!(result, Err(WorkspacesError::NotMember)),
+                "removed actor unbanned: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(WorkspacesError::Forbidden)),
+                "demoted actor unbanned: {result:?}"
+            );
+        }
+        assert!(is_banned(&f.pool, workspace, target).await.unwrap());
+        assert_eq!(audit_count(&f).await, audit_before);
+        f.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn unban_rechecks_permission_after_actor_demotion() {
+        membership_loss_blocks_unban(false).await;
+    }
+
+    #[tokio::test]
+    async fn unban_rechecks_membership_after_actor_removal() {
+        membership_loss_blocks_unban(true).await;
+    }
+
+    #[tokio::test]
+    async fn authorized_moderation_preserves_effects_and_unban_idempotency() {
+        let Some(f) = fixture().await else {
+            return;
+        };
+        set_role(&f.pool, f.actor, f.workspace, f.target, Role::Guest)
+            .await
+            .unwrap();
+        assert_eq!(
+            role_of(&f.pool, f.workspace, f.target).await.unwrap(),
+            Some(Role::Guest)
+        );
+        ban_member(&f.pool, f.actor, f.workspace, f.target, "synthetic ban")
+            .await
+            .unwrap();
+        assert!(is_banned(&f.pool, f.workspace, f.target).await.unwrap());
+        unban(&f.pool, f.actor, f.workspace, f.target)
+            .await
+            .unwrap();
+        assert!(!is_banned(&f.pool, f.workspace, f.target).await.unwrap());
+        assert!(role_of(&f.pool, f.workspace, f.target)
+            .await
+            .unwrap()
+            .is_none());
+        let audit_before = audit_count(&f).await;
+        unban(&f.pool, f.actor, f.workspace, f.target)
+            .await
+            .unwrap();
+        assert_eq!(audit_count(&f).await, audit_before);
+        f.pool.close().await;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
