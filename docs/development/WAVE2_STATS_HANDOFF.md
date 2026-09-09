@@ -6,7 +6,7 @@
 - Branch: `teriri/backend-workspace-stats`; worktree: `C:/Users/TeRiRi/Documents/GitHub/TeriChat-wave2-stats`.
 - Base: `19a95155ac4941f597aab698f0d76f894c99ac77` (parent route-wiring checkpoint).
 - Source head: `c63a63be6b17a5e98409239d3958ecde48c3e3b1`.
-- Risk: High (caller authorization and private activity metadata).
+- Risk: Critical (caller authorization and private activity metadata; corrected by integration review against the trusted quality gates).
 - State: implemented, compiled; database validation blocked by local Docker startup; independent review pending. Not Done or merge-ready.
 
 ## Delivered

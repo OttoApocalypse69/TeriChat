@@ -5,7 +5,7 @@
 - Branch/worktree: `teriri/backend-wave2`, `C:/Users/TeRiRi/Documents/GitHub/TeriChat-backend-wave2`.
 - Base: `c1a6c90baf4c9eec44a352c92594b234c601cfc2`.
 - Reviewed production source head: `a58b21701b95918f4f5cf581acc170153d9ae9c0`.
-- Risk: High; session and workspace authorization. No policy files changed.
+- Risk: Critical; session and workspace authorization. No policy files changed.
 - State at this handoff: implemented and independently source-reviewed;
   expanded-candidate CI pending. Final exact-head evidence is maintained in
   [draft PR #30](https://github.com/OttoApocalypse69/TeriChat/pull/30).
