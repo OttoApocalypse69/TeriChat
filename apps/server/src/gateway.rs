@@ -416,7 +416,7 @@ async fn send_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_management::tests::{fixture, session};
+    use crate::session_management::tests::{fixture, seed_user, session};
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
     type Socket = tokio_tungstenite::WebSocketStream<
@@ -538,9 +538,7 @@ mod tests {
         let Some((pool, state, user)) = fixture().await else {
             return;
         };
-        let Some((other_pool, _, peer)) = fixture().await else {
-            panic!("database disappeared");
-        };
+        let peer = seed_user(&pool).await;
         let dm = messaging::find_or_create_dm(&pool, user, peer)
             .await
             .unwrap();
@@ -590,6 +588,10 @@ mod tests {
             .await
             .unwrap();
         let mut blocker = pool.begin().await.unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
         sqlx::query("LOCK TABLE outbox IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -600,7 +602,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query = 'SELECT id FROM outbox ORDER BY id DESC LIMIT 1')").fetch_one(&pool).await.unwrap();
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND datname = current_database() AND application_name = current_setting('application_name') AND wait_event_type = 'Lock' AND query = 'SELECT id FROM outbox ORDER BY id DESC LIMIT 1')").bind(blocker_pid).fetch_one(&pool).await.unwrap();
                 if waiting { break; }
                 tokio::task::yield_now().await;
             }
@@ -613,7 +615,7 @@ mod tests {
         blocker.commit().await.unwrap();
         closed(&mut socket).await;
         server.abort();
-        other_pool.close().await;
+
         pool.close().await;
     }
 
@@ -622,9 +624,7 @@ mod tests {
         let Some((pool, state, user)) = fixture().await else {
             return;
         };
-        let Some((other_pool, _, peer)) = fixture().await else {
-            panic!("database disappeared");
-        };
+        let peer = seed_user(&pool).await;
         let dm = messaging::find_or_create_dm(&pool, user, peer)
             .await
             .unwrap();
@@ -648,6 +648,10 @@ mod tests {
         for revoke in [false, true] {
             let (id, token) = session(&pool, user).await;
             let mut blocker = pool.begin().await.unwrap();
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *blocker)
+                .await
+                .unwrap();
             sqlx::query("LOCK TABLE conversation_participants IN ACCESS EXCLUSIVE MODE")
                 .execute(&mut *blocker)
                 .await
@@ -656,11 +660,12 @@ mod tests {
                 .await
                 .unwrap();
             identify(&mut socket).await;
-            let wait_query = "SELECT pid, query_start FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT o.id, o.topic, o.payload FROM outbox o%'";
+            let wait_query = "SELECT pid, query_start FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND datname = current_database() AND application_name = current_setting('application_name') AND wait_event_type = 'Lock' AND query LIKE 'SELECT o.id, o.topic, o.payload FROM outbox o%'";
             let original: (i32, chrono::DateTime<chrono::Utc>) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
                         if let Some(row) = sqlx::query_as(wait_query)
+                            .bind(blocker_pid)
                             .fetch_optional(&pool)
                             .await
                             .unwrap()
@@ -684,8 +689,11 @@ mod tests {
                 "heartbeat_ack"
             );
             tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-            let current: (i32, chrono::DateTime<chrono::Utc>) =
-                sqlx::query_as(wait_query).fetch_one(&pool).await.unwrap();
+            let current: (i32, chrono::DateTime<chrono::Utc>) = sqlx::query_as(wait_query)
+                .bind(blocker_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
             assert_eq!(
                 original, current,
                 "ticks and heartbeat must preserve the original pending query"
@@ -712,7 +720,7 @@ mod tests {
             }
         }
         server.abort();
-        other_pool.close().await;
+
         pool.close().await;
     }
 }

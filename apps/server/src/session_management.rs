@@ -178,12 +178,41 @@ pub(crate) mod tests {
             eprintln!("SKIPPED: session database test (DATABASE_URL unset)");
             return None;
         };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(8)
+        let setup = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
             .connect(&url)
             .await
             .expect("test database");
+        // Each test owns its tables, so deliberate table locks cannot block
+        // parallel gateway/outbox tests. Names contain only fixed ASCII and hex.
+        let schema = format!("w2sessions_{}", Uuid::now_v7().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&setup)
+            .await
+            .unwrap();
+        setup.close().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .after_connect(move |connection, _| {
+                let schema = schema.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false), set_config('application_name', $1, false)")
+                        .bind(schema).execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&url).await.expect("schema-isolated test database");
         crate::MIGRATOR.run(&pool).await.unwrap();
+        let user = seed_user(&pool).await;
+        let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
+        let state = AppState {
+            pool: Some(pool.clone()),
+            hub,
+        };
+        Some((pool, state, user))
+    }
+
+    pub(crate) async fn seed_user(pool: &sqlx::PgPool) -> Uuid {
         let user = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO users (id, handle, email, display_name) VALUES ($1, $2, $3, 'Synthetic')",
@@ -191,15 +220,10 @@ pub(crate) mod tests {
         .bind(user)
         .bind(user.simple().to_string())
         .bind(format!("{user}@example.invalid"))
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-        let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
-        let state = AppState {
-            pool: Some(pool.clone()),
-            hub,
-        };
-        Some((pool, state, user))
+        user
     }
 
     pub(crate) async fn session(pool: &sqlx::PgPool, user: Uuid) -> (Uuid, String) {
@@ -307,9 +331,7 @@ pub(crate) mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let Some((other_pool, _, other)) = fixture().await else {
-            panic!("database disappeared");
-        };
+        let other = seed_user(&pool).await;
         let (foreign, _) = session(&pool, other).await;
         let (status, first) =
             request(&state, "GET", "/v1/auth/sessions?limit=1", Some(&token)).await;
@@ -385,7 +407,7 @@ pub(crate) mod tests {
                 .0,
             StatusCode::UNAUTHORIZED
         );
-        other_pool.close().await;
+
         pool.close().await;
     }
 
@@ -432,6 +454,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let mut blocker = pool.begin().await.unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
         sqlx::query("SELECT id FROM sessions WHERE id = $1 FOR UPDATE")
             .bind(caller)
             .execute(&mut *blocker)
@@ -442,7 +468,7 @@ pub(crate) mod tests {
         // Confirm the mutation reached its lock wait before advancing expiry.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT id FROM sessions WHERE user_id%')").fetch_one(&pool).await.unwrap();
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND datname = current_database() AND application_name = current_setting('application_name') AND wait_event_type = 'Lock' AND query LIKE 'SELECT id FROM sessions WHERE user_id%')").bind(blocker_pid).fetch_one(&pool).await.unwrap();
                 if waiting { break; }
                 tokio::task::yield_now().await;
             }
@@ -475,6 +501,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let mut blocker = pool.begin().await.unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
         sqlx::query("SELECT id FROM sessions WHERE id = $1 FOR UPDATE")
             .bind(caller)
             .execute(&mut *blocker)
@@ -486,7 +516,7 @@ pub(crate) mod tests {
             );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query = 'SELECT id FROM sessions WHERE id = $1 AND user_id = $2 FOR SHARE')").fetch_one(&pool).await.unwrap();
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND datname = current_database() AND application_name = current_setting('application_name') AND wait_event_type = 'Lock' AND query = 'SELECT id FROM sessions WHERE id = $1 AND user_id = $2 FOR SHARE')").bind(blocker_pid).fetch_one(&pool).await.unwrap();
                 if waiting { break; }
                 tokio::task::yield_now().await;
             }
