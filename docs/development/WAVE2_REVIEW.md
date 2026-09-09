@@ -80,3 +80,29 @@ required permission; confidence high from source, runtime reproduction pending.
 No serious candidate is closed by agent agreement. These remain open for
 maintainer disposition; this wave is not a claim of full authorization safety
 or merge readiness.
+
+### Follow-up correction and review
+
+The integrator subsequently assigned W2-MOD-RACES to fix these existing paths.
+Independent review also found `W2-BASE-AUTH-03` in `remove_member:1060-1068` at
+the same baseline: a Moderator demoted to Member could still outrank and kick
+a Guest after losing KickMembers permission. Same S1 candidate classification.
+
+Test-only source `f3c6797b00b187020539becce1bb5759b1e2a06f` adds five expected
+baseline-failing race cases plus an authorized/idempotency control. Its dedicated
+`teriri/backend-wave2-regression-proof` branch is for CI evidence, not integration.
+Correction `621c9013a32ab90d8b5dc5f3717f2d3c7ce80b0a` rechecks permission on
+locked roles for ban, role changes, and kick; unban locks the actor and checks
+permission before touching the ban row. Existing permissions are unchanged.
+
+Both reviewers independently inspected integrated source
+`a58b21701b95918f4f5cf581acc170153d9ae9c0` and found no new blocker. All three
+baseline finding groups are fixed in source, pending baseline-failure and
+candidate-passing PostgreSQL evidence. The tests retain target state and audit
+assertions and use isolated schemas plus observed blocker PIDs.
+
+The earlier complete endpoint/gateway source `2cfca6c` passed CI run
+`34369990150`: both baseline and db-tests jobs executed 95 server tests and 13
+crypto tests with no failures; doctests executed zero tests. That evidence does
+not substitute for the final expanded candidate. Final exact-head runtime
+results and preserved failures are recorded in PR #30's acceptance evidence.

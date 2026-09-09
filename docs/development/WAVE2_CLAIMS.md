@@ -9,6 +9,7 @@ expire on handoff. Workers report progress to the parent; parent integrates.
 | W2-SESSIONS | Session worker: `apps/server/src/session_management.rs`, `apps/server/src/gateway.rs`, session handoff | Bounded own-session inventory; individual idempotent revocation; cross-account denial; persistent gateway invalidation; HTTP/DB and real-WebSocket tests |
 | W2-STATS | Stats worker: `apps/server/src/workspace_stats.rs`, stats handoff | Caller-private workspace aggregate and paginated own channel counts; current membership/ban checks; isolation/idempotency tests |
 | W2-MODERATION | Parent: `apps/server/src/moderation.rs` | Ban directory gated by existing BanMembers permission; bounded paging, public profiles, unban consistency and adversarial tests |
+| W2-MOD-RACES | Follow-up worker in `TeriChat-wave2-moderation-races`: `apps/server/src/workspaces.rs`, race handoff | Revalidate existing BanMembers/ManageRoles authority after lock waits; unban checks authority in the mutation transaction; isolated deterministic regressions |
 | W2-INTEGRATION | Parent: `main.rs`, `routes.rs`, wave 2 docs/evidence | Merge routes, validate real combined backend; independent attack review and preserved dispositions |
 
 Worker checkouts branch from this route-wiring checkpoint. The empty routers
