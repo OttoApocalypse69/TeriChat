@@ -8,6 +8,7 @@ use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 
 use crate::auth;
+use crate::ledger;
 use crate::messaging;
 use crate::stats;
 use crate::workspaces;
@@ -145,6 +146,24 @@ impl From<stats::StatsError> for AppError {
             stats::StatsError::BadInput(detail) => Self::BadRequest(detail),
             stats::StatsError::Database(inner) => {
                 tracing::error!("stats backend failure: {inner}");
+                Self::Internal
+            }
+        }
+    }
+}
+
+impl From<ledger::LedgerError> for AppError {
+    fn from(err: ledger::LedgerError) -> Self {
+        match err {
+            ledger::LedgerError::BadInput(detail) => Self::BadRequest(detail),
+            // No existence oracle: cross-wallet probes get a uniform wall.
+            ledger::LedgerError::Forbidden => Self::Denied("not your wallet".to_owned()),
+            ledger::LedgerError::Invariant(detail) => {
+                tracing::error!("ledger invariant violated: {detail}");
+                Self::Internal
+            }
+            ledger::LedgerError::Database(inner) => {
+                tracing::error!("ledger backend failure: {inner}");
                 Self::Internal
             }
         }

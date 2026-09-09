@@ -442,6 +442,9 @@ async fn register(
         &body.password,
     )
     .await?;
+    // New users receive a wallet account in the same request. A ledger failure
+    // here is an internal error (the account already exists at this point).
+    crate::ledger::ensure_wallet(pool, user.id).await?;
     Ok((StatusCode::CREATED, Json(UserBody::from(user))))
 }
 
@@ -1102,6 +1105,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::session_management::router())
         .merge(crate::workspace_stats::router())
         .merge(crate::moderation::router())
+        .merge(crate::ledger::router())
         .with_state(state)
 }
 
