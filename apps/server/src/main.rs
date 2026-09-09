@@ -20,10 +20,13 @@ mod errors;
 mod gateway;
 mod health;
 mod messaging;
+mod moderation;
 mod password;
 mod routes;
+mod session_management;
 mod state;
 mod stats;
+mod workspace_stats;
 mod workspaces;
 
 pub use bootstrap::{db_pool, MIGRATOR};

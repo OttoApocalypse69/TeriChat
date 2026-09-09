@@ -1099,6 +1099,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/gateway", get(gateway::gateway_handler))
         .route("/v1/stats/me", get(get_own_stats))
         .route("/v1/stats/conversation", get(get_conversation_stats))
+        .merge(crate::session_management::router())
+        .merge(crate::workspace_stats::router())
+        .merge(crate::moderation::router())
         .with_state(state)
 }
 
