@@ -33,6 +33,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod recovery;
+
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     XChaCha20Poly1305, XNonce,
