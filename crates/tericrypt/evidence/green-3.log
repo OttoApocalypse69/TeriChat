@@ -1,0 +1,35 @@
+   Compiling tericrypt v0.1.0 (C:\Users\TeRiRi\Documents\GitHub\UnknownChat-mls-foundation\crates\tericrypt)
+error[E0502]: cannot borrow `self.group` as mutable because it is also borrowed as immutable
+   --> crates\tericrypt\src\mls.rs:188:30
+    |
+179 |           let mut matches = self
+    |  ___________________________-
+180 | |             .group
+    | |__________________- immutable borrow occurs here
+...
+188 |           let (commit, _, _) = self
+    |  ______________________________^
+189 | |             .group
+190 | |             .remove_members(provider, &self.installation.signer, &[member.index])
+    | |_________________________________________________________________________________^ mutable borrow occurs here
+...
+197 |       }
+    |       - immutable borrow might be used here, when `matches` is dropped and runs the destructor for type `Filter<impl Iterator<Item = openmls::group::Member> + '_, {closure@crates\tericrypt\src\mls.rs:182:21: 182:29}>`
+
+error[E0502]: cannot borrow `self.group` as mutable because it is also borrowed as immutable
+   --> crates\tericrypt\src\mls.rs:193:9
+    |
+179 |           let mut matches = self
+    |  ___________________________-
+180 | |             .group
+    | |__________________- immutable borrow occurs here
+...
+193 | /         self.group
+194 | |             .merge_pending_commit(provider)
+    | |___________________________________________^ mutable borrow occurs here
+...
+197 |       }
+    |       - immutable borrow might be used here, when `matches` is dropped and runs the destructor for type `Filter<impl Iterator<Item = openmls::group::Member> + '_, {closure@crates\tericrypt\src\mls.rs:182:21: 182:29}>`
+
+For more information about this error, try `rustc --explain E0502`.
+error: could not compile `tericrypt` (lib) due to 2 previous errors

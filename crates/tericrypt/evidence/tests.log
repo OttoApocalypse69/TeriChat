@@ -1,0 +1,47 @@
+   Compiling tericrypt v0.1.0 (C:\Users\TeRiRi\Documents\GitHub\UnknownChat-mls-foundation\crates\tericrypt)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.87s
+     Running unittests src\lib.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\tericrypt-720a26ce65bc8b78.exe)
+
+running 13 tests
+test tests::key_validators_accept_real_reject_zero ... ok
+test tests::fingerprints_are_stable_and_unique ... ok
+test tests::wire_format_roundtrips ... ok
+test tests::seals_are_randomized ... ok
+test tests::zero_recipient_key_is_refused ... ok
+test tests::roundtrip ... ok
+test tests::wrong_sender_key_fails ... ok
+test tests::resigned_forward_does_not_verify_as_sender ... ok
+test tests::tampered_signature_fails ... ok
+test tests::wrong_recipient_cannot_open ... ok
+test tests::tampered_ciphertext_fails ... ok
+test tests::tampered_ephemeral_or_nonce_fails ... ok
+test tests::max_plaintext_fits_server_cap ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests\mls_foundation.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\mls_foundation-384888c4a8ac2a41.exe)
+
+running 3 tests
+test removed_installation_cannot_decrypt_future_epoch_even_without_removal_notice ... ok
+test two_users_four_independent_installations_exchange ... ok
+test adding_installation_advances_existing_peers_epoch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests\mls_rejection.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\mls_rejection-39d0d9a4302d2c38.exe)
+
+running 6 tests
+test poc_envelope_is_not_an_mls_message_and_never_downgrades ... ok
+test oversized_plaintext_is_rejected_before_advancing_sender_state ... ok
+test malformed_trailing_tampered_and_replayed_messages_fail_closed ... ok
+test valid_alternate_suite_packages_and_welcome_are_rejected ... ok
+test malformed_packages_and_foreign_welcome_are_rejected ... ok
+test foreign_group_application_and_commit_do_not_change_target_epoch ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+   Doc-tests tericrypt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

@@ -1,0 +1,12 @@
+{
+  "command": [
+    "cargo",
+    "tree",
+    "--locked",
+    "--workspace",
+    "--all-features",
+    "-i",
+    "proc-macro-error2"
+  ],
+  "exit_code": 0
+}
