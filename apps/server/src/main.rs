@@ -19,6 +19,7 @@ mod config;
 mod errors;
 mod gateway;
 mod health;
+mod ledger;
 mod messaging;
 mod moderation;
 mod password;
