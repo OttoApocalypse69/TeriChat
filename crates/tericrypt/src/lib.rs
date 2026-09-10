@@ -33,9 +33,6 @@
 
 #![forbid(unsafe_code)]
 
-/// Opt-in, non-durable, synthetic client-local MLS experiment. Not the PoC wire protocol.
-#[cfg(feature = "mls-foundation")]
-pub mod mls;
 pub mod recovery;
 
 use chacha20poly1305::{
