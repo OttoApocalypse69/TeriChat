@@ -1,8 +1,0 @@
-   Compiling tericrypt v0.1.0 (C:\Users\TeRiRi\Documents\GitHub\UnknownChat-mls-foundation\crates\tericrypt)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.94s
-     Running tests\mls_rejection.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\mls_rejection-39d0d9a4302d2c38.exe)
-
-running 1 test
-test malformed_trailing_tampered_and_replayed_messages_fail_closed ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.06s
