@@ -1,0 +1,38 @@
+   Compiling tericrypt v0.1.0 (C:\Users\TeRiRi\Documents\GitHub\UnknownChat-mls-foundation\crates\tericrypt)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running unittests src\lib.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\tericrypt-f7143d28c7fcf017.exe)
+
+running 13 tests
+test tests::key_validators_accept_real_reject_zero ... ok
+test tests::wire_format_roundtrips ... ok
+test tests::fingerprints_are_stable_and_unique ... ok
+test tests::seals_are_randomized ... ok
+test tests::zero_recipient_key_is_refused ... ok
+test tests::wrong_sender_key_fails ... ok
+test tests::resigned_forward_does_not_verify_as_sender ... ok
+test tests::roundtrip ... ok
+test tests::wrong_recipient_cannot_open ... ok
+test tests::tampered_signature_fails ... ok
+test tests::tampered_ciphertext_fails ... ok
+test tests::tampered_ephemeral_or_nonce_fails ... ok
+test tests::max_plaintext_fits_server_cap ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests\mls_foundation.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\mls_foundation-556c32769125d81c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\mls_rejection.rs (C:/Users/TeRiRi/Documents/GitHub/TeriChat-fix-backend/target\debug\deps\mls_rejection-d39fb3cea4f9e82e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests tericrypt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
