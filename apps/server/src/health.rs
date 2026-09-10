@@ -30,6 +30,11 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// Readiness probe: reports database wiring state.
+///
+/// # Errors
+///
+/// Returns [`AppError::Unavailable`] when the database ping fails.
 pub async fn ready(State(state): State<AppState>) -> Result<Json<ReadyResponse>, AppError> {
     match &state.pool {
         None => Ok(Json(ReadyResponse {

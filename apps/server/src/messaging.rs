@@ -99,6 +99,10 @@ type ConversationListRow = (Uuid, String, Option<i64>, Option<DateTime<Utc>>);
 /// the `users` table — the caller is a member, so this reveals nothing new
 /// (no oracle). Groups and channels carry `peer_* = None`; clients label
 /// those from their own membership/workspace state.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the conversation query fails.
 pub async fn list_conversations(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -252,6 +256,10 @@ fn to_message(row: MessageRow) -> Message {
 /// The creator is added when missing. Empty membership is rejected.
 /// `channel` rows are created by the workspaces module with a linked channel;
 /// see `channels.conversation_id`.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the insert fails.
 pub async fn create_conversation(
     pool: &sqlx::PgPool,
     creator: Uuid,
@@ -297,6 +305,10 @@ pub async fn create_conversation(
 
 /// Find the `dm` shared by exactly `a` and `b`, or create it. Makes DM
 /// creation idempotent: repeated calls return the same conversation.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the lookup or creation fails.
 pub async fn find_or_create_dm(
     pool: &sqlx::PgPool,
     a: Uuid,
@@ -334,6 +346,10 @@ pub async fn find_or_create_dm(
 }
 
 /// Membership check. `false` covers both non-members and missing rows.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the lookup fails.
 pub async fn is_member(
     pool: &sqlx::PgPool,
     conversation_id: Uuid,
@@ -354,6 +370,13 @@ pub async fn is_member(
 /// transactional outbox — all in one transaction. Returns the stored message
 /// plus whether it was newly created (`false` = idempotent retry returning
 /// the original row, without burning a sequence number or event).
+///
+/// # Errors
+///
+/// Returns [`MessagingError::EmptyCiphertext`] for empty envelopes,
+/// [`MessagingError::CiphertextTooLarge`] for oversized envelopes,
+/// [`MessagingError::NotMember`] when the sender may not write here, or
+/// [`MessagingError::Database`] when the write fails.
 pub async fn send_message(
     pool: &sqlx::PgPool,
     sender_id: Uuid,
@@ -489,6 +512,11 @@ async fn insert_message(
 
 /// Message history after `since_seq`, oldest first, capped at
 /// [`MAX_HISTORY_LIMIT`]. Membership-checked.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::NotMember`] for non-members, or
+/// [`MessagingError::Database`] when the query fails.
 pub async fn message_history(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -516,6 +544,10 @@ pub async fn message_history(
 /// Claim up to `limit` unpublished outbox rows (oldest first) for delivery.
 /// Crash-safe: a row claimed but never marked is re-claimed next round
 /// (`attempts` grows), so consumers MUST dedup by event id.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the claim query fails.
 pub async fn claim_outbox(
     pool: &sqlx::PgPool,
     limit: i64,
@@ -541,6 +573,10 @@ pub async fn claim_outbox(
 }
 
 /// Stamp claimed rows delivered.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the update fails.
 pub async fn mark_published(pool: &sqlx::PgPool, ids: &[Uuid]) -> Result<(), MessagingError> {
     if ids.is_empty() {
         return Ok(());
@@ -561,6 +597,10 @@ pub async fn mark_published(pool: &sqlx::PgPool, ids: &[Uuid]) -> Result<(), Mes
 /// participants; the gateway applies authoritative visibility before sending.
 /// Compare text rather than casting untrusted payload fields to UUID: malformed
 /// unrelated events must not abort every user's replay.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] when the scan query fails.
 pub async fn events_after(
     pool: &sqlx::PgPool,
     user_id: Uuid,

@@ -47,6 +47,11 @@ pub fn init_tracing(config: &Config) {
 ///
 /// Returns [`None`] when no `DATABASE_URL` is set: the server still boots
 /// bare with only the probes live.
+///
+/// # Panics
+///
+/// Panics when a configured database is unreachable or migrations fail;
+/// the server cannot serve then.
 pub async fn connect_pool(config: &Config) -> Option<sqlx::PgPool> {
     // Forward-only schema migration, applied once per boot when a database is
     // configured. Without `DATABASE_URL` the server still boots bare.
