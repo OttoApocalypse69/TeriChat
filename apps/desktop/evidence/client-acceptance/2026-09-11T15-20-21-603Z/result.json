@@ -1,0 +1,182 @@
+{
+  "scope": "exe-restart-campaign",
+  "mode": "native-webview2-plugin-http-exe-restart",
+  "arguments": [],
+  "runId": "2026-09-11T15-20-21-603Z",
+  "container": "unknownchat-restart-2026-09-11t15-20-21-603z",
+  "fullRestartComplete": true,
+  "result": "PASS",
+  "steps": [
+    {
+      "name": "restart: isolated backend startup and readiness",
+      "backend": "http://127.0.0.1:50948",
+      "databaseBinding": "127.0.0.1:50937",
+      "pid": 17848,
+      "lastConnectionError": "fetch failed",
+      "readiness": {
+        "status": 200,
+        "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+      }
+    },
+    {
+      "name": "restart: test-config exe built",
+      "exeSha256": "5e338019f552ce984afef0313c71c16d03e478e104f6c2b9489b1f166c245006"
+    },
+    {
+      "name": "restart gen1/a window",
+      "Id": 26716,
+      "MainWindowHandle": 266504,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen1/b window",
+      "Id": 22464,
+      "MainWindowHandle": 658824,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen1: two logins; A sends bro; B receives live; plaintext notice visible"
+    },
+    {
+      "name": "restart gen1: backlog complete with contiguous seqs",
+      "total": 31
+    },
+    {
+      "name": "restart: both gen1 OS processes terminated and absent; profiles removed",
+      "pids": [
+        26716,
+        22464
+      ]
+    },
+    {
+      "name": "restart gen2/a window",
+      "Id": 24304,
+      "MainWindowHandle": 5050586,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen2/b window",
+      "Id": 19692,
+      "MainWindowHandle": 1377650,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen2: fresh processes login; full history restored with zero gaps/duplicates",
+      "total": 31
+    },
+    {
+      "name": "restart gen2: composer and plaintext notice intact; server history contiguous"
+    },
+    {
+      "name": "restart gen2: post-restart live send received both ways",
+      "total": 32
+    }
+  ],
+  "generations": {
+    "gen1": {
+      "pids": [
+        26716,
+        22464
+      ],
+      "debugPorts": {
+        "a": 50962,
+        "b": 50963
+      }
+    },
+    "gen2": {
+      "pids": [
+        24304,
+        19692
+      ],
+      "debugPorts": {
+        "a": 57276,
+        "b": 57277
+      }
+    }
+  },
+  "head": "2e8e47b5edfdf815e128e0fea0db875160445984",
+  "sourceSha256": {
+    "App.gateway.test.tsx": "102b17134378c2e9a7b06d1b47006548f13cc6c6e893e41d4d3782a3e92d60e3",
+    "App.test.tsx": "d5608878c139a2fb63cc9e62c13db4c428dda9b4d8ed5db45444a085e9ba9044",
+    "App.tsx": "b75d75eefa5773c5fa775d220b6ec315d033990dd593e6ada0f6666deb080400",
+    "components\\ChannelList.tsx": "e564f19c63563e066a3c47dbd618a39c97109e7785b3f5e3eaf57214f09b14f5",
+    "components\\ConnectionIndicator.tsx": "8b65d001bda4b24d8be197e50689c3ece8ebf3c9523f51ea3d27b9424b125538",
+    "components\\ConversationList.tsx": "4a56f6156fe657df6face31afcdc5159e8cabc4618078b9a736fdd76a144ecb4",
+    "components\\ConversationView.tsx": "dfa25703878e4f9800ddd4da7c8b0b6f848e4cad9c866fdb11268ba741364372",
+    "components\\CreateWorkspace.tsx": "6371fd188eccc5cb53ee3b316af480a803ca5a1cda7db9065490d064b59a7e38",
+    "components\\InvitePanel.tsx": "abf4b115aa75519a5ec4a82e33319ec163469f7eaf85d19f301e83251e619bb3",
+    "components\\JoinWorkspace.tsx": "8f1103caf612caba266d9556d8c087277ac278d5cd27cb5dfe2d20861f9e3a6a",
+    "components\\LoginView.tsx": "5af8669653cf4ef81dd148d9d0172219087b7a293ad4ddc1270f36bb38c2315a",
+    "components\\MemberPanel.test.tsx": "1f8ecd9dffdae65008582dff1740af5181060b1305508f63ebb8426dbfc229a8",
+    "components\\MemberPanel.tsx": "fcecf146fb1c4647f0bc358f6886ba16bc9e08c219787464a65193e6c3becc32",
+    "components\\WorkspaceList.tsx": "c9bf298e9515af6dae5c347e1abe0e029ab5f28ac3123dad37a76079bb4b2aa9",
+    "index.css": "41c9526ac242f1eed0ad23a5d1ddaccf8973b8d4aba5675a6807076774d44102",
+    "lib\\__tests__\\gateway.test.ts": "4891582e3c5400ca3c23bdec6e8abfeb415d49b2d69cdf2fc28577bb716b5059",
+    "lib\\__tests__\\members.test.ts": "5c2961eaccdbfa517ffde12d7908581008b5b6c772ee35d612ddf5d08b52cc1d",
+    "lib\\__tests__\\store.test.ts": "7f8fc6b9c55f72a9a9f5f18cf0ea59830ce6fd54c3e5a61074a63cfcc431e213",
+    "lib\\__tests__\\workspace-api.test.ts": "a0940a649e796b9b903d7968298ff66050f76e0bffb3e2aee38411ec05189eb9",
+    "lib\\__tests__\\workspaces.test.ts": "e935b687eac0da7ac72457e599fe72ada3500b875121d6577d6ec9cf680f0b32",
+    "lib\\api.ts": "fe3ef144821570e0cc77f75c3a88b6b035a971ce5ec20a987c114a7334167899",
+    "lib\\gateway.ts": "5cc629c6e12b0b1a3d1909f37817a81db0627b93ea74628d9118c9cd4a763a7e",
+    "lib\\members.ts": "f926f4985800a2bc451944d80328be9bdb2b2e9d15e2f74fa4e8aba7f1e7bd00",
+    "lib\\store.ts": "21a4594968d801b9d749e51ee8e548e67542ebaca31d483ceb87ce00f1b6cec0",
+    "lib\\workspaces.ts": "639a1c532452e5a41a726ab566f0386fa82663095d04783cc79db00d385cedad",
+    "main.tsx": "72352d5558662730a97415a23baadd032501c18a0ce26e81b112a4d70e0c9c74",
+    "vite-env.d.ts": "424faf9241dd699dda995b367ed36665732da1e6ec1f33b2fd40394488ecac92"
+  },
+  "harnessSha256": "b38644dba61566fbae41bafae6471ac91850d227c77b31bd313414c17aa4a342",
+  "startup": {
+    "backend": "http://127.0.0.1:50948",
+    "databaseBinding": "127.0.0.1:50937",
+    "pid": 17848,
+    "lastConnectionError": "fetch failed",
+    "readiness": {
+      "status": 200,
+      "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+    }
+  },
+  "exePath": "C:\\Users\\TeRiRi\\Documents\\GitHub\\UnknownChat-restart\\apps\\desktop\\.acceptance\\restart-target\\debug\\terichat-desktop.exe",
+  "exeSha256": "5e338019f552ce984afef0313c71c16d03e478e104f6c2b9489b1f166c245006",
+  "conversationId": "01a0910e-7428-7291-ad7f-20b8132a5939",
+  "preRestartTotal": 31,
+  "taskkill-gen1-26716": "SUCCESS: The process with PID 27096 (child process of PID 10952) has been terminated.\r\nSUCCESS: The process with PID 27560 (child process of PID 10952) has been terminated.\r\nSUCCESS: The process with PID 11956 (child process of PID 10952) has been terminated.\r\nSUCCESS: The process with PID 18168 (child process of PID 10952) has been terminated.\r\nSUCCESS: The process with PID 2264 (child process of PID 10952) has been terminated.\r\nSUCCESS: The process with PID 26740 (child process of PID 26716) has been terminated.\r\nSUCCESS: The process with PID 10952 (child process of PID 26716) has been terminated.\r\nSUCCESS: The process with PID 26716 (child process of PID 26800) has been terminated.",
+  "taskkill-gen1-22464": "SUCCESS: The process with PID 16988 (child process of PID 16240) has been terminated.\r\nSUCCESS: The process with PID 20668 (child process of PID 16240) has been terminated.\r\nSUCCESS: The process with PID 27048 (child process of PID 16240) has been terminated.\r\nSUCCESS: The process with PID 24080 (child process of PID 16240) has been terminated.\r\nSUCCESS: The process with PID 22592 (child process of PID 16240) has been terminated.\r\nSUCCESS: The process with PID 25388 (child process of PID 22464) has been terminated.\r\nSUCCESS: The process with PID 16240 (child process of PID 22464) has been terminated.\r\nSUCCESS: The process with PID 22464 (child process of PID 26800) has been terminated.",
+  "postRestartTotal": 31,
+  "expectedBodies": [
+    "bro",
+    "restart-001",
+    "restart-002",
+    "restart-003",
+    "restart-004",
+    "restart-005",
+    "restart-006",
+    "restart-007",
+    "restart-008",
+    "restart-009",
+    "restart-010",
+    "restart-011",
+    "restart-012",
+    "restart-013",
+    "restart-014",
+    "restart-015",
+    "restart-016",
+    "restart-017",
+    "restart-018",
+    "restart-019",
+    "restart-020",
+    "restart-021",
+    "restart-022",
+    "restart-023",
+    "restart-024",
+    "restart-025",
+    "restart-026",
+    "restart-027",
+    "restart-028",
+    "restart-029",
+    "restart-030",
+    "restart-back"
+  ],
+  "containerRemoved": true,
+  "volumesRemoved": true,
+  "cleanupErrors": []
+}
