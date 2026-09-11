@@ -24,22 +24,41 @@ or DNS/edge changes are required by these fixes.
 
 ## Owner-operated bring-up / upgrade (not performed by this change)
 
-On the authorized staging box, prepare `.env` from `.env.example` with the
-staging Host value and a distinct strong PostgreSQL password. Never commit
-or put that file in test evidence. Select an approved revision/artifact and
-record it before building:
+On the authorized staging box (ARM64 Linux; confirm `uname -m` reports
+`aarch64`), with Docker Compose v2, Tailscale SSH, and Git already
+provisioned by the owner, prepare `.env` from the tracked template. Never
+commit or put that file in test evidence:
 
 ```sh
 cd ~/terichat/deploy/staging
+cp .env.example .env
+openssl rand -base64 32   # paste into POSTGRES_PASSWORD below
+```
+
+Set `STAGING_HOST` to the box Tailscale IP or MagicDNS name, set a distinct
+strong `POSTGRES_PASSWORD`, and substitute that same password into
+`DATABASE_URL` in place of its `***` placeholder so db and api agree.
+Select an approved revision/artifact and record it before building:
+
+```sh
+git rev-parse HEAD
 docker compose up --build -d
 docker compose ps
 docker compose logs api
 ```
 
-Migrations run on API boot. Record a verified pre-upgrade encrypted backup
-before migration-changing upgrades; approve rollback/roll-forward first.
-The PostgreSQL named `pgdata` volume persists across restarts. Never use
-`down -v` as an upgrade/rollback step.
+Upgrade/restart runbook (owner executes on the box, in order):
+
+1. Record the approved revision and take a verified pre-upgrade encrypted
+   backup before migration-changing upgrades; approve rollback/roll-forward
+   first. Migrations run on API boot.
+2. Rebuild and recreate with `docker compose up --build -d` (config/code
+   changes are baked into images; `restart` alone does not pick them up).
+3. Check `docker compose ps` and `docker compose logs api`, then probe each
+   layer explicitly as below and confirm status **and body**.
+4. For a restart persistence check, use `docker compose restart api` and
+   re-probe; the PostgreSQL named `pgdata` volume persists across restarts.
+   Never use `down -v` as an upgrade/rollback step.
 
 Probe each layer explicitly (replace placeholders; these are operator
 commands, not evidence of a performed deployment):
