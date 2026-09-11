@@ -678,11 +678,13 @@ Resolved/provisional:
 - [x] Exact OpenMLS ciphersuite/provider configuration — OpenMLS + RustCrypto + MLS mandatory X25519/AES-128-GCM/SHA-256/Ed25519 suite.
 - [ ] Exact MLS credential representation for devices/accounts.
 - [ ] Exact persistence model for MLS group state.
+- [ ] Audit-warning disposition for the OpenMLS graph (proc-macro-error2 RUSTSEC-2026-0173 via hax/libcrux; baseline rsa RUSTSEC-2023-0071 with no fixed version).
+- [ ] Specialist crypto review trigger and scope before any production E2EE claim.
 - [ ] Exact post-quantum upgrade path and when it becomes stable/default.
 - [ ] Key transparency implementation.
 - [ ] Metadata minimization policy.
 - [x] Exact Account/TeriCrypt Vault construction — envelope encryption with 256-bit recovery secret, HKDF-SHA256 wrapping key, random 256-bit Vault Data Key, local decryption, XChaCha20-Poly1305 working AEAD.
-- [ ] Recovery mnemonic derivation/encoding specification.
+- [x] Recovery mnemonic derivation/encoding specification — BIP-39 English, 256-bit entropy plus 8-bit checksum as exactly 24 words with NFKD/lowercase/whitespace handling and versioned format policy (`terirecovery-v1`; issue #11, PR #33).
 - [ ] Multi-device encrypted bootstrap format.
 - [ ] Key backup rotation/revocation policy.
 - [ ] Encrypted attachment chunking/streaming format for large files.
