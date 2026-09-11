@@ -685,6 +685,11 @@ pub async fn mint(
 
 /// Tenant-isolated transaction history: the caller's own wallet lines only,
 /// newest first. `limit` is clamped to 1..=100 by the caller-facing query.
+///
+/// # Errors
+///
+/// Returns [`LedgerError::Forbidden`] when reading another wallet, or
+/// [`LedgerError::Database`] when the query fails.
 pub async fn history(
     pool: &sqlx::PgPool,
     caller_id: Uuid,

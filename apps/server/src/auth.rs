@@ -140,6 +140,11 @@ pub struct AuthSession {
 }
 
 /// Normalize a handle: trim + lowercase. Length mirrors the DB `CHECK`.
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidInput`] when the normalized handle is not
+/// 2-32 characters.
 pub fn normalize_handle(raw: &str) -> Result<String, AuthError> {
     let handle = raw.trim().to_lowercase();
     if !(2..=32).contains(&handle.len()) {
@@ -151,6 +156,11 @@ pub fn normalize_handle(raw: &str) -> Result<String, AuthError> {
 }
 
 /// Normalize an email: trim + lowercase with a minimal shape check.
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidInput`] when the value does not look like
+/// `name@domain.tld`.
 pub fn normalize_email(raw: &str) -> Result<String, AuthError> {
     let email = raw.trim().to_lowercase();
     let well_formed = email.contains('@')
@@ -167,6 +177,11 @@ pub fn normalize_email(raw: &str) -> Result<String, AuthError> {
 }
 
 /// Normalize a display name: trim, non-empty, length mirrors the DB `CHECK`.
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidInput`] when the name is empty or longer
+/// than 64 characters.
 pub fn normalize_display_name(raw: &str) -> Result<String, AuthError> {
     let name = raw.trim().to_owned();
     if name.is_empty() || name.len() > 64 {
@@ -179,6 +194,13 @@ pub fn normalize_display_name(raw: &str) -> Result<String, AuthError> {
 
 /// Create an account: validate, Argon2id-hash, insert. Maps unique
 /// violations to [`AuthError::HandleTaken`]/[`AuthError::EmailTaken`].
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidInput`] for bad handle/email/display name or
+/// an empty password, [`AuthError::Hash`] when hashing fails,
+/// [`AuthError::HandleTaken`]/[`AuthError::EmailTaken`] on duplicates, or
+/// [`AuthError::Database`] when the insert fails.
 pub async fn create_user(
     pool: &sqlx::PgPool,
     handle: &str,
@@ -221,6 +243,11 @@ pub async fn create_user(
 
 /// Resolve a handle to its account id. Unknown handles are a plain input
 /// error (peer lookup, not login — no oracle concern beyond the 400 itself).
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidInput`] for a malformed handle or an unknown
+/// peer handle, or [`AuthError::Database`] when the lookup fails.
 pub async fn user_id_by_handle(pool: &sqlx::PgPool, handle: &str) -> Result<Uuid, AuthError> {
     let handle = normalize_handle(handle)?;
     let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE handle = $1")
@@ -239,6 +266,11 @@ type DeviceRow = (Uuid, Uuid, String, Vec<u8>, Option<Vec<u8>>, DateTime<Utc>);
 /// Degenerate keys (all-zero, unparsable identity) are refused: a planted
 /// zero agreement key would make every envelope to that device readable by
 /// whoever planted it (see `crates/tericrypt`).
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidInput`] for degenerate keys, or
+/// [`AuthError::Database`] when the insert fails.
 pub async fn register_device(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -280,6 +312,13 @@ pub async fn register_device(
 /// Log in: resolve handle, verify password, mint an opaque session.
 /// Unknown handles cost one discarded hash so their timing matches the
 /// wrong-password path (no enumeration oracle beyond network timing noise).
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidCredentials`] for unknown handles or wrong
+/// passwords, [`AuthError::Randomness`] when token randomness is
+/// unavailable, [`AuthError::Hash`] when hashing fails, or
+/// [`AuthError::Database`] when a query fails.
 pub async fn login(
     pool: &sqlx::PgPool,
     handle: &str,
@@ -335,6 +374,10 @@ pub async fn login(
 
 /// Log out: stamp revocation. Idempotent — unknown or already-revoked tokens
 /// still return `Ok` so logout responses reveal nothing.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Database`] when the revocation update fails.
 pub async fn logout(pool: &sqlx::PgPool, token: &str) -> Result<(), AuthError> {
     let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     sqlx::query(
@@ -350,6 +393,11 @@ pub async fn logout(pool: &sqlx::PgPool, token: &str) -> Result<(), AuthError> {
 
 /// Resolve a bearer token to its session. Rejects unknown, revoked, and
 /// expired tokens identically as [`AuthError::InvalidToken`].
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidToken`] for unknown/revoked/expired tokens,
+/// or [`AuthError::Database`] when the lookup fails.
 pub async fn authenticate(pool: &sqlx::PgPool, token: &str) -> Result<AuthSession, AuthError> {
     let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let row: Option<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(

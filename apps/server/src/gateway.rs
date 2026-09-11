@@ -101,6 +101,12 @@ async fn send_event(
 }
 
 /// Upgrade to the gateway WebSocket after bearer auth.
+///
+/// # Errors
+///
+/// Returns [`AppError::NoDatabase`] without a pool,
+/// [`AppError::Unauthorized`] for missing/invalid tokens, or the domain
+/// error when authentication fails.
 pub async fn gateway_handler(
     State(state): State<AppState>,
     Query(params): Query<GatewayParams>,
