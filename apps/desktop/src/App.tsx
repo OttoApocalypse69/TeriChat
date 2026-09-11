@@ -17,6 +17,12 @@ import {
 } from './lib/api';
 import { GatewayClient, type GatewayOutboxEvent, type GatewayStatus } from './lib/gateway';
 import {
+  buildDmNotification,
+  isWindowUnfocused,
+  notifyDm,
+  watchNotificationClick,
+} from './lib/notifications';
+import {
   ChatStore,
   gatewayEventInfo,
   sortConversations,
@@ -249,12 +255,20 @@ function AuthenticatedApp({ session, onLogout }: {
     [api, bump, token],
   );
 
+  // Toast clicks focus the main window (registered once per session).
+  useEffect(() => {
+    void watchNotificationClick();
+  }, []);
+
   // Gateway lifecycle: connect on login, resume with last event id.
   useEffect(() => {
     if (!live.current) return;
 
     const onEvent = (event: GatewayOutboxEvent) => {
       if (!live.current) return;
+      // Snapshot focus at arrival: a DM that lands while the window is
+      // unfocused earns one toast after its text loads (see below).
+      const wasUnfocused = isWindowUnfocused();
       const fresh = storeRef.current.applyGatewayEvent(event);
       const replay = fresh ? null : gatewayEventInfo(event);
       // Deduplicate event effects, not an unfinished history fetch.
@@ -266,7 +280,26 @@ function AuthenticatedApp({ session, onLogout }: {
       bump();
       if (info) {
         // Events carry ids only; use the same serialized page drain as selection.
-        void refreshHistory(info.conversationId);
+        void refreshHistory(info.conversationId).then(() => {
+          // Exactly one toast per incoming message: only first-seen events
+          // (`fresh`) notify, never redeliveries, and only the fetched row
+          // matching this event (never a neighbor's text).
+          if (!live.current || !wasUnfocused || !fresh) return;
+          const arrived = storeRef.current.conversations.find(
+            (c) => c.id === info.conversationId,
+          ) ?? null;
+          const row = (storeRef.current.messages.get(info.conversationId) ?? [])
+            .find((m) => m.id === info.messageId);
+          if (!row) return;
+          const content = buildDmNotification(meId, arrived, row);
+          if (!content) return;
+          void notifyDm(content, { unfocused: wasUnfocused }).catch(() => {
+            // Messaging already updated; a toast failure must stay silent.
+          });
+        }, () => {
+          // refreshHistory handles fetch errors internally; this guards the
+          // toast tail against unexpected throws without breaking messaging.
+        });
         const conv = storeRef.current.conversations.find(
           c => c.id === info.conversationId,
         );
