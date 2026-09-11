@@ -1,0 +1,658 @@
+{
+  "scope": "exe-restart-campaign",
+  "mode": "native-webview2-plugin-http-exe-restart",
+  "arguments": [],
+  "runId": "2026-09-11T15-24-40-350Z",
+  "container": "unknownchat-restart-2026-09-11t15-24-40-350z",
+  "fullRestartComplete": true,
+  "result": "PASS",
+  "steps": [
+    {
+      "name": "restart: isolated backend startup and readiness",
+      "backend": "http://127.0.0.1:61219",
+      "databaseBinding": "127.0.0.1:61217",
+      "pid": 2264,
+      "lastConnectionError": "fetch failed",
+      "readiness": {
+        "status": 200,
+        "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+      }
+    },
+    {
+      "name": "restart: test-config exe built",
+      "exeSha256": "b2a9d2c3fa852ca202faa2fcb92a59e5a965437e21d1804da1dbb96087b95cef"
+    },
+    {
+      "name": "restart gen1/a window",
+      "Id": 7756,
+      "MainWindowHandle": 985764,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen1/b window",
+      "Id": 26860,
+      "MainWindowHandle": 397592,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen1: two logins; A sends bro; B receives live; plaintext notice visible"
+    },
+    {
+      "name": "restart gen1: backlog complete with contiguous seqs",
+      "total": 31
+    },
+    {
+      "name": "restart: both gen1 OS processes terminated and absent; profiles removed",
+      "pids": [
+        7756,
+        26860
+      ]
+    },
+    {
+      "name": "restart gen2/a window",
+      "Id": 25828,
+      "MainWindowHandle": 4788464,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen2/b window",
+      "Id": 12472,
+      "MainWindowHandle": 1577124,
+      "MainWindowTitle": "UnknownChat (Alpha 0)"
+    },
+    {
+      "name": "restart gen2: fresh processes login; full history restored with zero gaps/duplicates",
+      "total": 31
+    },
+    {
+      "name": "restart gen2: composer and plaintext notice intact; server history contiguous"
+    },
+    {
+      "name": "restart gen2: post-restart live send received both ways",
+      "total": 32
+    }
+  ],
+  "generations": {
+    "gen1": {
+      "pids": [
+        7756,
+        26860
+      ],
+      "debugPorts": {
+        "a": 61238,
+        "b": 61239
+      }
+    },
+    "gen2": {
+      "pids": [
+        25828,
+        12472
+      ],
+      "debugPorts": {
+        "a": 51460,
+        "b": 51461
+      }
+    }
+  },
+  "head": "2e8e47b5edfdf815e128e0fea0db875160445984",
+  "sourceSha256": {
+    "App.gateway.test.tsx": "102b17134378c2e9a7b06d1b47006548f13cc6c6e893e41d4d3782a3e92d60e3",
+    "App.test.tsx": "d5608878c139a2fb63cc9e62c13db4c428dda9b4d8ed5db45444a085e9ba9044",
+    "App.tsx": "b75d75eefa5773c5fa775d220b6ec315d033990dd593e6ada0f6666deb080400",
+    "components\\ChannelList.tsx": "e564f19c63563e066a3c47dbd618a39c97109e7785b3f5e3eaf57214f09b14f5",
+    "components\\ConnectionIndicator.tsx": "8b65d001bda4b24d8be197e50689c3ece8ebf3c9523f51ea3d27b9424b125538",
+    "components\\ConversationList.tsx": "4a56f6156fe657df6face31afcdc5159e8cabc4618078b9a736fdd76a144ecb4",
+    "components\\ConversationView.tsx": "dfa25703878e4f9800ddd4da7c8b0b6f848e4cad9c866fdb11268ba741364372",
+    "components\\CreateWorkspace.tsx": "6371fd188eccc5cb53ee3b316af480a803ca5a1cda7db9065490d064b59a7e38",
+    "components\\InvitePanel.tsx": "abf4b115aa75519a5ec4a82e33319ec163469f7eaf85d19f301e83251e619bb3",
+    "components\\JoinWorkspace.tsx": "8f1103caf612caba266d9556d8c087277ac278d5cd27cb5dfe2d20861f9e3a6a",
+    "components\\LoginView.tsx": "5af8669653cf4ef81dd148d9d0172219087b7a293ad4ddc1270f36bb38c2315a",
+    "components\\MemberPanel.test.tsx": "1f8ecd9dffdae65008582dff1740af5181060b1305508f63ebb8426dbfc229a8",
+    "components\\MemberPanel.tsx": "fcecf146fb1c4647f0bc358f6886ba16bc9e08c219787464a65193e6c3becc32",
+    "components\\WorkspaceList.tsx": "c9bf298e9515af6dae5c347e1abe0e029ab5f28ac3123dad37a76079bb4b2aa9",
+    "index.css": "41c9526ac242f1eed0ad23a5d1ddaccf8973b8d4aba5675a6807076774d44102",
+    "lib\\__tests__\\gateway.test.ts": "4891582e3c5400ca3c23bdec6e8abfeb415d49b2d69cdf2fc28577bb716b5059",
+    "lib\\__tests__\\members.test.ts": "5c2961eaccdbfa517ffde12d7908581008b5b6c772ee35d612ddf5d08b52cc1d",
+    "lib\\__tests__\\store.test.ts": "7f8fc6b9c55f72a9a9f5f18cf0ea59830ce6fd54c3e5a61074a63cfcc431e213",
+    "lib\\__tests__\\workspace-api.test.ts": "a0940a649e796b9b903d7968298ff66050f76e0bffb3e2aee38411ec05189eb9",
+    "lib\\__tests__\\workspaces.test.ts": "e935b687eac0da7ac72457e599fe72ada3500b875121d6577d6ec9cf680f0b32",
+    "lib\\api.ts": "fe3ef144821570e0cc77f75c3a88b6b035a971ce5ec20a987c114a7334167899",
+    "lib\\gateway.ts": "5cc629c6e12b0b1a3d1909f37817a81db0627b93ea74628d9118c9cd4a763a7e",
+    "lib\\members.ts": "f926f4985800a2bc451944d80328be9bdb2b2e9d15e2f74fa4e8aba7f1e7bd00",
+    "lib\\store.ts": "21a4594968d801b9d749e51ee8e548e67542ebaca31d483ceb87ce00f1b6cec0",
+    "lib\\workspaces.ts": "639a1c532452e5a41a726ab566f0386fa82663095d04783cc79db00d385cedad",
+    "main.tsx": "72352d5558662730a97415a23baadd032501c18a0ce26e81b112a4d70e0c9c74",
+    "vite-env.d.ts": "424faf9241dd699dda995b367ed36665732da1e6ec1f33b2fd40394488ecac92"
+  },
+  "harnessSha256": "fc4c2e84cefcde9bbf0184830a1276392802a606a301b899b4cd70e607b315cb",
+  "startup": {
+    "backend": "http://127.0.0.1:61219",
+    "databaseBinding": "127.0.0.1:61217",
+    "pid": 2264,
+    "lastConnectionError": "fetch failed",
+    "readiness": {
+      "status": 200,
+      "body": "{\"status\":\"ok\",\"database\":\"connected\"}"
+    }
+  },
+  "exePath": "C:\\Users\\TeRiRi\\Documents\\GitHub\\UnknownChat-restart\\apps\\desktop\\.acceptance\\restart-target\\debug\\terichat-desktop.exe",
+  "exeSha256": "b2a9d2c3fa852ca202faa2fcb92a59e5a965437e21d1804da1dbb96087b95cef",
+  "conversationId": "01a09112-640d-7271-b217-0daeb1b46d1e",
+  "preRestartTotal": 31,
+  "preHistory": [
+    {
+      "seq": 1,
+      "client_msg_id": "e5b7dd76-efb4-4a03-a333-80e3ac36cace",
+      "contentHash": "f8cc0742aefba11a"
+    },
+    {
+      "seq": 2,
+      "client_msg_id": "f7f45d6a-c5d2-402e-b77c-d9dd1de0affd",
+      "contentHash": "ac7dc8f7ba147467"
+    },
+    {
+      "seq": 3,
+      "client_msg_id": "bab006ac-bbde-4569-9f20-6af4d90a9432",
+      "contentHash": "6aef2008fab7595f"
+    },
+    {
+      "seq": 4,
+      "client_msg_id": "7fe7e19d-68ec-4094-bd8d-cb9bf3bee489",
+      "contentHash": "5e46ff98c87e72cd"
+    },
+    {
+      "seq": 5,
+      "client_msg_id": "515a314a-19d3-43f7-9b2c-9708ac4b3e1e",
+      "contentHash": "f753fd34c92bc421"
+    },
+    {
+      "seq": 6,
+      "client_msg_id": "7af8b852-6604-4b7f-9640-4074d6544904",
+      "contentHash": "cae6b637067f04de"
+    },
+    {
+      "seq": 7,
+      "client_msg_id": "76ec4a70-10c8-4b7b-ac88-8f2a852da7ea",
+      "contentHash": "9f3e10b67d82cf28"
+    },
+    {
+      "seq": 8,
+      "client_msg_id": "3982ab8c-5796-4f62-8fde-ba2f76bc0f8e",
+      "contentHash": "2abc604da9b11ea2"
+    },
+    {
+      "seq": 9,
+      "client_msg_id": "e3d661c0-d229-42cd-87e1-b156b63f0f2b",
+      "contentHash": "1d0e52f15e114be0"
+    },
+    {
+      "seq": 10,
+      "client_msg_id": "65eceb85-3133-4176-9fe0-50c6895b4e0b",
+      "contentHash": "198743d5a7cc4b95"
+    },
+    {
+      "seq": 11,
+      "client_msg_id": "b221809b-7f2d-48b2-b02d-5f9b92186de0",
+      "contentHash": "6db244ddb748d0e6"
+    },
+    {
+      "seq": 12,
+      "client_msg_id": "4c986a76-c8a0-4847-b474-77eb9acc306d",
+      "contentHash": "5e91b6a1f4f0b4ab"
+    },
+    {
+      "seq": 13,
+      "client_msg_id": "d656ac09-7062-466a-bf5d-034d00410ed8",
+      "contentHash": "d62d48ff14cead83"
+    },
+    {
+      "seq": 14,
+      "client_msg_id": "36a61746-b2a2-4b64-897f-7c8356fd1900",
+      "contentHash": "d47e011fc7500591"
+    },
+    {
+      "seq": 15,
+      "client_msg_id": "0a29dd9c-7ed9-428e-8284-be1d04b81fa6",
+      "contentHash": "f71fb88c4306584d"
+    },
+    {
+      "seq": 16,
+      "client_msg_id": "f5567067-3edc-4893-a1d6-76fdd0393084",
+      "contentHash": "4a9f20a718ed5806"
+    },
+    {
+      "seq": 17,
+      "client_msg_id": "c2c75009-fd08-4f4f-837b-cc6a969a1cc0",
+      "contentHash": "08019c6e955dd45e"
+    },
+    {
+      "seq": 18,
+      "client_msg_id": "7c5e9aa8-9605-4db8-9463-bddc6bda5495",
+      "contentHash": "6f7e9c6d2e5b294d"
+    },
+    {
+      "seq": 19,
+      "client_msg_id": "929b188b-fb9e-44bf-96fc-9c09709b4933",
+      "contentHash": "53189648b7470425"
+    },
+    {
+      "seq": 20,
+      "client_msg_id": "2555e157-d8b1-44b4-9d8a-4663dc7eee7c",
+      "contentHash": "510153b394e28625"
+    },
+    {
+      "seq": 21,
+      "client_msg_id": "fdc486ea-84d2-48e3-a72e-a8dced730301",
+      "contentHash": "d7714ba7e1c207df"
+    },
+    {
+      "seq": 22,
+      "client_msg_id": "2c24f303-3f5b-4bbc-9496-4209ec43813b",
+      "contentHash": "644ba57389d87287"
+    },
+    {
+      "seq": 23,
+      "client_msg_id": "64475c23-7a0d-4994-9f5f-26adeb8e937b",
+      "contentHash": "5a55cd6509d10c46"
+    },
+    {
+      "seq": 24,
+      "client_msg_id": "ed17a18b-cd5f-4474-a6b3-cfbc1c675b03",
+      "contentHash": "d0a60971b9b9c700"
+    },
+    {
+      "seq": 25,
+      "client_msg_id": "0330133b-b4e4-49a0-8318-0b3890909185",
+      "contentHash": "b5d3666f058edc15"
+    },
+    {
+      "seq": 26,
+      "client_msg_id": "13a55846-aa7b-46ad-a4a3-d0af2d6ebdd6",
+      "contentHash": "7e40b3dc28af9351"
+    },
+    {
+      "seq": 27,
+      "client_msg_id": "91216b78-411d-4fef-b3fe-d5943ad2543d",
+      "contentHash": "502b71cedf5a34e6"
+    },
+    {
+      "seq": 28,
+      "client_msg_id": "8c4d47ec-6c5f-4ff6-a606-3ddc93e0abb2",
+      "contentHash": "d7b6aafeb22fd48e"
+    },
+    {
+      "seq": 29,
+      "client_msg_id": "a838a5d2-1621-46d3-bbb4-bc8a6462f250",
+      "contentHash": "69f25063b1e0b97a"
+    },
+    {
+      "seq": 30,
+      "client_msg_id": "b36fcc91-1a70-4ae8-9beb-818ab75a5342",
+      "contentHash": "cab2cc99b838b32e"
+    },
+    {
+      "seq": 31,
+      "client_msg_id": "fbaa4025-f4e8-4256-ac34-e33bec2280f4",
+      "contentHash": "ed28735913685d5b"
+    }
+  ],
+  "taskkill-gen1-7756": "SUCCESS: The process with PID 19044 (child process of PID 21736) has been terminated.\r\nSUCCESS: The process with PID 24136 (child process of PID 21736) has been terminated.\r\nSUCCESS: The process with PID 26772 (child process of PID 21736) has been terminated.\r\nSUCCESS: The process with PID 11396 (child process of PID 21736) has been terminated.\r\nSUCCESS: The process with PID 3484 (child process of PID 21736) has been terminated.\r\nSUCCESS: The process with PID 23488 (child process of PID 7756) has been terminated.\r\nSUCCESS: The process with PID 21736 (child process of PID 7756) has been terminated.\r\nSUCCESS: The process with PID 7756 (child process of PID 3580) has been terminated.",
+  "taskkill-gen1-26860": "SUCCESS: The process with PID 25408 (child process of PID 18680) has been terminated.\r\nSUCCESS: The process with PID 16624 (child process of PID 18680) has been terminated.\r\nSUCCESS: The process with PID 10592 (child process of PID 18680) has been terminated.\r\nSUCCESS: The process with PID 25388 (child process of PID 18680) has been terminated.\r\nSUCCESS: The process with PID 26616 (child process of PID 18680) has been terminated.\r\nSUCCESS: The process with PID 8672 (child process of PID 26860) has been terminated.\r\nSUCCESS: The process with PID 18680 (child process of PID 26860) has been terminated.\r\nSUCCESS: The process with PID 26860 (child process of PID 3580) has been terminated.",
+  "postRestartTotal": 31,
+  "postHistory": [
+    {
+      "seq": 1,
+      "client_msg_id": "e5b7dd76-efb4-4a03-a333-80e3ac36cace",
+      "contentHash": "f8cc0742aefba11a"
+    },
+    {
+      "seq": 2,
+      "client_msg_id": "f7f45d6a-c5d2-402e-b77c-d9dd1de0affd",
+      "contentHash": "ac7dc8f7ba147467"
+    },
+    {
+      "seq": 3,
+      "client_msg_id": "bab006ac-bbde-4569-9f20-6af4d90a9432",
+      "contentHash": "6aef2008fab7595f"
+    },
+    {
+      "seq": 4,
+      "client_msg_id": "7fe7e19d-68ec-4094-bd8d-cb9bf3bee489",
+      "contentHash": "5e46ff98c87e72cd"
+    },
+    {
+      "seq": 5,
+      "client_msg_id": "515a314a-19d3-43f7-9b2c-9708ac4b3e1e",
+      "contentHash": "f753fd34c92bc421"
+    },
+    {
+      "seq": 6,
+      "client_msg_id": "7af8b852-6604-4b7f-9640-4074d6544904",
+      "contentHash": "cae6b637067f04de"
+    },
+    {
+      "seq": 7,
+      "client_msg_id": "76ec4a70-10c8-4b7b-ac88-8f2a852da7ea",
+      "contentHash": "9f3e10b67d82cf28"
+    },
+    {
+      "seq": 8,
+      "client_msg_id": "3982ab8c-5796-4f62-8fde-ba2f76bc0f8e",
+      "contentHash": "2abc604da9b11ea2"
+    },
+    {
+      "seq": 9,
+      "client_msg_id": "e3d661c0-d229-42cd-87e1-b156b63f0f2b",
+      "contentHash": "1d0e52f15e114be0"
+    },
+    {
+      "seq": 10,
+      "client_msg_id": "65eceb85-3133-4176-9fe0-50c6895b4e0b",
+      "contentHash": "198743d5a7cc4b95"
+    },
+    {
+      "seq": 11,
+      "client_msg_id": "b221809b-7f2d-48b2-b02d-5f9b92186de0",
+      "contentHash": "6db244ddb748d0e6"
+    },
+    {
+      "seq": 12,
+      "client_msg_id": "4c986a76-c8a0-4847-b474-77eb9acc306d",
+      "contentHash": "5e91b6a1f4f0b4ab"
+    },
+    {
+      "seq": 13,
+      "client_msg_id": "d656ac09-7062-466a-bf5d-034d00410ed8",
+      "contentHash": "d62d48ff14cead83"
+    },
+    {
+      "seq": 14,
+      "client_msg_id": "36a61746-b2a2-4b64-897f-7c8356fd1900",
+      "contentHash": "d47e011fc7500591"
+    },
+    {
+      "seq": 15,
+      "client_msg_id": "0a29dd9c-7ed9-428e-8284-be1d04b81fa6",
+      "contentHash": "f71fb88c4306584d"
+    },
+    {
+      "seq": 16,
+      "client_msg_id": "f5567067-3edc-4893-a1d6-76fdd0393084",
+      "contentHash": "4a9f20a718ed5806"
+    },
+    {
+      "seq": 17,
+      "client_msg_id": "c2c75009-fd08-4f4f-837b-cc6a969a1cc0",
+      "contentHash": "08019c6e955dd45e"
+    },
+    {
+      "seq": 18,
+      "client_msg_id": "7c5e9aa8-9605-4db8-9463-bddc6bda5495",
+      "contentHash": "6f7e9c6d2e5b294d"
+    },
+    {
+      "seq": 19,
+      "client_msg_id": "929b188b-fb9e-44bf-96fc-9c09709b4933",
+      "contentHash": "53189648b7470425"
+    },
+    {
+      "seq": 20,
+      "client_msg_id": "2555e157-d8b1-44b4-9d8a-4663dc7eee7c",
+      "contentHash": "510153b394e28625"
+    },
+    {
+      "seq": 21,
+      "client_msg_id": "fdc486ea-84d2-48e3-a72e-a8dced730301",
+      "contentHash": "d7714ba7e1c207df"
+    },
+    {
+      "seq": 22,
+      "client_msg_id": "2c24f303-3f5b-4bbc-9496-4209ec43813b",
+      "contentHash": "644ba57389d87287"
+    },
+    {
+      "seq": 23,
+      "client_msg_id": "64475c23-7a0d-4994-9f5f-26adeb8e937b",
+      "contentHash": "5a55cd6509d10c46"
+    },
+    {
+      "seq": 24,
+      "client_msg_id": "ed17a18b-cd5f-4474-a6b3-cfbc1c675b03",
+      "contentHash": "d0a60971b9b9c700"
+    },
+    {
+      "seq": 25,
+      "client_msg_id": "0330133b-b4e4-49a0-8318-0b3890909185",
+      "contentHash": "b5d3666f058edc15"
+    },
+    {
+      "seq": 26,
+      "client_msg_id": "13a55846-aa7b-46ad-a4a3-d0af2d6ebdd6",
+      "contentHash": "7e40b3dc28af9351"
+    },
+    {
+      "seq": 27,
+      "client_msg_id": "91216b78-411d-4fef-b3fe-d5943ad2543d",
+      "contentHash": "502b71cedf5a34e6"
+    },
+    {
+      "seq": 28,
+      "client_msg_id": "8c4d47ec-6c5f-4ff6-a606-3ddc93e0abb2",
+      "contentHash": "d7b6aafeb22fd48e"
+    },
+    {
+      "seq": 29,
+      "client_msg_id": "a838a5d2-1621-46d3-bbb4-bc8a6462f250",
+      "contentHash": "69f25063b1e0b97a"
+    },
+    {
+      "seq": 30,
+      "client_msg_id": "b36fcc91-1a70-4ae8-9beb-818ab75a5342",
+      "contentHash": "cab2cc99b838b32e"
+    },
+    {
+      "seq": 31,
+      "client_msg_id": "fbaa4025-f4e8-4256-ac34-e33bec2280f4",
+      "contentHash": "ed28735913685d5b"
+    }
+  ],
+  "finalHistory": [
+    {
+      "seq": 1,
+      "client_msg_id": "e5b7dd76-efb4-4a03-a333-80e3ac36cace",
+      "contentHash": "f8cc0742aefba11a"
+    },
+    {
+      "seq": 2,
+      "client_msg_id": "f7f45d6a-c5d2-402e-b77c-d9dd1de0affd",
+      "contentHash": "ac7dc8f7ba147467"
+    },
+    {
+      "seq": 3,
+      "client_msg_id": "bab006ac-bbde-4569-9f20-6af4d90a9432",
+      "contentHash": "6aef2008fab7595f"
+    },
+    {
+      "seq": 4,
+      "client_msg_id": "7fe7e19d-68ec-4094-bd8d-cb9bf3bee489",
+      "contentHash": "5e46ff98c87e72cd"
+    },
+    {
+      "seq": 5,
+      "client_msg_id": "515a314a-19d3-43f7-9b2c-9708ac4b3e1e",
+      "contentHash": "f753fd34c92bc421"
+    },
+    {
+      "seq": 6,
+      "client_msg_id": "7af8b852-6604-4b7f-9640-4074d6544904",
+      "contentHash": "cae6b637067f04de"
+    },
+    {
+      "seq": 7,
+      "client_msg_id": "76ec4a70-10c8-4b7b-ac88-8f2a852da7ea",
+      "contentHash": "9f3e10b67d82cf28"
+    },
+    {
+      "seq": 8,
+      "client_msg_id": "3982ab8c-5796-4f62-8fde-ba2f76bc0f8e",
+      "contentHash": "2abc604da9b11ea2"
+    },
+    {
+      "seq": 9,
+      "client_msg_id": "e3d661c0-d229-42cd-87e1-b156b63f0f2b",
+      "contentHash": "1d0e52f15e114be0"
+    },
+    {
+      "seq": 10,
+      "client_msg_id": "65eceb85-3133-4176-9fe0-50c6895b4e0b",
+      "contentHash": "198743d5a7cc4b95"
+    },
+    {
+      "seq": 11,
+      "client_msg_id": "b221809b-7f2d-48b2-b02d-5f9b92186de0",
+      "contentHash": "6db244ddb748d0e6"
+    },
+    {
+      "seq": 12,
+      "client_msg_id": "4c986a76-c8a0-4847-b474-77eb9acc306d",
+      "contentHash": "5e91b6a1f4f0b4ab"
+    },
+    {
+      "seq": 13,
+      "client_msg_id": "d656ac09-7062-466a-bf5d-034d00410ed8",
+      "contentHash": "d62d48ff14cead83"
+    },
+    {
+      "seq": 14,
+      "client_msg_id": "36a61746-b2a2-4b64-897f-7c8356fd1900",
+      "contentHash": "d47e011fc7500591"
+    },
+    {
+      "seq": 15,
+      "client_msg_id": "0a29dd9c-7ed9-428e-8284-be1d04b81fa6",
+      "contentHash": "f71fb88c4306584d"
+    },
+    {
+      "seq": 16,
+      "client_msg_id": "f5567067-3edc-4893-a1d6-76fdd0393084",
+      "contentHash": "4a9f20a718ed5806"
+    },
+    {
+      "seq": 17,
+      "client_msg_id": "c2c75009-fd08-4f4f-837b-cc6a969a1cc0",
+      "contentHash": "08019c6e955dd45e"
+    },
+    {
+      "seq": 18,
+      "client_msg_id": "7c5e9aa8-9605-4db8-9463-bddc6bda5495",
+      "contentHash": "6f7e9c6d2e5b294d"
+    },
+    {
+      "seq": 19,
+      "client_msg_id": "929b188b-fb9e-44bf-96fc-9c09709b4933",
+      "contentHash": "53189648b7470425"
+    },
+    {
+      "seq": 20,
+      "client_msg_id": "2555e157-d8b1-44b4-9d8a-4663dc7eee7c",
+      "contentHash": "510153b394e28625"
+    },
+    {
+      "seq": 21,
+      "client_msg_id": "fdc486ea-84d2-48e3-a72e-a8dced730301",
+      "contentHash": "d7714ba7e1c207df"
+    },
+    {
+      "seq": 22,
+      "client_msg_id": "2c24f303-3f5b-4bbc-9496-4209ec43813b",
+      "contentHash": "644ba57389d87287"
+    },
+    {
+      "seq": 23,
+      "client_msg_id": "64475c23-7a0d-4994-9f5f-26adeb8e937b",
+      "contentHash": "5a55cd6509d10c46"
+    },
+    {
+      "seq": 24,
+      "client_msg_id": "ed17a18b-cd5f-4474-a6b3-cfbc1c675b03",
+      "contentHash": "d0a60971b9b9c700"
+    },
+    {
+      "seq": 25,
+      "client_msg_id": "0330133b-b4e4-49a0-8318-0b3890909185",
+      "contentHash": "b5d3666f058edc15"
+    },
+    {
+      "seq": 26,
+      "client_msg_id": "13a55846-aa7b-46ad-a4a3-d0af2d6ebdd6",
+      "contentHash": "7e40b3dc28af9351"
+    },
+    {
+      "seq": 27,
+      "client_msg_id": "91216b78-411d-4fef-b3fe-d5943ad2543d",
+      "contentHash": "502b71cedf5a34e6"
+    },
+    {
+      "seq": 28,
+      "client_msg_id": "8c4d47ec-6c5f-4ff6-a606-3ddc93e0abb2",
+      "contentHash": "d7b6aafeb22fd48e"
+    },
+    {
+      "seq": 29,
+      "client_msg_id": "a838a5d2-1621-46d3-bbb4-bc8a6462f250",
+      "contentHash": "69f25063b1e0b97a"
+    },
+    {
+      "seq": 30,
+      "client_msg_id": "b36fcc91-1a70-4ae8-9beb-818ab75a5342",
+      "contentHash": "cab2cc99b838b32e"
+    },
+    {
+      "seq": 31,
+      "client_msg_id": "fbaa4025-f4e8-4256-ac34-e33bec2280f4",
+      "contentHash": "ed28735913685d5b"
+    },
+    {
+      "seq": 32,
+      "client_msg_id": "01c8855e-6600-492b-93b5-880d6692c6cd",
+      "contentHash": "4db178305272607d"
+    }
+  ],
+  "expectedBodies": [
+    "bro",
+    "restart-001",
+    "restart-002",
+    "restart-003",
+    "restart-004",
+    "restart-005",
+    "restart-006",
+    "restart-007",
+    "restart-008",
+    "restart-009",
+    "restart-010",
+    "restart-011",
+    "restart-012",
+    "restart-013",
+    "restart-014",
+    "restart-015",
+    "restart-016",
+    "restart-017",
+    "restart-018",
+    "restart-019",
+    "restart-020",
+    "restart-021",
+    "restart-022",
+    "restart-023",
+    "restart-024",
+    "restart-025",
+    "restart-026",
+    "restart-027",
+    "restart-028",
+    "restart-029",
+    "restart-030",
+    "restart-back"
+  ],
+  "containerRemoved": true,
+  "volumesRemoved": true,
+  "cleanupErrors": []
+}

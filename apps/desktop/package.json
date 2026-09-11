@@ -11,8 +11,10 @@
     "test": "vitest run",
     "test:acceptance:unit": "node --test acceptance/report.test.mjs",
     "validate:acceptance": "node acceptance/report.mjs",
+    "validate:restart": "node acceptance/verify-restart.mjs",
     "test:acceptance": "node acceptance/run.mjs",
     "test:acceptance:native": "node acceptance/run.mjs --native",
+    "test:acceptance:restart": "node acceptance/restart-exe.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
