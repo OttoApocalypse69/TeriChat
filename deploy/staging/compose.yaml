@@ -53,8 +53,21 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    networks:
+      # Reachable by name from the shared SPICE edge Caddy, which proxies
+      # chat.unknownchat.xyz to terichat-staging-web-1:80. Compose-only
+      # recreates used to drop the manual attachment and take public
+      # down; declaring it here survives rebuilds. Requires the
+      # pre-existing box network (see README fresh-host steps).
+      - default
+      - edge
 
 volumes:
   pgdata:
   caddy_data:
   caddy_config:
+
+networks:
+  edge:
+    name: unknownchat-edge
+    external: true

@@ -31,6 +31,8 @@ commit or put that file in test evidence:
 
 ```sh
 cd ~/terichat/deploy/staging
+# Shared SPICE edge attachment (compose declares it external; harmless if present):
+docker network create unknownchat-edge 2>/dev/null || true
 cp .env.example .env
 openssl rand -base64 32   # paste into POSTGRES_PASSWORD below
 ```
