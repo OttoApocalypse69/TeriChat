@@ -1,8 +1,12 @@
+// @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
 import { fetch } from '@tauri-apps/plugin-http';
 import { ApiClient } from '../api';
 
 vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }));
+// Exercise the Tauri-shell transport path: the plugin mock only engages
+// when the native bridge marker is present.
+(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
 afterEach(() => vi.resetAllMocks());
 
 it('requests member pages with the bounded limit and encodes the server cursor', async () => {

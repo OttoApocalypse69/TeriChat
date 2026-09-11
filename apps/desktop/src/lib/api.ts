@@ -3,11 +3,31 @@
 // Transport only: envelope bytes are opaque base64 pass-through. No crypto,
 // key handling, or sync authority lives here.
 //
-// NOTE: fetch comes from @tauri-apps/plugin-http (proxied through Rust), not
-// the webview. WebView2 enforces CORS and the Alpha backend serves no CORS
-// headers, so window.fetch fails from the desktop shell. The plugin path is
-// capability-gated (see src-tauri/capabilities/default.json: loopback only).
-import { fetch } from '@tauri-apps/plugin-http';
+// NOTE: inside the Tauri shell, fetch comes from @tauri-apps/plugin-http
+// (proxied through Rust), not the webview. WebView2 enforces CORS and the
+// Alpha backend serves no CORS headers, so window.fetch fails from the
+// desktop shell. The plugin path is capability-gated (see
+// src-tauri/capabilities/default.json: loopback only). In a plain browser
+// there is no Tauri bridge, so same-origin window.fetch is used instead
+// (the web deployment serves API and UI from one origin, so no CORS).
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+
+/// True when running inside the Tauri shell (native bridge present).
+export function isTauriShell(): boolean {
+  return (
+    typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  );
+}
+
+const browserFetch: typeof fetch = (...args) =>
+  globalThis.fetch(...args);
+
+/// Transport fetch: Rust-proxied in the shell, same-origin in browsers.
+function transportFetch(
+  ...args: Parameters<typeof fetch>
+): ReturnType<typeof fetch> {
+  return (isTauriShell() ? tauriFetch : browserFetch)(...args);
+}
 
 export interface UserBody {
   id: string;
@@ -164,7 +184,7 @@ export class ApiClient {
       'content-type': 'application/json',
     };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
-    const res = await fetch(`${this.base}${path}`, {
+    const res = await transportFetch(`${this.base}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
