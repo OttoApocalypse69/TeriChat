@@ -72,3 +72,15 @@ Fresh candidate reviewer `/root/candidate_review` inspected 9db0a64808f69191acc1
 No schema, configuration, crypto membership, key-state or API contract changes. Requires PR30 APIs already in base; missing endpoints show errors. Session revocation is distinct from device/MLS/key revocation. Stats includes only caller counters; no wallet UI or leaderboard.
 Reverting the two implementation commits removes these controls without migration. Sessions already revoked on the server remain revoked.
 Next unblocked step: parent fresh integration review and PR/CI handling; obtain real synthetic backend/native acceptance when a permitted Docker engine is available. Critical human merge authorization remains required. No unresolved local blocking finding; unavailable runtime evidence is not a waiver.
+
+## Supplied-backend harness contract for parent
+
+Existing `apps/desktop/acceptance/workspaces.mjs` accepts a disposable synthetic loopback backend without adding dependencies:
+
+```powershell
+node apps/desktop/acceptance/workspaces.mjs http://127.0.0.1:3001
+```
+
+Replace 3001 with the actual supplied disposable server port. Exactly one CLI argument is required, matching `http://127.0.0.1:<port>`; no API-base environment variable is consumed. It checks `/ready`, creates synthetic accounts/workspaces, launches installed Edge (`channel: msedge`) using existing playwright-core/Vite dependencies, and writes `.acceptance/workspace-<timestamp>/result.json` plus artifacts under apps/desktop. It uses a browser HTTP adapter/CORS test route and does not prove native transport. This existing campaign covers workspaces, not the new session/activity acceptance criteria; do not count its pass as S3 feature E2E. It is NOT RUN here. Hosted CI must supply installed Edge or a separately reviewed runner adaptation.
+
+The general `acceptance/run.mjs` does not accept an external backend URL: it creates its own reserved Docker container and Windows backend executable. The new `s3-controls.mjs` is fixture-only and intentionally has no supplied-real-backend mode. No scripts, workflows, manifests or services were modified to claim otherwise.
