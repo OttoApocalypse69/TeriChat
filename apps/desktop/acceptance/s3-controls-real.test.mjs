@@ -6,7 +6,54 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
-import { bounded, closeResources, completeForwardedResponse, writeReport } from './s3-controls-runtime.mjs';
+import { bounded, closeResources, completeForwardedResponse, disableHttpCacheForHeldResponses, writeReport } from './s3-controls-runtime.mjs';
+
+test('different accounts reach the same URL while original response is held', { timeout: 20000 }, async () => {
+  let originalResponse;
+  let markOriginal;
+  const originalReceived = new Promise(resolve => { markOriginal = resolve; });
+  let replacementReached = false;
+  const server = http.createServer((req, res) => {
+    if (req.url !== '/private-count') { res.end('Synthetic HTTP cache regression'); return; }
+    if (req.headers.authorization === 'Bearer synthetic-original') { originalResponse = res; markOriginal(); return; }
+    assert.equal(req.headers.authorization, 'Bearer synthetic-replacement');
+    replacementReached = true;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ count: 1 }));
+  });
+  let browser;
+  try {
+    await bounded(() => new Promise(resolve => server.listen(0, '127.0.0.1', resolve)), 'server startup');
+    browser = await chromium.launch({ headless: true,
+      ...(process.env.S3_BROWSER_EXECUTABLE ? { executablePath: process.env.S3_BROWSER_EXECUTABLE } : {}) });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    page.setDefaultTimeout(5000);
+    await disableHttpCacheForHeldResponses(context, page);
+    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.evaluate(() => {
+      window.originalCount = null; window.replacementCount = null;
+      void fetch('/private-count', { headers: { authorization: 'Bearer synthetic-original' } })
+        .then(response => response.json()).then(body => { window.originalCount = body.count; }).catch(() => {});
+    });
+    await bounded(() => originalReceived, 'original request deadline', 2000);
+    await page.evaluate(() => {
+      void fetch('/private-count', { headers: { authorization: 'Bearer synthetic-replacement' } })
+        .then(response => response.json()).then(body => { window.replacementCount = body.count; }).catch(() => {});
+    });
+    await page.waitForFunction(() => window.replacementCount === 1, undefined, { timeout: 2000 });
+    assert.equal(replacementReached, true);
+    assert.equal(originalResponse.writableEnded, false);
+    assert.equal(await page.evaluate(() => window.originalCount), null);
+    originalResponse.setHeader('content-type', 'application/json');
+    originalResponse.end(JSON.stringify({ count: 2 }));
+    await page.waitForFunction(() => window.originalCount === 2);
+    assert.equal(await page.evaluate(() => window.replacementCount), 1);
+  } finally {
+    server.closeAllConnections();
+    assert.equal(await closeResources([() => browser?.close(), () => new Promise(resolve => server.close(resolve))], 5000), 'PASS');
+  }
+});
 
 test('unread real HTTP 204 completes without waiting for requestfinished', { timeout: 20000 }, async () => {
   const server = http.createServer((req, res) => {

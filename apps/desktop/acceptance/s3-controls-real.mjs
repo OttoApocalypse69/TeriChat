@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { createLogger, createServer } from 'vite';
-import { bounded, closeResources, completeForwardedResponse, writeReport } from './s3-controls-runtime.mjs';
+import { bounded, closeResources, completeForwardedResponse, disableHttpCacheForHeldResponses, writeReport } from './s3-controls-runtime.mjs';
 
 const desktop = fileURLToPath(new URL('../', import.meta.url));
 process.chdir(desktop);
@@ -42,6 +42,7 @@ const check = label => { report.steps.push(label); save(); console.log(`PASS ${l
 // leave a failure artifact before the unchanged five-minute CI step deadline.
 const watchdog = setTimeout(() => {
   report.result = 'FAIL'; report.failurePhase = phase;
+  report.failureOperation = report.operation;
   report.failureKind = 'harness deadline'; report.cleanup = 'INCOMPLETE';
   save();
   console.error(`FAIL ${phase}: harness deadline`);
@@ -187,6 +188,8 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
+  await disableHttpCacheForHeldResponses(context, page);
+  report.httpCache = 'disabled for controlled response overlap; cache policy not tested';
   await page.goto(vite.resolvedUrls.local[0]);
   const browserAlice = await login(page, alice.handle, password);
   await selectWorkspace(page, workspace, 'owner');
@@ -262,18 +265,28 @@ try {
   check('closing controls during real self DELETE still logs out and denies bearer');
 
   startPhase('account replacement and late response');
+  progress('signing in original account again');
   await login(page, alice.handle, password);
+  progress('selecting original account workspace');
   activity = await selectWorkspace(page, workspace, 'owner');
+  progress('checking original account count');
   await total(activity, 2);
   const staleAccount = hold('GET', statsRoute(workspace.id));
+  progress('requesting original account refresh');
   await activity.getByRole('button', { name: 'Refresh activity' }).click();
+  progress('waiting for original account response barrier');
   await until(() => staleAccount.reached, 'account response held');
   assert.equal(staleAccount.status, 200);
+  progress('logging out with original response held');
   await page.getByRole('button', { name: 'Log out', exact: true }).click();
+  progress('signing in replacement account');
   const browserBob = await login(page, bob.handle, password);
+  progress('selecting replacement account workspace');
   activity = await selectWorkspace(page, workspace, 'member');
   assert.equal(await activity.getByText('2 messages across current channels', { exact: true }).count(), 0);
+  progress('checking replacement account count before release');
   await total(activity, 1);
+  assert.equal(staleAccount.delivered, false, 'replacement count must arrive while original response remains held');
   await release(staleAccount, page);
   await total(activity, 1);
   assert.equal(await activity.getByText('2 messages across current channels', { exact: true }).count(), 0);
@@ -286,6 +299,7 @@ try {
 } catch {
   // Allowlisted phase only: Playwright errors can include tokens in URLs or DOM.
   report.failurePhase = phase;
+  report.failureOperation = report.operation;
   save();
   process.exitCode = 1;
   console.error(`FAIL ${phase}; raw credentials, DOM and network traces intentionally excluded`);
