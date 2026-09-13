@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking terichat-server v0.1.0 (C:\Users\TeRiRi\.codex\worktrees\6dab\TeriChat(tentative)\apps\server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.07s
