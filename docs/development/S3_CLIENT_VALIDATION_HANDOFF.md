@@ -131,3 +131,43 @@ The workflow explicitly invokes the new loopback regression after installing the
 Command output is preserved in this task's transcript. No dependency change occurred. Client/Rust tests were not repeated locally for this harness-only repair; their original hosted preflight passed, while the new transport tests are the affected local regression. Full repaired browser/backend/PostgreSQL execution, hosted exact-candidate run, actionlint, cargo-deny/full secret scan and native checks remain NOT RUN by this worker. The old failed run remains failed and is not a waiver.
 
 Fresh final reviewer `/root/repair_final_review`, different from the hang investigator, reviewed exact `2569491..a8a51b2` under trusted Critical rules: **no actionable findings**. It independently passed both transport tests using installed Chromium151, harness syntax and diff whitespace checks. It confirmed real status/logout/bearer-denial assertions remain, body waits are bounded, reporting is sanitized, cleanup failure cannot yield PASS, and hosted isolation/read-only credentials/five-minute timeout remain. It did not edit files or claim full PostgreSQL/hosted acceptance. Parent must perform fresh combined-candidate review and hosted execution after integration. Revert the repair commit to restore the prior harness/workflow (including its known hang); no schema/data migration or product rollback is involved.
+
+## PR48 account-overlap repair (second hosted failure)
+
+- Source base: `28abdeae105868545193771a329136799c492ef0` (parent-integrated main). This worker did not race base integration.
+- Repair implementation: `eb0611395d9bfcff536810d0ab4b7ecda1208899`; following handoff commit is documentation only.
+- Owned changed code: `s3-controls-real.mjs`, `s3-controls-runtime.mjs`, `s3-controls-real.test.mjs` under `apps/desktop/acceptance/`. No workflow, product/frontend/backend source, manifest, dependency, cache policy or deployment changes.
+
+### Preserved hosted result
+
+Run `34751134500`, tested merge head `ab659db2b40dbd9879c1efbc83c8d6d3c7a93a3c`, browser `153.0.8010.12`, passed both transport tests and six real acceptance stages. In particular **real self-revoke with closed controls, browser logout and bearer401 passed at 10:15:58.199 UTC**, validating the earlier 204 repair in the hosted stack. It then failed in account replacement at 10:16:14.689, with cleanup PASS. This is a failed campaign, not full acceptance.
+
+Parent-preserved evidence:
+
+- `C:/Users/TeRiRi/Documents/GitHub/TeriChat-swarm-controller/target/swarm-control/client-failure-34751134500.log`, SHA-256 `3429EBF732EF0F62609FD73BA3B69ABF9C133ED4E514181F3F2D30488B845BF3`.
+- `C:/Users/TeRiRi/Documents/GitHub/TeriChat-swarm-controller/target/swarm-control/client-artifacts-34751134500/s3-real-api-34751134500-1/result.json`.
+
+### Root cause and correction
+
+Finding `S3-VALIDATION-CACHE-02`, S2/task-blocking, owner S3-CLIENT-VALIDATION: Chromium serializes HTTP-cache transactions for requests to the same URL while an earlier response is still held, even with distinct Authorization values. The scenario intentionally withheld Alice's Stats response until Bob's count appeared. Bob's Stats request stayed behind Alice's pending response and never reached the backend, so the harness created a circular wait. This was a scheduling defect in the synthetic response-delay test, not evidence of a product account isolation defect.
+
+Fresh investigator `/root/account_investigator` first checked actual UI account epochs using synthetic responses, then reproduced the exact full scenario through the real Vite forwarding path and a synthetic HTTP state server. With caching enabled, Bob's channel request reached the server but his same-URL Stats summary did not, and the exact count assertion timed out. Enabling CDP Network first and disabling HTTP cache allowed Bob's request to reach the server before releasing Alice and all account assertions passed. Diagnostic logs are ignored `apps/desktop/.acceptance/investigator-cache-enabled.log` and `investigator-cache-disabled.log`, explicitly labeled **synthetic diagnosis only**. The diagnostic server cleanup was incomplete, so these are scenario-level reproduction evidence only. The author's separate initial scratch diagnostic could not import uninstalled `ws`; no dependency was installed, and that attempt is not counted as evidence.
+
+The harness now disables HTTP cache using bounded Chromium CDP setup before navigation, solely to permit the intentional response overlap. **Browser HTTP-cache policy is outside this campaign's proof.** Product requests, authentication, API/body/status forwarding and all privacy assertions are unchanged. The harness additionally requires Bob's correct count while Alice's response is explicitly still undelivered, then releases Alice and checks Bob's count again. This preserves the purpose of testing application state against a late previous-account response.
+
+Fine allowlisted account substeps identify original login, selection/count, held refresh, logout, replacement login and count. Both ordinary failures and the watchdog snapshot `failureOperation` before cleanup updates the current operation. No raw errors, DOM, bearer-bearing URLs or credentials are added to evidence.
+
+### Focused verification
+
+| Actual repair check | Result |
+|---|---|
+| New same-URL/distinct-bearer regression with `Network.setCacheDisabled` temporarily omitted (restored in `finally`) | FAIL as expected: replacement count timeout at 2000ms; cache-enabled baseline-equivalent behavior |
+| `node --test apps/desktop/acceptance/s3-controls-real.test.mjs`, existing local Chromium151 via `S3_BROWSER_EXECUTABLE` | PASS: 3 tests, including both distinct bearer requests reaching the real loopback server and replacement count resolving while original response is not ended |
+| Same tests on exact committed `eb06113` | PASS: 3 tests |
+| `node --check` on all three changed modules; `git diff 28abdeae HEAD --check` | PASS |
+| Startup failure command against loopback port1, followed by report assertions | Expected FAIL; original `failureOperation: started` survives `operation: cleanup started` |
+| Limited private-key/GitHub/OpenAI secret-pattern scan | No matches; not a full secret scanner |
+
+No dependency or product source changed. Prior hosted preflight remains historical; this repair's affected local checks are the three transport/deadline tests. Full repaired PostgreSQL/browser acceptance and current hosted candidate execution remain NOT RUN by this worker. Native behavior, encrypted-message proof, delayed session-inventory responses, browser Load more and browser cache policy remain outside the stated scope.
+
+Fresh independent reviewer `/root/account_final_review` reviewed frozen `28abdeae..eb06113`: **no actionable findings**. It independently passed all three transport tests and diff whitespace checks, confirmed both distinct bearers reach the real HTTP backend before original-response release, preserved account/status assertions, scoped cache disabling and failure-operation capture, and made no edits. It did not claim full PostgreSQL or cache-enabled product behavior. Parent owns fresh combined review, push and exact hosted execution. Reverting this repair restores the known cache-serialization failure in the harness; no product data or schema rollback is needed.
