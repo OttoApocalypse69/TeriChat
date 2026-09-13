@@ -19,6 +19,16 @@ export async function completeForwardedResponse(response, expectedStatus, millis
   if (expectedStatus !== 204) await bounded(() => response.body(), 'response body deadline', milliseconds);
 }
 
+export async function disableHttpCacheForHeldResponses(context, page) {
+  // Chromium serializes cache transactions for the same URL while a previous
+  // response is held, even across Authorization values. The stale-response
+  // scenario needs both real requests in flight. This tests application state
+  // isolation, not browser HTTP-cache policy. Network must be enabled first.
+  const session = await bounded(() => context.newCDPSession(page), 'cache session deadline');
+  await bounded(() => session.send('Network.enable'), 'network enable deadline');
+  await bounded(() => session.send('Network.setCacheDisabled', { cacheDisabled: true }), 'cache setup deadline');
+}
+
 export async function closeResources(closers, milliseconds = 10000) {
   const results = await Promise.allSettled(closers.map(close => bounded(close, 'cleanup deadline', milliseconds)));
   return results.every(result => result.status === 'fulfilled') ? 'PASS' : 'FAIL';
