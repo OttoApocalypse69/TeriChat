@@ -44,7 +44,7 @@ These scenarios are implemented but their real hosted execution is still pending
 | Workspace/account stale responses | Hold actual old summary; switch to distinct destination; release and assert correct destination count/absence | NOT RUN |
 | Other-account session ownership | Other-account DELETE gets 404 | NOT RUN |
 
-Pagination coverage here is the real API contract with small pages; the UI's 100-row Load more boundary remains covered by the client's component tests, not this harness. Only the Close-button self-revoke path is exercised here; client regressions additionally cover Escape and header toggle. Native transport/capabilities, OS notifications, installer behavior and production crypto are outside this browser campaign.
+Pagination coverage here is the real API contract with small pages; the UI's 100-row Load more boundary remains covered by the client's component tests, not this harness. Account switching delays a real Stats response; session inventory is checked after switching, without a delayed inventory response. Only the Close-button self-revoke path is exercised here; client regressions additionally cover Escape and header toggle. Native transport/capabilities, OS notifications, installer behavior and encrypted-message/production crypto proof are outside this browser campaign.
 
 ## Verification actually run
 
