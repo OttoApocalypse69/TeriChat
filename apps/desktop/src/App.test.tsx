@@ -384,5 +384,16 @@ it('ends the current session locally without POST logout or refetch and preserve
   expect(input('Message').value).toBe('synthetic unsent draft'); expect(document.activeElement?.textContent).toBe('Sessions');
   await click('Sessions'); await click('End this session and log out');
   expect(host.textContent).toContain('Log in'); expect(ApiClient.prototype.logout).not.toHaveBeenCalled();
-  expect(ApiClient.prototype.listSessions).toHaveBeenCalledTimes(2);
+  expect(ApiClient.prototype.listSessions).toHaveBeenCalledTimes(1);
+});
+it.each(['Close sessions', 'Escape', 'Sessions'])('completes self-revoke after inventory is hidden via %s', async close => {
+  const pending = deferred<void>();
+  vi.spyOn(ApiClient.prototype, 'listSessions').mockResolvedValue({ sessions: [{ id: 'a', device_id: null, created_at: '', expires_at: '', is_current: true }], next_cursor: null });
+  vi.spyOn(ApiClient.prototype, 'revokeSession').mockReturnValue(pending.promise);
+  await login(); await click('Sessions'); await click('End this session and log out');
+  if (close === 'Escape') await flush(() => host.querySelector('#account-sessions')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  else await click(close);
+  await flush(() => pending.resolve());
+  expect(host.textContent).toContain('Log in'); expect(ApiClient.prototype.logout).not.toHaveBeenCalled();
+  expect(ApiClient.prototype.listSessions).toHaveBeenCalledTimes(1);
 });
