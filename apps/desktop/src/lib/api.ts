@@ -106,6 +106,35 @@ export interface WorkspaceMembersPage {
   next_cursor: string | null;
 }
 
+export interface SessionBody {
+  id: string;
+  device_id: string | null;
+  created_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+export interface SessionsPage {
+  sessions: SessionBody[];
+  next_cursor: string | null;
+}
+export interface WorkspaceStatsBody {
+  user_id: string;
+  workspace_id: string;
+  message_count: number;
+  last_message_at: string | null;
+}
+export interface ChannelStatsBody {
+  channel_id: string;
+  conversation_id: string;
+  name: string;
+  message_count: number;
+  last_message_at: string | null;
+}
+export interface ChannelStatsPage {
+  channels: ChannelStatsBody[];
+  next_cursor: string | null;
+}
+
 export interface InviteBody {
   id: string;
   workspace_id: string;
@@ -217,6 +246,26 @@ export class ApiClient {
 
   logout(): Promise<{ status: string; session_id: string }> {
     return this.req('POST', '/v1/auth/logout', {});
+  }
+
+  listSessions(after?: string): Promise<SessionsPage> {
+    const query = new URLSearchParams({ limit: '25' });
+    if (after !== undefined) query.set('after', after);
+    return this.req('GET', `/v1/auth/sessions?${query}`);
+  }
+
+  revokeSession(id: string): Promise<void> {
+    return this.req('DELETE', `/v1/auth/sessions/${encodeURIComponent(id)}`);
+  }
+
+  workspaceStats(workspaceId: string): Promise<WorkspaceStatsBody> {
+    return this.req('GET', `/v1/workspaces/${encodeURIComponent(workspaceId)}/stats/me`);
+  }
+
+  channelStats(workspaceId: string, after?: string): Promise<ChannelStatsPage> {
+    const query = new URLSearchParams({ limit: '25' });
+    if (after !== undefined) query.set('after', after);
+    return this.req('GET', `/v1/workspaces/${encodeURIComponent(workspaceId)}/stats/me/channels?${query}`);
   }
 
   createDm(peer_handle: string): Promise<ConversationBody> {
