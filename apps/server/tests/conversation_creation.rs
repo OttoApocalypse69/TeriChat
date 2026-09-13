@@ -316,3 +316,82 @@ async fn cancelled_creation_does_not_publish_partial_membership() {
     f.empty().await;
     f.close().await;
 }
+
+#[tokio::test]
+async fn cancelled_dm_leader_releases_pair_for_waiter() {
+    let f = Fixture::new().await;
+    let (a, _, _) = f.user().await;
+    let (b, _, _) = f.user().await;
+    let mut blocker = f.observer.begin().await.unwrap();
+    sqlx::query("LOCK TABLE conversation_participants IN SHARE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let pool = f.pool.clone();
+    let leader = tokio::spawn(async move { messaging::find_or_create_dm(&pool, a, b).await });
+    f.wait_for_blocked(1).await;
+    let pool = f.pool.clone();
+    let waiter = tokio::spawn(async move { messaging::find_or_create_dm(&pool, b, a).await });
+    f.wait_for_blocked(2).await;
+    leader.abort();
+    assert!(leader.await.unwrap_err().is_cancelled());
+    blocker.commit().await.unwrap();
+    let dm = timeout(DEADLINE, waiter)
+        .await
+        .expect("cancelled leader must release transaction lock")
+        .unwrap()
+        .unwrap();
+    let reopened = messaging::find_or_create_dm(&f.pool, a, b).await.unwrap();
+    assert_eq!(dm.id, reopened.id);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+        .fetch_one(&f.observer)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "cancelled leader must leave no orphan");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn lookup_preserves_historical_records_and_exact_membership() {
+    let f = Fixture::new().await;
+    let (a, _, _) = f.user().await;
+    let (b, _, _) = f.user().await;
+    let (c, _, _) = f.user().await;
+    let group = messaging::create_conversation(&f.pool, a, "group", &[b])
+        .await
+        .unwrap();
+    let larger = messaging::create_conversation(&f.pool, a, "dm", &[b, c])
+        .await
+        .unwrap();
+    let first = messaging::find_or_create_dm(&f.pool, a, b).await.unwrap();
+    assert_ne!(first.id, group.id);
+    assert_ne!(first.id, larger.id);
+    // Raw creation simulates already-existing duplicate rows. This public
+    // helper retains its historical behavior; HTTP DMs use find_or_create_dm.
+    let second = messaging::create_conversation(&f.pool, b, "dm", &[a])
+        .await
+        .unwrap();
+    for id in [first.id, second.id] {
+        messaging::send_message(&f.pool, a, id, Uuid::now_v7(), b"synthetic-history", None)
+            .await
+            .unwrap();
+    }
+    let reopened = messaging::find_or_create_dm(&f.pool, b, a).await.unwrap();
+    assert!([first.id, second.id].contains(&reopened.id));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+        .fetch_one(&f.observer)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 4,
+        "no consolidation or new DM when an exact pair exists"
+    );
+    for id in [first.id, second.id] {
+        let history = messaging::message_history(&f.pool, b, id, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].ciphertext, b"synthetic-history");
+    }
+    f.close().await;
+}
