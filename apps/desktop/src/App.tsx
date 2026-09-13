@@ -9,6 +9,8 @@ import JoinWorkspace from './components/JoinWorkspace';
 import LoginView from './components/LoginView';
 import MemberPanel from './components/MemberPanel';
 import WorkspaceList from './components/WorkspaceList';
+import SessionPanel from './components/SessionPanel';
+import WorkspaceActivity from './components/WorkspaceActivity';
 import {
   ApiClient,
   apiBaseUrl,
@@ -77,6 +79,12 @@ function AuthenticatedApp({ session, onLogout }: {
 
 
   const [status, setStatus] = useState<GatewayStatus>('disconnected');
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const sessionsButton = useRef<HTMLButtonElement>(null);
+  const sessionsRegion = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (sessionsOpen) sessionsRegion.current?.focus();
+  }, [sessionsOpen]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Presentation only: hiding a pane must not unmount its composer or panels.
   const [pane, setPane] = useState<'navigation' | 'conversation' | 'details'>('navigation');
@@ -359,6 +367,13 @@ function AuthenticatedApp({ session, onLogout }: {
     onLogout();
   }
 
+  function sessionEnded() {
+    if (!live.current) return;
+    live.current = false;
+    gatewayRef.current?.close();
+    onLogout();
+  }
+
   async function openDm(peerHandle: string): Promise<void> {
     const conv = await api.createDm(peerHandle);
     if (!live.current) return;
@@ -487,12 +502,14 @@ function AuthenticatedApp({ session, onLogout }: {
 
   return (
     <div className="chat-shell flex h-full flex-col bg-zinc-950 text-zinc-100" data-pane={pane}>
-      <header className="app-header flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+      <header className="app-header flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
         <span className="min-w-0 text-sm font-semibold">
           <span className="brand-name">UnknownChat</span> <span className="account-handle block truncate text-xs font-normal text-zinc-400">@{handle}</span>
         </span>
         <span className="flex items-center gap-3">
           <ConnectionIndicator status={status} />
+          <button ref={sessionsButton} type="button" aria-expanded={sessionsOpen} aria-controls="account-sessions"
+            className="rounded bg-zinc-800 px-2 py-1 text-xs" onClick={() => setSessionsOpen(open => !open)}>Sessions</button>
           <button
             type="button"
             onClick={logout}
@@ -502,6 +519,13 @@ function AuthenticatedApp({ session, onLogout }: {
           </button>
         </span>
       </header>
+      {sessionsOpen && <div id="account-sessions" ref={sessionsRegion} tabIndex={-1}
+        className="max-h-[60dvh] shrink-0 overflow-y-auto border-b border-zinc-700" onKeyDown={event => {
+          if (event.key === 'Escape') { setSessionsOpen(false); sessionsButton.current?.focus(); }
+        }}>
+        <button className="nav-action mx-4 mt-3" onClick={() => { setSessionsOpen(false); sessionsButton.current?.focus(); }}>Close sessions</button>
+        <SessionPanel api={api} onSessionEnded={sessionEnded} />
+      </div>}
       <div className="chat-layout flex min-h-0 flex-1">
         <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation flex shrink-0 flex-col border-r border-zinc-800">
           <h1 className="px-4 pb-2 pt-4 text-lg font-semibold">Conversations</h1>
@@ -578,6 +602,7 @@ function AuthenticatedApp({ session, onLogout }: {
               onLeft={handleLeftWorkspace}
               onMyRole={handleMyRole}
             />
+            <WorkspaceActivity api={api} workspaceId={selectedWorkspace.id} meId={meId} />
             <InvitePanel
               key={`invites-${selectedWorkspace.id}`}
               api={api}

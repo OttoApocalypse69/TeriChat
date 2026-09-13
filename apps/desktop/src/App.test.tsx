@@ -366,3 +366,23 @@ it.each(['success', 'failure'] as const)('isolates workspace creation %s from th
     ? pending.resolve(workspace('private old workspace')) : pending.reject(new Error('private old error')));
   expect(host.innerHTML).toBe(before);
 });
+
+it.each(['success', 'failure'])('keeps the new account logged in after old self-revoke %s', async outcome => {
+  const pending = deferred<void>();
+  vi.spyOn(ApiClient.prototype, 'listSessions').mockResolvedValue({ sessions: [{ id: 'a', device_id: null, created_at: '', expires_at: '', is_current: true }], next_cursor: null });
+  vi.spyOn(ApiClient.prototype, 'revokeSession').mockReturnValue(pending.promise);
+  await login('a'); await click('Sessions'); await click('End this session and log out');
+  await click('Log out'); await login('b'); const before = host.innerHTML;
+  await flush(() => outcome === 'success' ? pending.resolve() : pending.reject(new Error('synthetic failure')));
+  expect(host.innerHTML).toBe(before); expect(host.textContent).toContain('@b');
+});
+it('ends the current session locally without POST logout or refetch and preserves composer draft/focus when closing inventory', async () => {
+  vi.spyOn(ApiClient.prototype, 'listSessions').mockResolvedValue({ sessions: [{ id: 'a', device_id: null, created_at: '', expires_at: '', is_current: true }], next_cursor: null });
+  vi.spyOn(ApiClient.prototype, 'revokeSession').mockResolvedValue();
+  await login(); await click('@Peer'); await type('Message', 'synthetic unsent draft');
+  await click('Sessions'); await click('Close sessions');
+  expect(input('Message').value).toBe('synthetic unsent draft'); expect(document.activeElement?.textContent).toBe('Sessions');
+  await click('Sessions'); await click('End this session and log out');
+  expect(host.textContent).toContain('Log in'); expect(ApiClient.prototype.logout).not.toHaveBeenCalled();
+  expect(ApiClient.prototype.listSessions).toHaveBeenCalledTimes(2);
+});
