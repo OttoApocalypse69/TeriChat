@@ -5,6 +5,7 @@
 
 use axum::{extract::State, Json};
 use serde::Serialize;
+use std::time::Duration;
 
 use crate::errors::AppError;
 use crate::state::AppState;
@@ -34,22 +35,25 @@ pub async fn health() -> Json<HealthResponse> {
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Unavailable`] when the database ping fails.
+/// Returns [`AppError::Unavailable`] when the database ping fails or exceeds
+/// two seconds, including pool acquisition. Driver details stay private.
 pub async fn ready(State(state): State<AppState>) -> Result<Json<ReadyResponse>, AppError> {
     match &state.pool {
         None => Ok(Json(ReadyResponse {
             status: "ok",
             database: "not_configured",
         })),
-        Some(pool) => {
-            sqlx::query("SELECT 1")
-                .execute(pool)
-                .await
-                .map_err(|err| AppError::Unavailable(format!("database ping failed: {err}")))?;
-            Ok(Json(ReadyResponse {
+        Some(pool) => match tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query("SELECT 1").execute(pool),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(Json(ReadyResponse {
                 status: "ok",
                 database: "connected",
-            }))
-        }
+            })),
+            Ok(Err(_)) | Err(_) => Err(AppError::Unavailable("database unavailable".to_owned())),
+        },
     }
 }
