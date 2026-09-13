@@ -209,6 +209,7 @@ struct TransferResponse {
 #[derive(Debug, Deserialize)]
 struct HistoryQuery {
     limit: Option<i64>,
+    before: Option<Uuid>,
 }
 
 /// `GET /v1/wallet/history` entry.
@@ -286,7 +287,12 @@ async fn get_history(
     if limit <= 0 {
         return Err(AppError::BadRequest("limit must be positive".to_owned()));
     }
-    let items = history(pool, bearer.user_id(), bearer.user_id(), limit.min(100)).await?;
+    let user_id = bearer.user_id();
+    let items = if query.before.is_some() {
+        history_before(pool, user_id, user_id, limit.min(100), query.before).await?
+    } else {
+        history(pool, user_id, user_id, limit.min(100)).await?
+    };
     Ok(Json(HistoryPage {
         entries: items
             .into_iter()
@@ -696,17 +702,55 @@ pub async fn history(
     owner_id: Uuid,
     limit: i64,
 ) -> Result<Vec<HistoryItem>, LedgerError> {
+    history_before(pool, caller_id, owner_id, limit, None).await
+}
+
+/// Live keyset page strictly older in `(created_at, transaction_id)` order
+/// than an optional transaction in the caller's own history. Resolve the
+/// timestamp in `PostgreSQL` so timestamp ties lose no precision. Unknown and
+/// foreign anchors have the same error; shared transfers are valid for both
+/// participants and still return only the caller's posting.
+/// Later commits ahead of the boundary require refreshing the first page;
+/// later commits behind it may appear during traversal (this is no snapshot).
+async fn history_before(
+    pool: &sqlx::PgPool,
+    caller_id: Uuid,
+    owner_id: Uuid,
+    limit: i64,
+    before: Option<Uuid>,
+) -> Result<Vec<HistoryItem>, LedgerError> {
     if caller_id != owner_id {
         return Err(LedgerError::Forbidden);
     }
     let account = ensure_wallet(pool, owner_id).await?;
+    let boundary: Option<DateTime<Utc>> = if let Some(id) = before {
+        Some(
+            sqlx::query_scalar(
+                "SELECT t.created_at FROM ledger_transactions t
+                 JOIN ledger_postings p ON p.transaction_id = t.id
+                 WHERE p.account_id = $1 AND t.id = $2",
+            )
+            .bind(account.id)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(LedgerError::Database)?
+            .ok_or_else(|| LedgerError::BadInput("invalid history cursor".to_owned()))?,
+        )
+    } else {
+        None
+    };
     let rows: Vec<(Uuid, String, i64, DateTime<Utc>)> = sqlx::query_as(
         "SELECT t.id, t.kind, p.amount, t.created_at
          FROM ledger_postings p JOIN ledger_transactions t ON t.id = p.transaction_id
-         WHERE p.account_id = $1 ORDER BY t.created_at DESC, t.id DESC LIMIT $2",
+         WHERE p.account_id = $1
+           AND ($3::TIMESTAMPTZ IS NULL OR (t.created_at, t.id) < ($3, $4::UUID))
+         ORDER BY t.created_at DESC, t.id DESC LIMIT $2",
     )
     .bind(account.id)
     .bind(limit.clamp(1, 100))
+    .bind(boundary)
+    .bind(before)
     .fetch_all(pool)
     .await
     .map_err(LedgerError::Database)?;
@@ -1295,6 +1339,253 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "overdraft must not move funds"
         );
+        pool.close().await;
+    }
+
+    async fn history_http(app: &Router, token: &str, query: &str) -> serde_json::Value {
+        let (status, bytes) = http_call(
+            app.clone(),
+            "GET",
+            &format!("/v1/wallet/history{query}"),
+            token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn page_ids(page: &serde_json::Value) -> Vec<Uuid> {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| Uuid::parse_str(entry["transaction_id"].as_str().unwrap()).unwrap())
+            .collect()
+    }
+
+    async fn history_fixture() -> (sqlx::PgPool, Router, Uuid, String, Uuid, String) {
+        let pool = isolated_pool().await;
+        let alice = ledger_user(&pool, 1, "pageAlice").await;
+        let bob = ledger_user(&pool, 1, "pageBob").await;
+        let alice_token = crate::auth::login(&pool, "pageAlice1", "synthetic-ledger-password")
+            .await
+            .unwrap()
+            .token;
+        let bob_token = crate::auth::login(&pool, "pageBob1", "synthetic-ledger-password")
+            .await
+            .unwrap()
+            .token;
+        let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
+        let app = crate::build_router(crate::AppState {
+            pool: Some(pool.clone()),
+            hub,
+        });
+        (pool, app, alice, alice_token, bob, bob_token)
+    }
+
+    #[tokio::test]
+    async fn history_http_traverses_timestamp_ties_beyond_cap() {
+        let (pool, app, alice, token, bob, _) = history_fixture().await;
+        assert!(page_ids(&history_http(&app, &token, "").await).is_empty());
+        let mut expected = Vec::new();
+        for n in 1..=205_u128 {
+            let id = Uuid::from_u128(n);
+            mint(&pool, alice, 1, id).await.unwrap();
+            expected.push(id);
+        }
+        // All 205 timestamps tie at microsecond precision, across every page.
+        sqlx::query("UPDATE ledger_transactions SET created_at = '2026-01-01 00:00:00.123456+00'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        expected.reverse();
+        mint(&pool, bob, 900, Uuid::now_v7()).await.unwrap();
+        let default = history_http(&app, &token, "").await;
+        assert_eq!(
+            default.as_object().unwrap().len(),
+            1,
+            "preserve response envelope"
+        );
+        assert_eq!(page_ids(&default), expected[..50]);
+        assert_eq!(
+            page_ids(&history_http(&app, &token, "?limit=9223372036854775807").await),
+            expected[..100]
+        );
+        for limit in [1, 37, 100] {
+            let mut actual = Vec::new();
+            let mut before = None;
+            // Bound the test even if a regression endlessly repeats page one.
+            for _ in 0..=205 {
+                let query = before.map_or_else(
+                    || format!("?limit={limit}"),
+                    |id| format!("?limit={limit}&before={id}"),
+                );
+                let page = history_http(&app, &token, &query).await;
+                let ids = page_ids(&page);
+                assert!(page["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|e| e["amount"] == 1));
+                if ids.is_empty() {
+                    break;
+                }
+                assert!(
+                    ids.iter().all(|id| !actual.contains(id)),
+                    "exclusive cursor must not repeat entries"
+                );
+                before = ids.last().copied();
+                actual.extend(ids);
+            }
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(balance(&pool, alice, alice).await.unwrap(), 205);
+        assert_eq!(balance(&pool, bob, bob).await.unwrap(), 900);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn history_http_rejects_invalid_and_foreign_cursors() {
+        let (pool, app, alice, token, bob, bob_token) = history_fixture().await;
+        let foreign = Uuid::now_v7();
+        mint(&pool, bob, 100, foreign).await.unwrap();
+        let mut invalid_responses = Vec::new();
+        for id in [foreign, Uuid::now_v7(), Uuid::nil()] {
+            let response = http_call(
+                app.clone(),
+                "GET",
+                &format!("/v1/wallet/history?before={id}"),
+                &token,
+                None,
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            invalid_responses.push(response);
+        }
+        assert!(
+            invalid_responses.windows(2).all(|pair| pair[0] == pair[1]),
+            "foreign and unknown anchors must be indistinguishable"
+        );
+        for query in [
+            "?before=",
+            "?before=bad",
+            "?before=1",
+            "?limit=0",
+            "?limit=-1",
+            "?limit=9223372036854775808",
+            "?before=bad&before=bad",
+        ] {
+            let (status, _) = http_call(
+                app.clone(),
+                "GET",
+                &format!("/v1/wallet/history{query}"),
+                &token,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        }
+        let (status, _) =
+            http_call(app.clone(), "GET", "/v1/wallet/history?limit=1", "", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let shared = Uuid::now_v7();
+        transfer(&pool, bob, bob, alice, 20, shared).await.unwrap();
+        assert!(
+            !transfer(&pool, bob, bob, alice, 20, shared)
+                .await
+                .unwrap()
+                .1
+        );
+        let query = format!("?before={shared}");
+        assert!(page_ids(&history_http(&app, &token, &query).await).is_empty());
+        assert_eq!(
+            page_ids(&history_http(&app, &bob_token, &query).await),
+            [foreign]
+        );
+        assert_eq!(balance(&pool, alice, alice).await.unwrap(), 20);
+        assert_eq!(balance(&pool, bob, bob).await.unwrap(), 80);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn history_query_enforces_owner_and_exclusive_live_boundary() {
+        let (pool, app, alice, token, bob, _) = history_fixture().await;
+        let older = Uuid::from_u128(10);
+        let anchor = Uuid::from_u128(20);
+        let newer = Uuid::from_u128(30);
+        for id in [older, anchor, newer] {
+            mint(&pool, alice, 1, id).await.unwrap();
+        }
+        sqlx::query("UPDATE ledger_transactions SET created_at = '2026-01-01 00:00:00.123456+00'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let initial = history_before(&pool, alice, alice, 2, None).await.unwrap();
+        assert_eq!(
+            initial.iter().map(|i| i.transaction_id).collect::<Vec<_>>(),
+            [newer, anchor]
+        );
+        // Another task adds rows after page one: a normal current-time commit
+        // lies ahead; a synthetic delayed/backdated commit lies behind.
+        let ahead = Uuid::from_u128(5); // Timestamp takes precedence over UUID.
+        let behind = Uuid::from_u128(40);
+        let writer_pool = pool.clone();
+        tokio::spawn(async move {
+            mint(&writer_pool, alice, 1, ahead).await.unwrap();
+            mint(&writer_pool, alice, 1, behind).await.unwrap();
+            sqlx::query("UPDATE ledger_transactions SET created_at = '2025-12-31 23:59:59+00' WHERE id = $1")
+                .bind(behind).execute(&writer_pool).await.unwrap();
+        }).await.unwrap();
+        let expected = [older, behind];
+        for _ in 0..2 {
+            let items = history_before(&pool, alice, alice, 100, Some(anchor))
+                .await
+                .unwrap();
+            assert_eq!(
+                items.iter().map(|i| i.transaction_id).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                page_ids(&history_http(&app, &token, &format!("?before={anchor}")).await),
+                expected
+            );
+        }
+        assert_eq!(
+            history(&pool, alice, alice, 100).await.unwrap()[0].transaction_id,
+            ahead
+        );
+        assert!(history_before(&pool, alice, alice, 100, Some(behind))
+            .await
+            .unwrap()
+            .is_empty());
+        let foreign = Uuid::now_v7();
+        mint(&pool, bob, 50, foreign).await.unwrap();
+        for id in [foreign, Uuid::nil()] {
+            let error = history_before(&pool, alice, alice, 1, Some(id))
+                .await
+                .unwrap_err();
+            assert!(matches!(&error, LedgerError::BadInput(_)));
+            assert_eq!(error.to_string(), "invalid history cursor");
+            assert!(matches!(
+                history_before(&pool, alice, bob, 1, Some(id)).await,
+                Err(LedgerError::Forbidden)
+            ));
+        }
+        // Domain bounds retain the pre-existing clamp behavior.
+        assert_eq!(
+            history_before(&pool, alice, alice, 0, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(balance(&pool, alice, alice).await.unwrap(), 5);
+        let total: i64 = sqlx::query_scalar("SELECT SUM(amount)::BIGINT FROM ledger_postings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 0);
         pool.close().await;
     }
 }
