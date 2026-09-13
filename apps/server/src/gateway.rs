@@ -327,8 +327,16 @@ async fn with_delivery_progress(
     completed: &mut Option<Delivery>,
     operation: impl std::future::Future<Output = bool>,
 ) -> bool {
-    let _ = (pending, completed);
-    operation.await
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            valid = &mut operation => return valid,
+            delivery = &mut *pending, if completed.is_none() => {
+                let Some(delivery) = delivery else { return false; };
+                *completed = Some(delivery);
+            }
+        }
+    }
 }
 
 /// Recheck account session validity for each application frame and at bounded
@@ -487,15 +495,9 @@ mod tests {
         };
         (valid, matches!(delivery, Some(Delivery::Event(_))))
     }
-    // Exercise the shared control-operation boundary with the production pool
-    // size. The observer never borrows application capacity, and barriers prove
-    // all five reads hold connections before validation starts.
-    async fn saturated_replay(mode: &str) {
-        let Some((observer, _, user)) = fixture().await else {
-            return;
-        };
+    async fn production_sized_pool(observer: &sqlx::PgPool) -> sqlx::PgPool {
         let schema: String = sqlx::query_scalar("SELECT current_schema()")
-            .fetch_one(&observer)
+            .fetch_one(observer)
             .await
             .unwrap();
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -510,6 +512,17 @@ mod tests {
                 })
             })
             .connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        pool
+    }
+
+    // Exercise the shared control-operation boundary with the production pool
+    // size. The observer never borrows application capacity, and barriers prove
+    // all five reads hold connections before validation starts.
+    async fn saturated_replay(mode: &str) {
+        let (observer, _, user) = fixture()
+            .await
+            .expect("saturation regression requires DATABASE_URL");
+        let pool = production_sized_pool(&observer).await;
         let peer = seed_user(&observer).await;
         let dm = messaging::find_or_create_dm(&observer, user, peer)
             .await
@@ -616,6 +629,31 @@ mod tests {
     #[tokio::test]
     async fn gateway_production_pool_saturation_denies_expired_replay() {
         saturated_replay("expired").await;
+    }
+
+    #[tokio::test]
+    async fn gateway_completed_replay_waits_for_control_validation() {
+        for valid in [false, true] {
+            let (released, release) = tokio::sync::oneshot::channel();
+            let pending = async {
+                released.send(()).unwrap();
+                Some(Delivery::ReplayEnd)
+            };
+            tokio::pin!(pending);
+            let mut completed = None;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                with_delivery_progress(&mut pending, &mut completed, async {
+                    release.await.unwrap();
+                    tokio::task::yield_now().await;
+                    valid
+                }),
+            )
+            .await
+            .expect("completed replay releases the waiting control operation");
+            assert_eq!(result, valid, "buffering cannot override denial");
+            assert!(matches!(completed, Some(Delivery::ReplayEnd)));
+        }
     }
 
     #[tokio::test]
