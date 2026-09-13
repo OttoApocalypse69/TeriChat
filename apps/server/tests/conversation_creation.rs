@@ -1,4 +1,4 @@
-//! Mandatory PostgreSQL regressions for S4-DM-ATOMIC. No skip without a DB.
+//! Mandatory `PostgreSQL` regressions for S4-DM-ATOMIC. No skip without a DB.
 #![forbid(unsafe_code)]
 
 use axum::{body::Body, http::Request, Router};
