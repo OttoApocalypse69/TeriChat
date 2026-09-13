@@ -3,12 +3,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { createLogger, createServer } from 'vite';
+import { bounded, closeResources, completeForwardedResponse, writeReport } from './s3-controls-runtime.mjs';
 
 const desktop = fileURLToPath(new URL('../', import.meta.url));
 process.chdir(desktop);
@@ -26,7 +27,27 @@ const report = {
 };
 let phase = 'startup';
 let vite, browser, gate;
-const check = label => { report.steps.push(label); console.log(`PASS ${label}`); };
+function save() {
+  writeReport(path.join(artifact, 'result.json'), report);
+}
+function progress(label) {
+  report.operation = label;
+  report.phase = phase;
+  save();
+  console.log(`PROGRESS ${phase}: ${label}`);
+}
+function startPhase(label) { phase = label; progress('started'); }
+const check = label => { report.steps.push(label); save(); console.log(`PASS ${label}`); };
+// Independent wall-clock guard: even stalled browser protocol/cleanup promises
+// leave a failure artifact before the unchanged five-minute CI step deadline.
+const watchdog = setTimeout(() => {
+  report.result = 'FAIL'; report.failurePhase = phase;
+  report.failureKind = 'harness deadline'; report.cleanup = 'INCOMPLETE';
+  save();
+  console.error(`FAIL ${phase}: harness deadline`);
+  process.exit(1);
+}, 180000);
+progress('started');
 async function request(method, route, token, body, expected = 200) {
   const response = await fetch(backend + route, {
     method, redirect: 'error', signal: AbortSignal.timeout(10000),
@@ -82,12 +103,16 @@ const barrierPlugin = {
   },
 };
 async function release(active, page) {
+  progress('releasing real response');
   const received = page.waitForResponse(r => new URL(r.url()).pathname === active.route && r.request().method() === active.method);
   active.release();
-  await (await received).finished();
+  const response = await received;
+  await completeForwardedResponse(response, active.status);
+  progress('real response received');
   await until(() => active.delivered || active.failed, 'forwarding completion');
   assert.ok(!active.failed, 'real forwarding failed');
-  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await bounded(() => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))), 'render deadline');
+  progress('browser render completed');
   gate = undefined;
 }
 async function login(page, handle, password) {
@@ -97,7 +122,7 @@ async function login(page, handle, password) {
   await page.getByRole('button', { name: 'Log in', exact: true }).click();
   const response = await received;
   assert.equal(response.status(), 200);
-  const session = await response.json(); // bearer kept in memory only
+  const session = await bounded(() => response.json(), 'login body deadline'); // bearer kept in memory only
   await page.locator('[title="gateway: connected"]').first().waitFor();
   return session;
 }
@@ -112,7 +137,7 @@ async function total(region, count) {
 }
 try {
   await request('GET', '/ready');
-  phase = 'synthetic API setup';
+  startPhase('synthetic API setup');
   const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
   const password = `Synthetic-only-${suffix}-8!`;
   const accounts = [];
@@ -141,7 +166,7 @@ try {
   await request('DELETE', `/v1/auth/sessions/${alice.session_id}`, bob.token, undefined, 404);
   check('real synthetic accounts, messages, outbox counts and cross-account denial');
 
-  phase = 'browser login and message';
+  startPhase('browser login and message');
   const logger = createLogger();
   // Proxy diagnostics may contain gateway query bearers. Preserve a count and
   // a fixed diagnostic instead of emitting raw messages to hosted logs.
@@ -156,7 +181,7 @@ try {
       proxy: { '/v1': { target: backend, ws: true } },
       watch: { ignored: ['**/.acceptance/**', '**/evidence/**', '**/target/**'] } },
   });
-  await vite.listen();
+  await bounded(() => vite.listen(), 'Vite startup deadline');
   browser = await chromium.launch({ headless: true });
   report.browser = browser.version();
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -178,7 +203,7 @@ try {
   await activity.locator('li').filter({ hasText: '#zero-sentinel' }).getByText('0 messages', { exact: true }).waitFor();
   check('browser send persists and caller-private UI reflects real projection');
 
-  phase = 'real pagination';
+  startPhase('real pagination');
   const first = await request('GET', `${statsRoute(workspace.id)}/channels?limit=1`, alice.token);
   assert.equal(first.channels.length, 1); assert.ok(first.next_cursor);
   const second = await request('GET', `${statsRoute(workspace.id)}/channels?limit=1&after=${first.next_cursor}`, alice.token);
@@ -195,7 +220,7 @@ try {
   for (const row of sessionRows) assert.deepEqual(Object.keys(row).sort(), ['created_at', 'device_id', 'expires_at', 'id', 'is_current']);
   check('real API keyset pagination and safe session inventory fields');
 
-  phase = 'stale workspace response';
+  startPhase('stale workspace response');
   const staleWorkspace = hold('GET', statsRoute(workspace.id));
   await activity.getByRole('button', { name: 'Refresh activity' }).click();
   await until(() => staleWorkspace.reached, 'workspace response held');
@@ -208,7 +233,7 @@ try {
   assert.equal(await activity.getByText('#alpha-sentinel', { exact: true }).count(), 0);
   check('late real workspace response cannot replace destination activity');
 
-  phase = 'other-session revoke';
+  startPhase('other-session revoke');
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   const self = page.locator(`li[data-session-id="${browserAlice.session_id}"]`);
   await self.getByText('Current session', { exact: true }).waitFor();
@@ -221,20 +246,22 @@ try {
   await request('GET', '/v1/auth/sessions', browserAlice.token);
   check('UI revokes another bearer while current bearer remains authorized');
 
-  phase = 'self revoke while controls close';
+  startPhase('self revoke while controls close');
   const selfRevoke = hold('DELETE', `/v1/auth/sessions/${browserAlice.session_id}`);
   await self.getByRole('button', { name: 'End this session and log out' }).click();
   await until(() => selfRevoke.reached, 'real self DELETE held');
   assert.equal(selfRevoke.status, 204);
+  progress('real DELETE completed and response held');
   await page.getByRole('button', { name: 'Close sessions', exact: true }).click();
   assert.equal(selfRevoke.delivered, false);
   assert.equal(await page.getByRole('region', { name: 'Account sessions', exact: true }).isVisible(), false);
+  progress('controls hidden before response delivery');
   await release(selfRevoke, page);
   await page.getByRole('button', { name: 'Log in', exact: true }).waitFor();
   await request('GET', '/v1/auth/sessions', browserAlice.token, undefined, 401);
   check('closing controls during real self DELETE still logs out and denies bearer');
 
-  phase = 'account replacement and late response';
+  startPhase('account replacement and late response');
   await login(page, alice.handle, password);
   activity = await selectWorkspace(page, workspace, 'owner');
   await total(activity, 2);
@@ -255,15 +282,22 @@ try {
   await page.locator(`li[data-session-id="${browserBob.session_id}"]`).waitFor();
   assert.equal(await page.locator(`li[data-session-id="${browserAlice.session_id}"]`).count(), 0);
   check('account replacement rejects late real activity and old session inventory');
-  report.result = 'PASS';
+  report.scenarios = 'PASS';
 } catch {
   // Allowlisted phase only: Playwright errors can include tokens in URLs or DOM.
   report.failurePhase = phase;
+  save();
   process.exitCode = 1;
   console.error(`FAIL ${phase}; raw credentials, DOM and network traces intentionally excluded`);
 } finally {
   gate?.release();
-  try { await browser?.close(); await vite?.close(); report.cleanup = 'PASS'; }
-  catch { report.cleanup = 'FAIL'; report.result = 'FAIL'; process.exitCode = 1; }
-  writeFileSync(path.join(artifact, 'result.json'), JSON.stringify(report, null, 2) + '\n');
+  progress('cleanup started');
+  report.cleanup = await closeResources([() => browser?.close(), () => vite?.close()]);
+  report.result = report.scenarios === 'PASS' && report.cleanup === 'PASS' ? 'PASS' : 'FAIL';
+  if (report.result !== 'PASS') process.exitCode = 1;
+  save();
+  clearTimeout(watchdog);
+  // A failed close may leave browser/proxy handles alive. Evidence is already
+  // written; terminate only this harness. Hosted runner owns orphan cleanup.
+  if (report.cleanup === 'FAIL') process.exit(1);
 }
