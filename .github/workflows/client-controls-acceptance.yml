@@ -1,0 +1,110 @@
+name: client-controls-acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-controls-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: client_acceptance
+          POSTGRES_PASSWORD: synthetic_client_only
+          POSTGRES_DB: client_acceptance
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U client_acceptance -d client_acceptance"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://client_acceptance:synthetic_client_only@127.0.0.1:5432/client_acceptance
+      BIND_ADDR: 127.0.0.1
+      PORT: '3001'
+      RUST_LOG: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, trusted base pin
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.19.0'
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # trusted base pin
+        with:
+          toolchain: '1.97'
+          components: rustfmt, clippy
+      - name: Record candidate identity
+        shell: bash
+        run: |
+          git rev-parse HEAD HEAD^{tree}
+          rustc -vV
+          node --version
+          npm --version
+          sha256sum Cargo.lock apps/desktop/package-lock.json
+      - name: Frontend locked preflight
+        working-directory: apps/desktop
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+          npm run test:acceptance:unit
+          npm run build
+          npm audit --audit-level=low
+          node --check acceptance/s3-controls-real.mjs
+      - name: Rust format, compile, lint and tests
+        run: |
+          cargo fmt --all -- --check
+          cargo check --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+          cargo test --workspace --doc --locked
+          cargo build --locked -p terichat-server
+      - name: Install Chromium matching committed playwright-core
+        working-directory: apps/desktop
+        # Invoke the installed pinned CLI directly; never npx an unpinned package.
+        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+      - name: Real browser, backend and PostgreSQL acceptance
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Backend embeds migrations and starts real outbox/Stats workers.
+          # No raw runtime logs are retained: driver errors may include row data.
+          target/debug/terichat-server >/dev/null 2>&1 &
+          backend_pid=$!
+          trap 'kill "$backend_pid" 2>/dev/null || true; wait "$backend_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 60); do
+            kill -0 "$backend_pid"
+            if curl --fail --silent http://127.0.0.1:3001/ready >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          node apps/desktop/acceptance/s3-controls-real.mjs http://127.0.0.1:3001
+      - name: Retain sanitized acceptance result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s3-real-api-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/desktop/.acceptance/s3-controls-real/result.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
