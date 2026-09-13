@@ -1,3 +1,76 @@
+# Current implementation and evidence snapshot
+
+Reconciled on 2026-09-13 against main
+`05df96fa45221ae99308edcc2d33925ec0230cc6` (PR #44). This is a source and
+existing-evidence inventory, not a deployment or release certification.
+Application: **UnknownChat**; repository/internal identifiers remain TeriChat.
+The client still uses **demo-plaintext envelopes**. Secure Alpha 0 is not complete.
+
+## Current implementation
+
+| Area | Shipped source/evidence | Remaining limits |
+|---|---|---|
+| Auth, messaging and gateway | User/device/session baseline, opaque server envelopes, outbox/replay, owned-session inventory/revocation and persistent gateway session checks; PR #30 | Full passkey/MFA/recovery lifecycle is broader than this implementation. The pool-exhaustion finding below remains unresolved. |
+| Workspaces and Stats | Workspace/channel/member UI and API; permissions, moderation, ban directory; metadata-only stats with caller-private workspace/channel reads; PRs #28–30 | Client activity/session controls are not yet implemented at this baseline. No public leaderboard privacy policy or full workspace feature completion is implied. |
+| Economy #8 | PR #32: single virtual CREDITS currency, wallets, derived balances, balanced atomic transfers, idempotency/conflicting-reuse rejection, caller-isolated history, concurrency and DB invariant tests. Issue closed. | History is limit-only, capped at 100 without a continuation cursor. This is neither real payments nor the complete workspace Economy roadmap. |
+| Recovery mnemonic #11 | PR #33: `terirecovery-v1`, BIP-39 English, 256-bit entropy as 24 words, checksum validation, normalization, secret-free errors and nine mnemonic tests. Issue closed. | This implements encoding, not a working recovery vault/device recovery lifecycle. The resolved section of `12_OPEN_DECISIONS.md` was updated by #42; older unchecked mnemonic entries in that document are stale. |
+| TeriCrypt / MLS #6 | Current crate contains sealed-envelope proof-of-concept code and mnemonic support. | MLS foundation #34 was reverted by #35; restoration #36 was closed without merge. MLS is absent from current main. Persistence, credential representation, audit-warning disposition and specialist review remain in the #6 decision queue. |
+| Desktop/web #5 | Native executable-restart harness and independent validator/evidence merged in #40; browser/native HTTP transport selection fixed in #41. Issue #5 closed. | Native evidence is tied to earlier source and its recorded executable, not a current-main installer/release. Browser transport source/tests do not prove a current public deployment. |
+| Notifications #43 | PR #44: native/plugin and best-effort browser notifications for new unfocused DMs, permission denial handling, focused/own-message suppression and click focus. | Issue remains open: no headed native OS-toast proof was supplied. No per-conversation mute, tray, or quiet hours. OS notification history can retain plaintext. |
+| Server organization / Staging | Per-domain routes and integration tests in #37; staging runbook/network fixes in #38–39. | Repository code and runbooks are not fresh operational verification. No staging/production changes or restore campaign were executed for this inventory. |
+
+## Verified evidence and its bounds
+
+[Main CI run 34630437242](https://github.com/OttoApocalypse69/TeriChat/actions/runs/34630437242)
+succeeded at the exact source above. Both PostgreSQL jobs report 89 server unit,
+24 server integration, 13 crypto unit and nine mnemonic tests, with zero failures
+or ignored tests. Doctest commands report zero tests. Baseline format, Clippy
+and build passed. The trusted-main ARM64 job checks and compiles test targets;
+it does not execute those tests. The workflow has no frontend/native build lane.
+
+PR #44 reports 112 frontend tests, TypeScript/Vite build and a native Cargo
+check. Those are historical PR evidence, not newly executed tests in this
+inventory. Its description explicitly records missing native toast delivery proof.
+
+The committed #40 restart evidence at
+`apps/desktop/evidence/client-acceptance/2026-09-11T15-24-40-350Z/result.json`
+records source `2e8e47b5edfdf815e128e0fea0db875160445984` and executable SHA256
+`b2a9d2c3fa852ca202faa2fcb92a59e5a965437e21d1804da1dbb96087b95cef`.
+The campaign exchanged `bro` plus a 30-message backlog, restarted both executable
+processes, checked contiguous restored history and exercised live sends afterward.
+It establishes that campaign's behavior, not MLS, installer or current-release safety.
+
+This inventory ran source/history/issue/PR inspection and fetched the existing
+CI logs. It did not rerun application tests, a native build, a browser/native
+campaign, dependency/secret scans or deployment/backup checks. Historical results
+below retain their original revision and must not be treated as current evidence.
+
+## Active gateway finding and next work
+
+[The later PR #30 review](https://github.com/OttoApocalypse69/TeriChat/pull/30#discussion_r3970457935)
+identified a replay/pool-exhaustion failure after the earlier swarm handoff.
+At current main, `gateway.rs` still awaits `session_live` inside tick/incoming
+branches while the pinned replay future is no longer polled; `bootstrap.rs`
+configures five pool connections. Five replay queries occupying the pool can
+prevent validity checks from obtaining another connection and close valid
+sockets. Existing blocked-replay tests use one socket and an eight-connection
+pool. Source applicability was independently confirmed; this inventory did not
+execute a new reproduction. Merge of #30 does not resolve that finding.
+
+The next active slices are a production-sized pool regression/fix, client controls
+for existing private session/activity APIs, and complete wallet history paging.
+The coordinator refreshes this inventory to avoid duplicating shipped work.
+MLS remains decision-blocked; its preserved branch is not approved for restoration.
+No original acceptance requirements, dependency warnings or review gates are waived.
+
+## Historical audit
+
+The following snapshot is preserved verbatim as historical evidence. Its
+unimplemented/unmerged statements describe its old baseline, not current main.
+
+<details>
+<summary>Earlier Alpha 0 snapshot (baseline c325b4c)</summary>
+
 # Alpha 0 implementation and evidence snapshot
 
 ## Local repair candidate
@@ -77,3 +150,5 @@ The roadmap reviewer found #10's startup/state/router separation meets its issue
 ## Compatibility and rollback
 
 This reconciliation changes documentation only. No schema, API, key format, bundle identity, infrastructure, or security policy is changed. Reverting the documentation commit restores prior prose but does not change implementation state. Original roadmap requirements remain in force; unchecked items have not been waived. Historical checklist entries are retained and explicitly labeled historical.
+
+</details>
