@@ -79,7 +79,9 @@ function AuthenticatedApp({ session, onLogout }: {
 
 
   const [status, setStatus] = useState<GatewayStatus>('disconnected');
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  // null means never opened. Hiding an opened inventory keeps pending
+  // revocations alive until this authenticated account is unmounted.
+  const [sessionsOpen, setSessionsOpen] = useState<boolean | null>(null);
   const sessionsButton = useRef<HTMLButtonElement>(null);
   const sessionsRegion = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -508,7 +510,7 @@ function AuthenticatedApp({ session, onLogout }: {
         </span>
         <span className="flex items-center gap-3">
           <ConnectionIndicator status={status} />
-          <button ref={sessionsButton} type="button" aria-expanded={sessionsOpen} aria-controls="account-sessions"
+          <button ref={sessionsButton} type="button" aria-expanded={sessionsOpen ?? false} aria-controls="account-sessions"
             className="rounded bg-zinc-800 px-2 py-1 text-xs" onClick={() => setSessionsOpen(open => !open)}>Sessions</button>
           <button
             type="button"
@@ -519,7 +521,7 @@ function AuthenticatedApp({ session, onLogout }: {
           </button>
         </span>
       </header>
-      {sessionsOpen && <div id="account-sessions" ref={sessionsRegion} tabIndex={-1}
+      {sessionsOpen !== null && <div id="account-sessions" hidden={!sessionsOpen} ref={sessionsRegion} tabIndex={-1}
         className="max-h-[60dvh] shrink-0 overflow-y-auto border-b border-zinc-700" onKeyDown={event => {
           if (event.key === 'Escape') { setSessionsOpen(false); sessionsButton.current?.focus(); }
         }}>
