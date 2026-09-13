@@ -1,0 +1,23 @@
+    Checking tericrypt v0.1.0 (C:\Users\TeRiRi\.codex\worktrees\bbe6\TeriChat(tentative)\crates\tericrypt)
+    Checking utf-8 v0.7.6
+    Checking tungstenite v0.26.2
+    Checking terichat-server v0.1.0 (C:\Users\TeRiRi\.codex\worktrees\bbe6\TeriChat(tentative)\apps\server)
+    Checking tokio-tungstenite v0.26.2
+error: item in documentation is missing backticks
+ --> apps\server\tests\conversation_creation.rs:1:15
+  |
+1 | //! Mandatory PostgreSQL regressions for S4-DM-ATOMIC. No skip without a DB.
+  |               ^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#doc_markdown
+  = note: `-D clippy::doc-markdown` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::doc_markdown)]`
+help: try
+  |
+1 - //! Mandatory PostgreSQL regressions for S4-DM-ATOMIC. No skip without a DB.
+1 + //! Mandatory `PostgreSQL` regressions for S4-DM-ATOMIC. No skip without a DB.
+  |
+
+error: could not compile `terichat-server` (test "conversation_creation") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+EXIT_CODE=101
