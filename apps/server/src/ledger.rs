@@ -1297,4 +1297,170 @@ mod tests {
         );
         pool.close().await;
     }
+
+    async fn history_http(app: &Router, token: &str, query: &str) -> serde_json::Value {
+        let (status, bytes) = http_call(
+            app.clone(),
+            "GET",
+            &format!("/v1/wallet/history{query}"),
+            token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn page_ids(page: &serde_json::Value) -> Vec<Uuid> {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| Uuid::parse_str(entry["transaction_id"].as_str().unwrap()).unwrap())
+            .collect()
+    }
+
+    async fn history_fixture() -> (sqlx::PgPool, Router, Uuid, String, Uuid, String) {
+        let pool = isolated_pool().await;
+        let alice = ledger_user(&pool, 1, "pageAlice").await;
+        let bob = ledger_user(&pool, 1, "pageBob").await;
+        let alice_token = crate::auth::login(&pool, "pageAlice1", "synthetic-ledger-password")
+            .await
+            .unwrap()
+            .token;
+        let bob_token = crate::auth::login(&pool, "pageBob1", "synthetic-ledger-password")
+            .await
+            .unwrap()
+            .token;
+        let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
+        let app = crate::build_router(crate::AppState {
+            pool: Some(pool.clone()),
+            hub,
+        });
+        (pool, app, alice, alice_token, bob, bob_token)
+    }
+
+    #[tokio::test]
+    async fn history_http_traverses_timestamp_ties_beyond_cap() {
+        let (pool, app, alice, token, bob, _) = history_fixture().await;
+        assert!(page_ids(&history_http(&app, &token, "").await).is_empty());
+        let mut expected = Vec::new();
+        for n in 1..=205_u128 {
+            let id = Uuid::from_u128(n);
+            mint(&pool, alice, 1, id).await.unwrap();
+            expected.push(id);
+        }
+        // All 205 timestamps tie at microsecond precision, across every page.
+        sqlx::query("UPDATE ledger_transactions SET created_at = '2026-01-01 00:00:00.123456+00'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        expected.reverse();
+        mint(&pool, bob, 900, Uuid::now_v7()).await.unwrap();
+        let default = history_http(&app, &token, "").await;
+        assert_eq!(
+            default.as_object().unwrap().len(),
+            1,
+            "preserve response envelope"
+        );
+        assert_eq!(page_ids(&default), expected[..50]);
+        assert_eq!(
+            page_ids(&history_http(&app, &token, "?limit=9223372036854775807").await),
+            expected[..100]
+        );
+        for limit in [1, 37, 100] {
+            let mut actual = Vec::new();
+            let mut before = None;
+            // Bound the test even if a regression endlessly repeats page one.
+            for _ in 0..=205 {
+                let query = before.map_or_else(
+                    || format!("?limit={limit}"),
+                    |id| format!("?limit={limit}&before={id}"),
+                );
+                let page = history_http(&app, &token, &query).await;
+                let ids = page_ids(&page);
+                assert!(page["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|e| e["amount"] == 1));
+                if ids.is_empty() {
+                    break;
+                }
+                assert!(
+                    ids.iter().all(|id| !actual.contains(id)),
+                    "exclusive cursor must not repeat entries"
+                );
+                before = ids.last().copied();
+                actual.extend(ids);
+            }
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(balance(&pool, alice, alice).await.unwrap(), 205);
+        assert_eq!(balance(&pool, bob, bob).await.unwrap(), 900);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn history_http_rejects_invalid_and_foreign_cursors() {
+        let (pool, app, alice, token, bob, bob_token) = history_fixture().await;
+        let foreign = Uuid::now_v7();
+        mint(&pool, bob, 100, foreign).await.unwrap();
+        let mut invalid_responses = Vec::new();
+        for id in [foreign, Uuid::now_v7(), Uuid::nil()] {
+            let response = http_call(
+                app.clone(),
+                "GET",
+                &format!("/v1/wallet/history?before={id}"),
+                &token,
+                None,
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            invalid_responses.push(response);
+        }
+        assert!(
+            invalid_responses.windows(2).all(|pair| pair[0] == pair[1]),
+            "foreign and unknown anchors must be indistinguishable"
+        );
+        for query in [
+            "?before=",
+            "?before=bad",
+            "?before=1",
+            "?limit=0",
+            "?limit=-1",
+            "?limit=9223372036854775808",
+            "?before=bad&before=bad",
+        ] {
+            let (status, _) = http_call(
+                app.clone(),
+                "GET",
+                &format!("/v1/wallet/history{query}"),
+                &token,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        }
+        let (status, _) =
+            http_call(app.clone(), "GET", "/v1/wallet/history?limit=1", "", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let shared = Uuid::now_v7();
+        transfer(&pool, bob, bob, alice, 20, shared).await.unwrap();
+        assert!(
+            !transfer(&pool, bob, bob, alice, 20, shared)
+                .await
+                .unwrap()
+                .1
+        );
+        let query = format!("?before={shared}");
+        assert!(page_ids(&history_http(&app, &token, &query).await).is_empty());
+        assert_eq!(
+            page_ids(&history_http(&app, &bob_token, &query).await),
+            [foreign]
+        );
+        assert_eq!(balance(&pool, alice, alice).await.unwrap(), 20);
+        assert_eq!(balance(&pool, bob, bob).await.unwrap(), 80);
+        pool.close().await;
+    }
 }
