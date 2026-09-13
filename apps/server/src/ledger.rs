@@ -707,7 +707,7 @@ pub async fn history(
 
 /// Live keyset page strictly older in `(created_at, transaction_id)` order
 /// than an optional transaction in the caller's own history. Resolve the
-/// timestamp in PostgreSQL so timestamp ties lose no precision. Unknown and
+/// timestamp in `PostgreSQL` so timestamp ties lose no precision. Unknown and
 /// foreign anchors have the same error; shared transfers are valid for both
 /// participants and still return only the caller's posting.
 /// Later commits ahead of the boundary require refreshing the first page;
