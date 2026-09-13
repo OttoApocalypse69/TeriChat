@@ -1,67 +1,90 @@
 # Current implementation and evidence snapshot
 
 Reconciled on 2026-09-13 against main
-`05df96fa45221ae99308edcc2d33925ec0230cc6` (PR #44). This is a source and
-existing-evidence inventory, not a deployment or release certification.
-Application: **UnknownChat**; repository/internal identifiers remain TeriChat.
-The client still uses **demo-plaintext envelopes**. Secure Alpha 0 is not complete.
+`f503c361ddaf3f8b7e9c4bfb35c978c7981a1f9f` (PRs #45–50 integrated).
+This is a source and executed-evidence inventory, not deployment or release
+certification. Application: **UnknownChat**; repository/internal identifiers
+remain TeriChat. The client still uses **demo-plaintext envelopes**.
+Secure Alpha 0 is not complete.
 
 ## Current implementation
 
 | Area | Shipped source/evidence | Remaining limits |
 |---|---|---|
-| Auth, messaging and gateway | User/device/session baseline, opaque server envelopes, outbox/replay, owned-session inventory/revocation and persistent gateway session checks; PR #30 | Full passkey/MFA/recovery lifecycle is broader than this implementation. The pool-exhaustion finding below remains unresolved. |
-| Workspaces and Stats | Workspace/channel/member UI and API; permissions, moderation, ban directory; metadata-only stats with caller-private workspace/channel reads; PRs #28–30 | Client activity/session controls are not yet implemented at this baseline. No public leaderboard privacy policy or full workspace feature completion is implied. |
-| Economy #8 | PR #32: single virtual CREDITS currency, wallets, derived balances, balanced atomic transfers, idempotency/conflicting-reuse rejection, caller-isolated history, concurrency and DB invariant tests. Issue closed. | History is limit-only, capped at 100 without a continuation cursor. This is neither real payments nor the complete workspace Economy roadmap. |
-| Recovery mnemonic #11 | PR #33: `terirecovery-v1`, BIP-39 English, 256-bit entropy as 24 words, checksum validation, normalization, secret-free errors and nine mnemonic tests. Issue closed. | This implements encoding, not a working recovery vault/device recovery lifecycle. The resolved section of `12_OPEN_DECISIONS.md` was updated by #42; older unchecked mnemonic entries in that document are stale. |
-| TeriCrypt / MLS #6 | Current crate contains sealed-envelope proof-of-concept code and mnemonic support. | MLS foundation #34 was reverted by #35; restoration #36 was closed without merge. MLS is absent from current main. Persistence, credential representation, audit-warning disposition and specialist review remain in the #6 decision queue. |
-| Desktop/web #5 | Native executable-restart harness and independent validator/evidence merged in #40; browser/native HTTP transport selection fixed in #41. Issue #5 closed. | Native evidence is tied to earlier source and its recorded executable, not a current-main installer/release. Browser transport source/tests do not prove a current public deployment. |
-| Notifications #43 | PR #44: native/plugin and best-effort browser notifications for new unfocused DMs, permission denial handling, focused/own-message suppression and click focus. | Issue remains open: no headed native OS-toast proof was supplied. No per-conversation mute, tray, or quiet hours. OS notification history can retain plaintext. |
-| Server organization / Staging | Per-domain routes and integration tests in #37; staging runbook/network fixes in #38–39. | Repository code and runbooks are not fresh operational verification. No staging/production changes or restore campaign were executed for this inventory. |
+| Auth and gateway | User/device/session baseline, opaque server envelopes, outbox/replay, owned-session inventory/revocation and persistent gateway session checks; #30. Production-sized pool replay starvation repaired in #47. | Full passkey/MFA/recovery lifecycle remains broader. The #47 fix addresses the confirmed replay/validity-check deadlock, not every possible pool or overload failure. |
+| Conversations | #50 makes conversation/participant insertion atomic and serializes DM reopening for an unordered participant pair. Seven real-PostgreSQL regressions cover rollback, cancellation, concurrency and compatibility. | No schema uniqueness constraint, historical-duplicate consolidation or mixed-old/new-writer uniqueness guarantee. |
+| Readiness | #49 bounds the complete database probe to two seconds and returns a uniform safe unavailable response. Closed pool, silent TCP handshake and exhausted-pool/recovery tests pass. | HTTP timeout is not proof of immediate SQLx background connection cleanup or recovery from every stalled established query. |
+| Workspaces and Stats | Workspace/channel/member UI and API; permissions, moderation, ban directory; metadata-only, caller-private Stats. #48 adds session controls and private workspace activity with real API/browser acceptance. | API pagination is proven directly; this is not UI load-more acceptance. Account replacement covers delayed activity, not a delayed session-inventory response. No public leaderboard or complete workspace feature claim. |
+| Economy #8 | #32 implements balanced atomic virtual-credit transfers, idempotency and caller-isolated history. #46 adds complete keyset history paging and transaction-bound cursors. | Virtual CREDITS only; no real payments or complete Economy roadmap claim. |
+| Recovery mnemonic #11 | #33 implements terirecovery-v1: BIP-39 English, 256-bit entropy as 24 words, checksum/normalization, secret-free errors and nine tests; #42 reconciles the decision register. | Encoding is not a working recovery vault/device recovery lifecycle. Older unchecked mnemonic entries remain stale. |
+| TeriCrypt / MLS #6 | Current crate contains sealed-envelope proof-of-concept code and mnemonic support. | Foundation #34 was reverted by #35; restoration #36 closed unmerged. MLS is absent. Persistence, credential representation, audit disposition and specialist review remain in the decision queue. |
+| Desktop/web #5 | Executable-restart harness/evidence in #40; browser/native transport selection fixed in #41. #48 adds account controls and the real browser/API acceptance workflow. | Prior native evidence belongs to its recorded executable. Current browser evidence does not certify a native installer, public deployment, HTTP cache policy or E2EE. |
+| Notifications #43 | #44 implements best-effort native/browser notification delivery for new unfocused DMs, suppression and click focus. | Still lacks headed native OS-toast proof, per-conversation mute, tray and quiet hours. OS history can retain plaintext. |
+| Server organization / Staging | Per-domain routes/tests in #37 and staging runbooks/network fixes in #38–39. | No fresh operational verification, production change or restore campaign in this inventory. |
 
 ## Verified evidence and its bounds
 
-[Main CI run 34630437242](https://github.com/OttoApocalypse69/TeriChat/actions/runs/34630437242)
-succeeded at the exact source above. Both PostgreSQL jobs report 89 server unit,
-24 server integration, 13 crypto unit and nine mnemonic tests, with zero failures
-or ignored tests. Doctest commands report zero tests. Baseline format, Clippy
-and build passed. The trusted-main ARM64 job checks and compiles test targets;
-it does not execute those tests. The workflow has no frontend/native build lane.
+[Main CI 34753297870](https://github.com/OttoApocalypse69/TeriChat/actions/runs/34753297870)
+passed at exact main `f503c361ddaf3f8b7e9c4bfb35c978c7981a1f9f`.
+Both PostgreSQL jobs report 97 server unit, 34 server integration, 13 crypto unit
+and nine mnemonic tests, with zero failures or ignored tests. The 34 integration
+tests include seven new conversation-creation tests and eight health tests.
+Format, Clippy and build passed. Doctest commands report zero tests. ARM64 checks
+and compiles test targets; it does not execute those tests. Earlier main runs for
+#49 and #50 were cancelled when newer main commits superseded them; the combined
+main run supplies the integration evidence.
 
-PR #44 reports 112 frontend tests, TypeScript/Vite build and a native Cargo
-check. Those are historical PR evidence, not newly executed tests in this
-inventory. Its description explicitly records missing native toast delivery proof.
+[Real API acceptance 34753297894](https://github.com/OttoApocalypse69/TeriChat/actions/runs/34753297894)
+also passed on that exact main. Its sanitized result records tree
+`f4c30fa39469e1ece238765519915d69c8602f04`, matching Git, Chromium
+153.0.8010.12, all seven scenarios PASS and cleanup PASS. It exercises synthetic
+accounts, real messages/outbox/private projection, cross-account denial, direct
+API paging and safe session fields, stale workspace responses, another-session
+revocation, self-revocation while closing controls, and account replacement.
+The workflow also runs locked frontend/Rust preflight and real transport
+regressions. Browser HTTP cache is disabled for controlled response overlap;
+cache policy and native execution are explicitly not tested.
 
 The committed #40 restart evidence at
 `apps/desktop/evidence/client-acceptance/2026-09-11T15-24-40-350Z/result.json`
 records source `2e8e47b5edfdf815e128e0fea0db875160445984` and executable SHA256
 `b2a9d2c3fa852ca202faa2fcb92a59e5a965437e21d1804da1dbb96087b95cef`.
-The campaign exchanged `bro` plus a 30-message backlog, restarted both executable
-processes, checked contiguous restored history and exercised live sends afterward.
-It establishes that campaign's behavior, not MLS, installer or current-release safety.
+Its two-client exchange, restart/backlog and resumed-send results remain historical
+native evidence; they do not establish current-main native or MLS acceptance.
 
-This inventory ran source/history/issue/PR inspection and fetched the existing
-CI logs. It did not rerun application tests, a native build, a browser/native
-campaign, dependency/secret scans or deployment/backup checks. Historical results
-below retain their original revision and must not be treated as current evidence.
+The owner account merged #48–50. This inventory does not infer standing Critical
+merge authority from those actions. Their committed handoffs retain pre-hosted-CI
+snapshots; the exact-main evidence above supersedes their pending-CI statements.
+This documentation pass inspected source, merge records, CI logs and the downloaded
+acceptance result. It did not rerun application tests or native/operational checks.
 
-## Active gateway finding and next work
+## Remaining findings and next work
 
-[The later PR #30 review](https://github.com/OttoApocalypse69/TeriChat/pull/30#discussion_r3970457935)
-identified a replay/pool-exhaustion failure after the earlier swarm handoff.
-At current main, `gateway.rs` still awaits `session_live` inside tick/incoming
-branches while the pinned replay future is no longer polled; `bootstrap.rs`
-configures five pool connections. Five replay queries occupying the pool can
-prevent validity checks from obtaining another connection and close valid
-sockets. Existing blocked-replay tests use one socket and an eight-connection
-pool. Source applicability was independently confirmed; this inventory did not
-execute a new reproduction. Merge of #30 does not resolve that finding.
+The later #30 replay/pool-exhaustion finding is addressed by #47 and its preserved
+baseline failure/candidate regressions; current-main tests also pass. Wallet
+paging and client activity/session controls are now integrated. Do not assign
+those completed slices again from older checkboxes.
 
-The next active slices are a production-sized pool regression/fix, client controls
-for existing private session/activity APIs, and complete wallet history paging.
-The coordinator refreshes this inventory to avoid duplicating shipped work.
-MLS remains decision-blocked; its preserved branch is not approved for restoration.
-No original acceptance requirements, dependency warnings or review gates are waived.
+The next bounded backend slice is owned, bounded server/worker shutdown: current
+bootstrap listens only for Ctrl-C and discards outbox/Stats worker handles.
+SIGTERM handling, drain order, cancellation and replay need implementation and
+real evidence. A separate writer owns SQLx feature hygiene; it must preserve
+PostgreSQL, migration, macro and JSON behavior without unrelated upgrades.
+
+Existing dependency evidence remains limited: the 2026-09-13 audit at
+`1ef7821b65a8462e53ba90a89538d38e27b7fe3f` (unchanged root manifest/lock
+relative to this main) reports
+`rsa 0.9.10 / RUSTSEC-2023-0071` through optional SQLx/MySQL lock nodes, while the
+inspected supported root-server build graph contains neither RSA nor MySQL.
+That is scoped build-graph evidence, not removal of the advisory or a native
+security assessment. cargo-deny and gitleaks were NOT RUN (tools/configuration
+absent). No audit ignore, waiver or scanner pass is implied. A separate open
+Dependabot alert #6 concerns glib in the native Cargo.lock; applicability and
+remediation are not established by the root-server graph inspection.
+
+MLS remains decision-blocked and its preserved branch is not approved for
+restoration. Notification #43 still needs headed OS evidence. No original
+acceptance requirements, dependency warnings or review gates are waived.
 
 ## Historical audit
 
