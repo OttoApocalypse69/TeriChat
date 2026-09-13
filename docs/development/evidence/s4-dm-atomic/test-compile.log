@@ -1,0 +1,15 @@
+   Compiling tericrypt v0.1.0 (C:\Users\TeRiRi\.codex\worktrees\bbe6\TeriChat(tentative)\crates\tericrypt)
+   Compiling terichat-server v0.1.0 (C:\Users\TeRiRi\.codex\worktrees\bbe6\TeriChat(tentative)\apps\server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 38.09s
+  Executable unittests src\lib.rs (target\debug\deps\terichat_server-40189d60382dceed.exe)
+  Executable unittests src\main.rs (target\debug\deps\terichat_server-7e61a57118dc7eda.exe)
+  Executable tests\conversation_creation.rs (target\debug\deps\conversation_creation-a50238393197eb5f.exe)
+  Executable tests\gateway.rs (target\debug\deps\gateway-631adcca9692639d.exe)
+  Executable tests\health.rs (target\debug\deps\health-af0c173bd90bdc05.exe)
+  Executable tests\http_auth.rs (target\debug\deps\http_auth-f101a2d71b71fc9c.exe)
+  Executable tests\migrations.rs (target\debug\deps\migrations-4a6a1395df11f0e1.exe)
+  Executable tests\workspace_members.rs (target\debug\deps\workspace_members-30aa10041294000c.exe)
+  Executable tests\workspaces.rs (target\debug\deps\workspaces-1c93be14c5b6f3f6.exe)
+  Executable unittests src\lib.rs (target\debug\deps\tericrypt-4c613ec5d1c9234f.exe)
+  Executable tests\recovery_mnemonic.rs (target\debug\deps\recovery_mnemonic-0997ad3f1ce5edf1.exe)
+EXIT_CODE=0

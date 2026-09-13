@@ -8,6 +8,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -266,6 +267,21 @@ pub async fn create_conversation(
     kind: &str,
     members: &[Uuid],
 ) -> Result<Conversation, MessagingError> {
+    let mut tx = pool.begin().await.map_err(MessagingError::Database)?;
+    let conversation = insert_conversation(&mut tx, creator, kind, members).await?;
+    tx.commit().await.map_err(MessagingError::Database)?;
+    Ok(conversation)
+}
+
+/// Shared creation path: every row uses the caller's one transaction/connection.
+/// A failed insert or cancelled future drops the transaction without publishing
+/// a conversation with incomplete membership.
+async fn insert_conversation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    creator: Uuid,
+    kind: &str,
+    members: &[Uuid],
+) -> Result<Conversation, MessagingError> {
     if kind != "dm" && kind != "group" && kind != "channel" {
         return Err(MessagingError::Database(sqlx::Error::RowNotFound));
     }
@@ -282,7 +298,7 @@ pub async fn create_conversation(
         .bind(id)
         .bind(kind)
         .bind(creator)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .map_err(MessagingError::Database)?;
     for member in &all {
@@ -292,7 +308,7 @@ pub async fn create_conversation(
         )
         .bind(id)
         .bind(member)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .map_err(MessagingError::Database)?;
     }
@@ -304,7 +320,8 @@ pub async fn create_conversation(
 }
 
 /// Find the `dm` shared by exactly `a` and `b`, or create it. Makes DM
-/// creation idempotent: repeated calls return the same conversation.
+/// creation idempotent for distinct users: repeated calls return the same
+/// conversation. The existing self-DM behavior (new singleton per call) remains.
 ///
 /// # Errors
 ///
@@ -314,6 +331,30 @@ pub async fn find_or_create_dm(
     a: Uuid,
     b: Uuid,
 ) -> Result<Conversation, MessagingError> {
+    let mut tx = pool.begin().await.map_err(MessagingError::Database)?;
+    // The lookup must take a fresh snapshot AFTER the previous lock holder
+    // commits, including when a deployment changes its session default.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await
+        .map_err(MessagingError::Database)?;
+    // Canonical UUID bytes make reversed pairs share one transaction-scoped
+    // lock across processes. A hash collision only serializes unrelated pairs;
+    // identity is still checked using the full UUIDs below. This is a lock key,
+    // not a cryptographic protocol or a persistent identity.
+    let (low, high) = if a <= b { (a, b) } else { (b, a) };
+    let mut hasher = Sha256::new();
+    hasher.update(b"terichat/dm-creation-lock/v1");
+    hasher.update(low.as_bytes());
+    hasher.update(high.as_bytes());
+    let digest = hasher.finalize();
+    let mut key = [0_u8; 8];
+    key.copy_from_slice(&digest[..8]);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(i64::from_be_bytes(key))
+        .execute(&mut *tx)
+        .await
+        .map_err(MessagingError::Database)?;
     let existing: Option<Uuid> = sqlx::query_scalar(
         r"SELECT c.id FROM conversations c
           JOIN conversation_participants p ON p.conversation_id = c.id
@@ -324,25 +365,30 @@ pub async fn find_or_create_dm(
     )
     .bind(a)
     .bind(b)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(MessagingError::Database)?;
 
-    if let Some(id) = existing {
+    let conversation = if let Some(id) = existing {
         let members: Vec<Uuid> = sqlx::query_scalar(
             "SELECT user_id FROM conversation_participants WHERE conversation_id = $1",
         )
         .bind(id)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(MessagingError::Database)?;
-        return Ok(Conversation {
+        Conversation {
             id,
             kind: "dm".to_owned(),
             members,
-        });
-    }
-    create_conversation(pool, a, "dm", &[b]).await
+        }
+    } else {
+        // Never reacquire from the pool while holding a transaction: five
+        // simultaneous requests must also complete with a five-connection pool.
+        insert_conversation(&mut tx, a, "dm", &[b]).await?
+    };
+    tx.commit().await.map_err(MessagingError::Database)?;
+    Ok(conversation)
 }
 
 /// Membership check. `false` covers both non-members and missing rows.
