@@ -78,6 +78,9 @@ jobs:
         working-directory: apps/desktop
         # Invoke the installed pinned CLI directly; never npx an unpinned package.
         run: node node_modules/playwright-core/cli.js install --with-deps chromium
+      - name: Real loopback transport and deadline regression
+        timeout-minutes: 2
+        run: node --test apps/desktop/acceptance/s3-controls-real.test.mjs
       - name: Real browser, backend and PostgreSQL acceptance
         timeout-minutes: 5
         shell: bash
@@ -87,11 +90,20 @@ jobs:
           # No raw runtime logs are retained: driver errors may include row data.
           target/debug/terichat-server >/dev/null 2>&1 &
           backend_pid=$!
-          trap 'kill "$backend_pid" 2>/dev/null || true; wait "$backend_pid" 2>/dev/null || true' EXIT
+          cleanup_backend() {
+            kill "$backend_pid" 2>/dev/null || true
+            for attempt in $(seq 1 50); do
+              if ! kill -0 "$backend_pid" 2>/dev/null; then break; fi
+              sleep 0.1
+            done
+            kill -KILL "$backend_pid" 2>/dev/null || true
+            wait "$backend_pid" 2>/dev/null || true
+          }
+          trap cleanup_backend EXIT
           ready=0
-          for attempt in $(seq 1 60); do
+          for attempt in $(seq 1 20); do
             kill -0 "$backend_pid"
-            if curl --fail --silent http://127.0.0.1:3001/ready >/dev/null; then
+            if curl --fail --silent --connect-timeout 1 --max-time 2 http://127.0.0.1:3001/ready >/dev/null; then
               ready=1
               break
             fi
