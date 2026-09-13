@@ -282,14 +282,21 @@ async fn next_delivery(
         }
     };
     tokio::pin!(pending);
+    let mut completed = None;
     loop {
+        if let Some(delivery) = completed.take() {
+            return Some(delivery);
+        }
         tokio::select! {
             delivery = &mut pending => return delivery,
             _ = validity_tick.tick() => {
-                if !session_live(pool, session).await { return None; }
+                if !with_delivery_progress(&mut pending, &mut completed, session_live(pool, session)).await {
+                    return None;
+                }
             }
             incoming = stream.next() => {
-                if !session_live(pool, session).await { return None; }
+                let operation = async {
+                if !session_live(pool, session).await { return false; }
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         let frame = match serde_json::from_str::<ClientFrame>(&text) {
@@ -297,11 +304,36 @@ async fn next_delivery(
                             Ok(ClientFrame::Identify { .. }) => ServerFrame::Error { code: "already_identified" },
                             Err(_) => ServerFrame::Error { code: "bad_frame" },
                         };
-                        if !send_frame(sink, &frame).await { return None; }
+                        if !send_frame(sink, &frame).await { return false; }
                     }
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => return false,
                     _ => {}
                 }
+                true
+                };
+                if !with_delivery_progress(&mut pending, &mut completed, operation).await {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Keep releasing replay resources while a control operation waits for the
+/// same pool. Buffer at most one delivery; validation must finish before it can
+/// leave the pump. Read failure/deadline cancels the operation, failing closed.
+async fn with_delivery_progress(
+    pending: &mut (impl std::future::Future<Output = Option<Delivery>> + Unpin),
+    completed: &mut Option<Delivery>,
+    operation: impl std::future::Future<Output = bool>,
+) -> bool {
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            valid = &mut operation => return valid,
+            delivery = &mut *pending, if completed.is_none() => {
+                let Some(delivery) = delivery else { return false; };
+                *completed = Some(delivery);
             }
         }
     }
@@ -428,6 +460,221 @@ mod tests {
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
+
+    async fn saturated_read(
+        pool: sqlx::PgPool,
+        session: auth::AuthSession,
+        mut replay: Replay,
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+        started: tokio::sync::mpsc::Sender<()>,
+    ) -> (bool, bool) {
+        let pending = async {
+            match tokio::time::timeout(IO_TIMEOUT, replay.next(&pool, session.user_id)).await {
+                Ok(Ok(Some(entry))) => Some(Delivery::Event(entry)),
+                _ => None,
+            }
+        };
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = &mut pending => panic!("locked replay cannot complete before validation"),
+            _ = barrier.wait() => {}
+        }
+        let mut completed = None;
+        let valid = with_delivery_progress(&mut pending, &mut completed, async {
+            started.send(()).await.unwrap();
+            session_live(&pool, &session).await
+        })
+        .await;
+        let delivery = if valid {
+            match completed {
+                Some(delivery) => Some(delivery),
+                None => pending.await,
+            }
+        } else {
+            None
+        };
+        (valid, matches!(delivery, Some(Delivery::Event(_))))
+    }
+    async fn production_sized_pool(observer: &sqlx::PgPool) -> sqlx::PgPool {
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(observer)
+            .await
+            .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(IO_TIMEOUT)
+            .after_connect(move |connection, _| {
+                let schema = schema.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false), set_config('application_name', $1, false)")
+                        .bind(schema).execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        pool
+    }
+
+    // Exercise the shared control-operation boundary with the production pool
+    // size. The observer never borrows application capacity, and barriers prove
+    // all five reads hold connections before validation starts.
+    async fn saturated_replay(mode: &str) {
+        let (observer, _, user) = fixture()
+            .await
+            .expect("saturation regression requires DATABASE_URL");
+        let pool = production_sized_pool(&observer).await;
+        let peer = seed_user(&observer).await;
+        let dm = messaging::find_or_create_dm(&observer, user, peer)
+            .await
+            .unwrap();
+        messaging::send_message(
+            &observer,
+            peer,
+            dm.id,
+            Uuid::now_v7(),
+            b"synthetic-saturated-replay",
+            None,
+        )
+        .await
+        .unwrap();
+        let mut reads = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            let (id, token) = session(&observer, user).await;
+            ids.push(id);
+            reads.push((
+                auth::authenticate(&observer, &token).await.unwrap(),
+                Replay::start(&observer, user, None).await.unwrap(),
+            ));
+        }
+        let mut blocker = observer.begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        sqlx::query("LOCK TABLE conversation_participants IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(6));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel(5);
+        let mut tasks = Vec::new();
+        for (session, replay) in reads {
+            tasks.push(tokio::spawn(saturated_read(
+                pool.clone(),
+                session,
+                replay,
+                barrier.clone(),
+                started_tx.clone(),
+            )));
+        }
+        tokio::time::timeout(IO_TIMEOUT, async {
+            loop {
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND datname = current_database() AND application_name = current_setting('application_name') AND wait_event_type = 'Lock' AND query LIKE 'SELECT o.id, o.topic, o.payload FROM outbox o%'")
+                    .bind(pid).fetch_one(&observer).await.unwrap();
+                if count == 5 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("all production-sized pool connections held by replay");
+        assert_eq!(pool.size(), 5);
+        assert_eq!(pool.num_idle(), 0);
+        match mode {
+            "revoked" => {
+                sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = ANY($1)")
+                    .bind(&ids)
+                    .execute(&observer)
+                    .await
+                    .unwrap();
+            }
+            "expired" => {
+                sqlx::query("UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = ANY($1)")
+                    .bind(&ids).execute(&observer).await.unwrap();
+            }
+            "valid" => {}
+            _ => panic!("unknown synthetic mode"),
+        }
+        barrier.wait().await;
+        for _ in 0..5 {
+            tokio::time::timeout(IO_TIMEOUT, started_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        blocker.commit().await.unwrap();
+        for task in tasks {
+            let result = tokio::time::timeout(IO_TIMEOUT, task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result,
+                (mode == "valid", mode == "valid"),
+                "released replay must progress only for valid sessions"
+            );
+        }
+        pool.close().await;
+        observer.close().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_production_pool_saturation_preserves_valid_replay() {
+        saturated_replay("valid").await;
+    }
+
+    #[tokio::test]
+    async fn gateway_production_pool_saturation_denies_revoked_replay() {
+        saturated_replay("revoked").await;
+    }
+
+    #[tokio::test]
+    async fn gateway_production_pool_saturation_denies_expired_replay() {
+        saturated_replay("expired").await;
+    }
+
+    #[tokio::test]
+    async fn gateway_completed_replay_waits_for_control_validation() {
+        for valid in [false, true] {
+            let (released, release) = tokio::sync::oneshot::channel();
+            let pending = async {
+                released.send(()).unwrap();
+                Some(Delivery::ReplayEnd)
+            };
+            tokio::pin!(pending);
+            let mut completed = None;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                with_delivery_progress(&mut pending, &mut completed, async {
+                    release.await.unwrap();
+                    tokio::task::yield_now().await;
+                    valid
+                }),
+            )
+            .await
+            .expect("completed replay releases the waiting control operation");
+            assert_eq!(result, valid, "buffering cannot override denial");
+            assert!(matches!(completed, Some(Delivery::ReplayEnd)));
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_replay_deadline_interrupts_control_operation() {
+        let pending = async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            None
+        };
+        tokio::pin!(pending);
+        let mut completed = None;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            with_delivery_progress(&mut pending, &mut completed, std::future::pending()),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(false)),
+            "read deadline must remain polled"
+        );
+        assert!(completed.is_none());
+    }
 
     async fn next(
         socket: &mut Socket,
