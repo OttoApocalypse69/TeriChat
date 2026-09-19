@@ -205,10 +205,11 @@ pub(crate) mod tests {
         crate::MIGRATOR.run(&pool).await.unwrap();
         let user = seed_user(&pool).await;
         let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
-        let state = AppState {
-            pool: Some(pool.clone()),
+        let state = AppState::new(
+            Some(pool.clone()),
             hub,
-        };
+            std::env::temp_dir().join("terichat-test-attachments"),
+        );
         Some((pool, state, user))
     }
 

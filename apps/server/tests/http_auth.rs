@@ -100,10 +100,11 @@ async fn http_account_lifecycle() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = AppState {
-        pool: Some(pool),
-        hub: broadcast::channel(HUB_CAPACITY).0,
-    };
+    let state = AppState::new(
+        Some(pool),
+        broadcast::channel(HUB_CAPACITY).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
 
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -199,10 +200,11 @@ async fn http_device_key_validation() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
 
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -264,10 +266,11 @@ async fn http_own_stats_is_scoped_to_caller() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
 
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,10 +414,11 @@ async fn sealed_dm_end_to_end() {
     let envelope = tericrypt::seal(&alice_dev, &bob_dev.agreement_pubkey(), b"bro").expect("seal");
     let wire = envelope.to_bytes();
     assert!(wire.len() >= tericrypt::HEADER_LEN);
-    let http_state = AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
-    };
+    let http_state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let (status, sent) = post_json(
         build_router(http_state),
         "/v1/messages",

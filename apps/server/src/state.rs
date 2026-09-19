@@ -1,26 +1,63 @@
 //! Shared application state and request identity.
 //!
-//! [`AppState`] is the pool/hub pair every handler receives (`pool: None`
-//! means the probes-only boot). [`Bearer`] extracts the caller's session from
-//! the `Authorization` header for handlers that need identity.
+//! [`AppState`] is the pool/hub/storage triple every handler receives
+//! (`pool: None` means the probes-only boot). [`Bearer`] extracts the
+//! caller's session from the `Authorization` header for handlers that need
+//! identity.
 
 use axum::{
     extract::FromRequestParts,
     http::{header, request::Parts},
 };
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::attachments::FilesystemAttachmentStorage;
 use crate::auth;
 use crate::errors::AppError;
 use crate::messaging;
 
-/// Shared server state: the optional database pool plus the realtime fan-out
-/// hub. `pool: None` means the probes-only boot (no `DATABASE_URL`).
+/// Shared server state: the optional database pool, the realtime fan-out
+/// hub, and the attachment byte store. `pool: None` means the probes-only
+/// boot (no `DATABASE_URL`).
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Option<sqlx::PgPool>,
     pub hub: broadcast::Sender<messaging::OutboxEntry>,
+    /// Attachment bytes. Filesystem-backed by default (`ATTACHMENTS_DIR`);
+    /// the trait keeps a later S3 move handler-local.
+    pub storage: Arc<FilesystemAttachmentStorage>,
+}
+
+impl AppState {
+    /// Production constructor: filesystem storage rooted at `attachments_dir`.
+    #[must_use]
+    pub fn new(
+        pool: Option<sqlx::PgPool>,
+        hub: broadcast::Sender<messaging::OutboxEntry>,
+        attachments_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            pool,
+            hub,
+            storage: Arc::new(FilesystemAttachmentStorage::new(attachments_dir)),
+        }
+    }
+
+    /// Test constructor: filesystem storage rooted at `dir`.
+    #[must_use]
+    pub fn test(
+        pool: sqlx::PgPool,
+        hub: broadcast::Sender<messaging::OutboxEntry>,
+        dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            pool: Some(pool),
+            hub,
+            storage: Arc::new(FilesystemAttachmentStorage::new(dir)),
+        }
+    }
 }
 
 /// Hub capacity: live burst buffer. Overflow drops to resume (`Lagged`

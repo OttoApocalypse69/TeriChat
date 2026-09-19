@@ -33,7 +33,8 @@ async fn main() {
     let addr = SocketAddr::from((config.bind_addr, config.port));
     let listener = bootstrap::bind_listener(addr).await;
     tracing::info!(%addr, "terichat-server listening");
-    axum::serve(listener, build_router(AppState { pool, hub }))
+    let state = AppState::new(pool, hub, config.attachments_dir.clone());
+    axum::serve(listener, build_router(state))
         .with_graceful_shutdown(bootstrap::shutdown_signal())
         .await
         .expect("serve axum router");
