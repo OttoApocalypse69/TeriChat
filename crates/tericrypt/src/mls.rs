@@ -233,6 +233,30 @@ impl Session {
         Ok(addition)
     }
 
+    /// Rotate this installation's leaf keys (MLS self-update) and merge locally.
+    /// The caller must deliver the returned commit to peers in order. Peers
+    /// keep the same membership; only the epoch and leaf keys advance. This
+    /// is key hygiene, not a credential/account change or a revocation.
+    ///
+    /// # Errors
+    /// Returns `Operation` on MLS update, encoding, or merge failure.
+    pub fn rotate(&mut self) -> Result<Vec<u8>, MlsError> {
+        let provider = &self.installation.provider;
+        let params = LeafNodeParameters::builder().build();
+        let bundle = self
+            .group
+            .self_update(provider, &self.installation.signer, params)
+            .map_err(|_| MlsError::Operation)?;
+        let wire = bundle
+            .commit()
+            .to_bytes()
+            .map_err(|_| MlsError::Operation)?;
+        self.group
+            .merge_pending_commit(provider)
+            .map_err(|_| MlsError::Operation)?;
+        Ok(wire)
+    }
+
     /// Encrypt application plaintext as an MLS message, never as a `PoC` envelope.
     ///
     /// # Errors
