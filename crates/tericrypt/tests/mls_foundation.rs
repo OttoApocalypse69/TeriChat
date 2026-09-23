@@ -112,3 +112,31 @@ fn two_users_four_independent_installations_exchange() {
         }
     }
 }
+
+#[test]
+fn rotating_installation_advances_epoch_and_preserves_delivery() {
+    let mut sessions = four_devices();
+    // One member rotates its leaf keys: epoch advances locally on merge.
+    let rotation = sessions[1].rotate().unwrap();
+    assert_eq!(sessions[1].epoch(), 2);
+    assert_eq!(sessions[1].member_count(), 4);
+    // Peers merge the rotation commit; membership is unchanged.
+    for session in sessions.iter_mut().filter(|s| s.epoch() == 1) {
+        assert_eq!(session.receive(&rotation).unwrap(), Received::EpochChanged);
+        assert_eq!(session.epoch(), 2);
+        assert_eq!(session.member_count(), 4);
+    }
+    // A new-epoch message from another member decrypts on all other
+    // sessions, including the rotated one. (The sender skips itself: a
+    // sender holds no receive ratchet for its own message.)
+    let wire = sessions[2].encrypt(b"post-rotation").unwrap();
+    for (index, session) in sessions.iter_mut().enumerate() {
+        if index == 2 {
+            continue;
+        }
+        assert_eq!(
+            session.receive(&wire).unwrap(),
+            Received::Application(b"post-rotation".to_vec())
+        );
+    }
+}
