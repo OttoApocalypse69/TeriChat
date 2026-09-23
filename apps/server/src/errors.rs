@@ -166,9 +166,15 @@ impl From<attachments::AttachmentError> for AppError {
             attachments::AttachmentError::UnsupportedMime => {
                 Self::UnsupportedMediaType("unsupported media type".to_owned())
             }
-            attachments::AttachmentError::Database(_)
-            | attachments::AttachmentError::Storage(_) => {
-                tracing::error!("attachment backend failure: {err}");
+            // Outward signal stays a generic 500, but the inner cause must
+            // reach operator logs: "storage/database error" alone cannot
+            // distinguish a full disk from a missing file or a dead pool.
+            attachments::AttachmentError::Database(db) => {
+                tracing::error!("attachment database failure: {db}");
+                Self::Internal
+            }
+            attachments::AttachmentError::Storage(detail) => {
+                tracing::error!("attachment storage failure: {detail}");
                 Self::Internal
             }
         }

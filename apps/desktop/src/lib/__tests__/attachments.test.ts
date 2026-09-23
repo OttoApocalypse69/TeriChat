@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   encodeChatContent,
   encodeOpaqueText,
+  guessUploadMime,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
   parseChatContent,
@@ -39,6 +40,30 @@ describe('parseChatContent', () => {
     expect(parseChatContent(payload)).toEqual({ text: 'bro', attachments: [] });
   });
 
+  it('leaves JSON-looking plain text verbatim without the discriminator', () => {
+    const payload = encodeOpaqueText('{"text":"hello"}');
+    expect(parseChatContent(payload)).toEqual({
+      text: '{"text":"hello"}',
+      attachments: [],
+    });
+  });
+
+  it('truncates hostile ref arrays to the parse cap', () => {
+    const refs = Array.from({ length: 50 }, (_, i) => ({
+      id: `r${i}`,
+      filename: 'f.png',
+      mime: 'image/png',
+      size_bytes: 1,
+      sha256: 'synthetic-sha',
+    }));
+    const payload = encodeOpaqueText(
+      JSON.stringify({ v: 1, kind: 'attachments', text: 'spam', attachments: refs }),
+    );
+    const content = parseChatContent(payload);
+    expect(content.text).toBe('spam');
+    expect(content.attachments).toHaveLength(MAX_ATTACHMENTS_PER_MESSAGE);
+  });
+
   it('round-trips text plus refs (incl. GIF mime)', () => {
     const gif: AttachmentRef = {
       id: 'g1',
@@ -56,7 +81,7 @@ describe('parseChatContent', () => {
 
   it('drops malformed attachment entries instead of throwing', () => {
     const payload = encodeOpaqueText(
-      JSON.stringify({ text: 'hi', attachments: [{ nope: true }] }),
+      JSON.stringify({ v: 1, kind: 'attachments', text: 'hi', attachments: [{ nope: true }] }),
     );
     expect(parseChatContent(payload)).toEqual({ text: 'hi', attachments: [] });
   });
@@ -75,5 +100,23 @@ describe('attachment client guards', () => {
     expect(MAX_ATTACHMENTS_PER_MESSAGE).toBe(5);
     const refs = Array.from({ length: 7 }, (_, i) => ref(`r${i}`));
     expect(refs.slice(0, MAX_ATTACHMENTS_PER_MESSAGE)).toHaveLength(5);
+  });
+});
+
+describe('guessUploadMime', () => {
+  it('keeps the browser-supplied type when present', () => {
+    expect(guessUploadMime({ name: 'a.bin', type: 'image/png' })).toBe('image/png');
+  });
+
+  it('falls back to the extension map for known types', () => {
+    expect(guessUploadMime({ name: 'dance.GIF', type: '' })).toBe('image/gif');
+    expect(guessUploadMime({ name: 'doc.pdf', type: '' })).toBe('application/pdf');
+    expect(guessUploadMime({ name: 'clip.mp4', type: '' })).toBe('video/mp4');
+  });
+
+  it('stays octet-stream for unknown extensions (server 415s honestly)', () => {
+    expect(guessUploadMime({ name: 'run.sh', type: '' })).toBe(
+      'application/octet-stream',
+    );
   });
 });

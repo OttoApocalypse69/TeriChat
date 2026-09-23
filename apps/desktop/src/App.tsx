@@ -502,23 +502,30 @@ function AuthenticatedApp({ session, onLogout }: {
 
   /**
    * Upload files then send one message carrying their refs. Uploads run
-   * sequentially so progress is honest; the message embeds `{text,
-   * attachments}` JSON in the existing envelope (no protocol change).
+   * sequentially so progress is honest; the message embeds the versioned
+   * envelope in the existing transport (no protocol change). Progress is
+   * aggregated across files: completed bytes plus the in-flight file.
    */
-  async function sendAttachments(files: File[]): Promise<void> {
+  async function sendAttachments(
+    files: File[],
+    onProgress?: (loaded: number, total: number) => void,
+  ): Promise<void> {
     if (!selected) return;
     const conversationId = selected.id;
+    const capped = files.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+    const total = capped.reduce((sum, file) => sum + file.size, 0);
     setSending(true);
     try {
       const refs: AttachmentRef[] = [];
-      for (const file of files.slice(0, MAX_ATTACHMENTS_PER_MESSAGE)) {
+      let done = 0;
+      for (const file of capped) {
         const uploaded = await api.uploadAttachment(
           conversationId,
           file,
-          (_loaded, _total) => {
-            // Per-file progress; the staged bar covers overall motion.
-          },
+          (loaded, fileTotal) => onProgress?.(done + loaded, total || fileTotal),
         );
+        done += file.size;
+        onProgress?.(done, total);
         refs.push({
           id: uploaded.id,
           filename: uploaded.filename,

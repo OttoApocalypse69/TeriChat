@@ -26,7 +26,10 @@ interface Props {
   sending: boolean;
   error: string | null;
   onSend: (text: string) => Promise<void>;
-  onSendAttachments: (files: File[]) => Promise<void>;
+  onSendAttachments: (
+    files: File[],
+    onProgress?: (loaded: number, total: number) => void,
+  ) => Promise<void>;
   onDownload: (ref: AttachmentRef) => Promise<void>;
   fetchAttachmentBytes: (ref: AttachmentRef) => Promise<Blob>;
   title?: string | null;
@@ -52,6 +55,7 @@ export default function ConversationView({
   const draftRevision = useRef(0);
   const [sendError, setSendError] = useState<string | null>(null);
   const [staged, setStaged] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -92,19 +96,29 @@ export default function ConversationView({
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    if (sending || (!draft.trim() && staged.length === 0)) return;
+    if (sending || uploading || (!draft.trim() && staged.length === 0)) return;
     const revision = draftRevision.current;
     setSendError(null);
     try {
       if (staged.length > 0) {
+        // Keep the selection mounted through the whole upload: the progress
+        // row renders from `staged`, and a failure must leave the files
+        // staged so retry doesn't force re-picking everything.
         const files = staged;
-        setStaged([]);
+        setUploading(true);
         setUploadProgress(0);
         try {
-          await onSendAttachments(files);
+          await onSendAttachments(files, (loaded, total) =>
+            setUploadProgress(total > 0 ? loaded / total : 0),
+          );
+        } catch (err) {
+          setSendError(err instanceof Error ? err.message : 'send failed');
+          return;
         } finally {
+          setUploading(false);
           setUploadProgress(null);
         }
+        setStaged([]);
         // Text alongside staged files goes as its own message below.
         if (!draft.trim()) {
           if (draftRevision.current === revision) setDraft('');
@@ -240,9 +254,12 @@ export default function ConversationView({
               </button>
             </p>
           ))}
-          {uploadProgress !== null && (
+          {uploading && (
             <div className="my-1 h-1 overflow-hidden rounded bg-zinc-800" role="progressbar" aria-label="Upload progress">
-              <div className="h-full bg-emerald-400" style={{ width: `${Math.round(uploadProgress * 100)}%` }} />
+              <div
+                className={`h-full bg-emerald-400 ${uploadProgress === null ? 'animate-pulse' : ''}`}
+                style={{ width: `${Math.round((uploadProgress ?? 0) * 100)}%` }}
+              />
             </div>
           )}
         </div>
@@ -279,7 +296,7 @@ export default function ConversationView({
         />
         <button
           type="submit"
-          disabled={sending || (!draft.trim() && staged.length === 0)}
+          disabled={sending || uploading || (!draft.trim() && staged.length === 0)}
           className="shrink-0 rounded-lg bg-emerald-400 px-4 py-3 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         >
           {sending ? '…' : 'Send'}
@@ -363,10 +380,30 @@ function AttachmentRow({
       </button>
     );
   }
+  // A failed preview keeps the row actionable: the label promises
+  // "click to download", so a failed click downloads instead of dead-ending
+  // on a disabled control after a transient failure.
+  if (failed) {
+    return (
+      <button
+        type="button"
+        onClick={onDownload}
+        className={`mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs ${
+          mine ? 'bg-emerald-950 text-emerald-100' : 'bg-zinc-900 text-zinc-200'
+        }`}
+      >
+        <span aria-hidden>🖼️</span>
+        <span className="min-w-0 flex-1 truncate">
+          {`${ref.filename} (preview failed — click to download)`}
+        </span>
+        <span className="shrink-0 opacity-70">{formatBytes(ref.size_bytes)}</span>
+      </button>
+    );
+  }
   return (
     <button
       type="button"
-      disabled={failed || loadingPreview}
+      disabled={loadingPreview}
       onClick={() => void showPreview()}
       className={`mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs ${
         mine ? 'bg-emerald-950 text-emerald-100' : 'bg-zinc-900 text-zinc-200'
@@ -374,11 +411,9 @@ function AttachmentRow({
     >
       <span aria-hidden>🖼️</span>
       <span className="min-w-0 flex-1 truncate">
-        {failed
-          ? `${ref.filename} (preview failed — click to download)`
-          : loadingPreview
-            ? `${ref.filename} — loading preview…`
-            : `${ref.filename} — show preview`}
+        {loadingPreview
+          ? `${ref.filename} — loading preview…`
+          : `${ref.filename} — show preview`}
       </span>
       <span className="shrink-0 opacity-70">{formatBytes(ref.size_bytes)}</span>
     </button>

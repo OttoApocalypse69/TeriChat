@@ -168,9 +168,59 @@ export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 
 /**
+ * Resolve the MIME to advertise for an upload. The browser File API may
+ * return an empty `file.type` when the OS cannot determine it; sending
+ * `application/octet-stream` would then fail the server allowlist even for
+ * a perfectly valid file. Fall back to the extension map (which only
+ * yields allowlisted types); unknown extensions stay octet-stream and the
+ * server rejects them honestly with 415.
+ */
+export function guessUploadMime(file: Pick<File, 'name' | 'type'>): string {
+  if (file.type && file.type.trim() !== '') return file.type;
+  const dot = file.name.lastIndexOf('.');
+  const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : '';
+  switch (ext) {
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'pdf':
+      return 'application/pdf';
+    case 'zip':
+      return 'application/zip';
+    case 'mp3':
+    case 'm4a':
+      return 'audio/mpeg';
+    case 'ogg':
+    case 'oga':
+      return 'audio/ogg';
+    case 'wav':
+      return 'audio/wav';
+    case 'mp4':
+    case 'm4v':
+      return 'video/mp4';
+    case 'webm':
+      return 'video/webm';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+/**
  * Parse a received message payload into chat content.
- * Legacy messages carry a bare string; attachment messages carry
- * `{text, attachments}`; anything else degrades to empty text.
+ * Legacy messages carry a bare string; attachment messages carry the
+ * versioned envelope `{v:1, kind:"attachments", text, attachments}`.
+ * Anything else — including JSON-looking plain text WITHOUT the
+ * discriminator — displays verbatim as text, so a literal
+ * `{"text":"hello"}` code snippet never becomes structured UI.
+ * Parsed refs are truncated to [`MAX_ATTACHMENTS_PER_MESSAGE`]: the send
+ * path caps refs, but any client can stuff thousands into the opaque 1 MiB
+ * envelope and stall every recipient's renderer without this bound.
  */
 export function parseChatContent(payload: string): ChatContent {
   const decoded = decodeOpaqueText(payload);
@@ -180,28 +230,35 @@ export function parseChatContent(payload: string): ChatContent {
   if (!decoded.startsWith('{')) return { text: decoded, attachments: [] };
   try {
     const parsed = JSON.parse(decoded) as {
+      v?: unknown;
+      kind?: unknown;
       text?: unknown;
       attachments?: unknown;
     };
+    if (parsed.v !== 1 || parsed.kind !== 'attachments') {
+      return { text: decoded, attachments: [] };
+    }
     if (typeof parsed.text !== 'string') return { text: decoded, attachments: [] };
     const attachments = Array.isArray(parsed.attachments)
-      ? (parsed.attachments as Record<string, unknown>[]).flatMap((entry) =>
-          typeof entry.id === 'string' &&
-          typeof entry.filename === 'string' &&
-          typeof entry.mime === 'string' &&
-          typeof entry.size_bytes === 'number' &&
-          typeof entry.sha256 === 'string'
-            ? [
-                {
-                  id: entry.id,
-                  filename: entry.filename,
-                  mime: entry.mime,
-                  size_bytes: entry.size_bytes,
-                  sha256: entry.sha256,
-                },
-              ]
-            : [],
-        )
+      ? (parsed.attachments as Record<string, unknown>[])
+          .flatMap((entry) =>
+            typeof entry.id === 'string' &&
+            typeof entry.filename === 'string' &&
+            typeof entry.mime === 'string' &&
+            typeof entry.size_bytes === 'number' &&
+            typeof entry.sha256 === 'string'
+              ? [
+                  {
+                    id: entry.id,
+                    filename: entry.filename,
+                    mime: entry.mime,
+                    size_bytes: entry.size_bytes,
+                    sha256: entry.sha256,
+                  },
+                ]
+              : [],
+          )
+          .slice(0, MAX_ATTACHMENTS_PER_MESSAGE)
       : [];
     return { text: parsed.text, attachments };
   } catch {
@@ -211,11 +268,18 @@ export function parseChatContent(payload: string): ChatContent {
 
 /**
  * Encode chat content for the envelope. Plain-text messages stay bare
- * strings; messages with attachments become `{text, attachments}` JSON.
+ * strings; messages with attachments become the versioned envelope
+ * `{v:1, kind:"attachments", text, attachments}` — the discriminator keeps
+ * ordinary JSON-looking text from ever parsing as structured content.
  */
 export function encodeChatContent(text: string, attachments: AttachmentRef[]): string {
   if (attachments.length === 0) return text;
-  return JSON.stringify({ text, attachments });
+  return JSON.stringify({
+    v: 1,
+    kind: 'attachments',
+    text,
+    attachments: attachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE),
+  });
 }
 
 /** True when the payload looks like a STANDARD-base64 envelope. */
@@ -399,8 +463,12 @@ export class ApiClient {
   }
 
   /**
-   * Upload raw attachment bytes under a conversation. Filename and mime
-   * travel as query params (the body is the file bytes, not JSON).
+   * Upload raw attachment bytes under a conversation.
+   *
+   * Filename and mime travel as `X-Filename` / `X-Mime-Type` headers — NOT
+   * the query string. Staging enables Caddy access logging, which records
+   * full request URIs; user-supplied filenames in the URL would land
+   * sensitive names in centralized logs. The body is the file bytes.
    *
    * Transport split: the Tauri shell MUST use the Rust-proxied plugin
    * fetch (WebView2 enforces CORS on XHR and the API serves no CORS
@@ -420,15 +488,13 @@ export class ApiClient {
         `attachment exceeds ${MAX_ATTACHMENT_BYTES} bytes`,
       );
     }
-    const query = new URLSearchParams({
-      filename: file.name,
-      mime: file.type || 'application/octet-stream',
-    });
-    const url = `${this.base}/v1/conversations/${conversationId}/attachments?${query.toString()}`;
     const headers: Record<string, string> = {
       'content-type': 'application/octet-stream',
+      'x-filename': file.name,
+      'x-mime-type': guessUploadMime(file),
     };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const url = `${this.base}/v1/conversations/${conversationId}/attachments`;
     if (!isTauriShell()) {
       return this.uploadViaXhr(url, headers, file, onProgress);
     }
