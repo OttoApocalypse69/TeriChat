@@ -149,9 +149,12 @@ async fn workspace_http_channel_send() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = || AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
+    let state = || {
+        AppState::new(
+            Some(pool.clone()),
+            broadcast::channel(HUB_CAPACITY).0,
+            std::env::temp_dir().join("terichat-test-attachments"),
+        )
     };
 
     let stamp = std::time::SystemTime::now()
@@ -222,9 +225,12 @@ async fn workspace_http_outsider_ban_audit() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = || AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
+    let state = || {
+        AppState::new(
+            Some(pool.clone()),
+            broadcast::channel(HUB_CAPACITY).0,
+            std::env::temp_dir().join("terichat-test-attachments"),
+        )
     };
 
     let stamp = std::time::SystemTime::now()
@@ -333,9 +339,12 @@ async fn workspace_member_oracle() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = || AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
+    let state = || {
+        AppState::new(
+            Some(pool.clone()),
+            broadcast::channel(HUB_CAPACITY).0,
+            std::env::temp_dir().join("terichat-test-attachments"),
+        )
     };
 
     let stamp = std::time::SystemTime::now()
@@ -425,9 +434,12 @@ async fn workspace_guest_reads_but_not_writes() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = || AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
+    let state = || {
+        AppState::new(
+            Some(pool.clone()),
+            broadcast::channel(HUB_CAPACITY).0,
+            std::env::temp_dir().join("terichat-test-attachments"),
+        )
     };
 
     let stamp = std::time::SystemTime::now()
@@ -532,9 +544,12 @@ async fn workspace_leave_route() {
     };
     let pool = db_pool(&url).await.expect("connect test database");
     MIGRATOR.run(&pool).await.expect("apply migrations");
-    let state = || AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
+    let state = || {
+        AppState::new(
+            Some(pool.clone()),
+            broadcast::channel(HUB_CAPACITY).0,
+            std::env::temp_dir().join("terichat-test-attachments"),
+        )
     };
 
     let stamp = std::time::SystemTime::now()

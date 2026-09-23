@@ -10,6 +10,7 @@ use crate::gateway;
 use crate::health::{health, ready};
 use crate::state::AppState;
 
+pub mod attachments;
 pub mod auth;
 pub mod messaging;
 pub mod stats;
@@ -25,6 +26,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ready", get(ready))
         .merge(auth::router())
         .merge(messaging::router())
+        .merge(attachments::router())
         .merge(workspaces::router())
         .merge(stats::router())
         .route("/v1/gateway", get(gateway::gateway_handler))

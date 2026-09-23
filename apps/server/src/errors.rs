@@ -7,6 +7,7 @@
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 
+use crate::attachments;
 use crate::auth;
 use crate::ledger;
 use crate::messaging;
@@ -40,6 +41,10 @@ pub enum AppError {
     Denied(String),
     /// Named object (e.g. invite) is unknown or unusable.
     NotFound(String),
+    /// Body exceeds the accepted limit (attachments: 10 MiB).
+    PayloadTooLarge(String),
+    /// MIME type outside the accepted allowlist.
+    UnsupportedMediaType(String),
     /// A database-backed route called without a configured database.
     NoDatabase,
     /// Readiness dependency unavailable.
@@ -64,6 +69,14 @@ impl IntoResponse for AppError {
             ),
             Self::Denied(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
+            Self::PayloadTooLarge(message) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
+            }
+            Self::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                message,
+            ),
             Self::NoDatabase => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "no_database",
@@ -133,6 +146,35 @@ impl From<messaging::MessagingError> for AppError {
             | messaging::MessagingError::CiphertextTooLarge => Self::BadRequest(err.to_string()),
             messaging::MessagingError::Database(_) => {
                 tracing::error!("messaging backend failure: {err}");
+                Self::Internal
+            }
+        }
+    }
+}
+
+impl From<attachments::AttachmentError> for AppError {
+    fn from(err: attachments::AttachmentError) -> Self {
+        match err {
+            // No existence oracle: non-members see the same 404 as missing ids.
+            attachments::AttachmentError::NotFound => {
+                Self::NotFound("attachment not found".to_owned())
+            }
+            attachments::AttachmentError::InvalidInput(detail) => Self::BadRequest(detail),
+            attachments::AttachmentError::TooLarge => {
+                Self::PayloadTooLarge("attachment exceeds 10 MiB".to_owned())
+            }
+            attachments::AttachmentError::UnsupportedMime => {
+                Self::UnsupportedMediaType("unsupported media type".to_owned())
+            }
+            // Outward signal stays a generic 500, but the inner cause must
+            // reach operator logs: "storage/database error" alone cannot
+            // distinguish a full disk from a missing file or a dead pool.
+            attachments::AttachmentError::Database(db) => {
+                tracing::error!("attachment database failure: {db}");
+                Self::Internal
+            }
+            attachments::AttachmentError::Storage(detail) => {
+                tracing::error!("attachment storage failure: {detail}");
                 Self::Internal
             }
         }

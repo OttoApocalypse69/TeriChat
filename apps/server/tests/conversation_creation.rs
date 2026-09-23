@@ -78,10 +78,11 @@ impl Fixture {
 
     fn router(&self) -> Router {
         let (hub, _) = tokio::sync::broadcast::channel(HUB_CAPACITY);
-        build_router(AppState {
-            pool: Some(self.pool.clone()),
+        build_router(AppState::new(
+            Some(self.pool.clone()),
             hub,
-        })
+            std::env::temp_dir().join("terichat-test-attachments"),
+        ))
     }
 
     async fn wait_for_blocked(&self, count: i64) {

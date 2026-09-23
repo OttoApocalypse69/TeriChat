@@ -18,6 +18,9 @@ const DEFAULT_BIND: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 /// Default `RUST_LOG` filter directive when `RUST_LOG` is unset.
 const DEFAULT_RUST_LOG: &str = "info";
 
+/// Default attachment storage directory when `ATTACHMENTS_DIR` is unset.
+const DEFAULT_ATTACHMENTS_DIR: &str = "./data/attachments";
+
 /// Typed server configuration.
 ///
 /// Defaults (each also documented on its field):
@@ -25,6 +28,7 @@ const DEFAULT_RUST_LOG: &str = "info";
 /// - `BIND_ADDR` defaults to `127.0.0.1` (loopback only).
 /// - `RUST_LOG` defaults to `"info"`.
 /// - `DATABASE_URL`, when missing or empty, defaults to [`None`].
+/// - `ATTACHMENTS_DIR` defaults to `"./data/attachments"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// TCP port the server binds. Defaults to `3001` when `PORT` is unset.
@@ -37,6 +41,11 @@ pub struct Config {
     /// Postgres connection URL. Defaults to [`None`] when `DATABASE_URL` is
     /// missing or empty (the server boots without a database).
     pub database_url: Option<String>,
+    /// Filesystem directory for attachment bytes. Defaults to
+    /// `"./data/attachments"` when `ATTACHMENTS_DIR` is missing or empty.
+    /// S3-movable later: handlers only touch the storage trait, never this
+    /// path directly.
+    pub attachments_dir: std::path::PathBuf,
 }
 
 /// Typed error for malformed server configuration.
@@ -128,11 +137,21 @@ impl Config {
             .cloned()
             .filter(|url| !url.is_empty());
 
+        let attachments_dir = vars
+            .get("ATTACHMENTS_DIR")
+            .cloned()
+            .filter(|dir| !dir.is_empty())
+            .map_or_else(
+                || std::path::PathBuf::from(DEFAULT_ATTACHMENTS_DIR),
+                std::path::PathBuf::from,
+            );
+
         Ok(Self {
             port,
             bind_addr,
             rust_log,
             database_url,
+            attachments_dir,
         })
     }
 }
@@ -158,6 +177,10 @@ mod tests {
         );
         assert_eq!(config.rust_log, "info");
         assert_eq!(config.database_url, None);
+        assert_eq!(
+            config.attachments_dir,
+            std::path::PathBuf::from("./data/attachments")
+        );
     }
 
     #[test]
