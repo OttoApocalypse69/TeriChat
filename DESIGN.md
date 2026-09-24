@@ -25,7 +25,8 @@ or inline handlers from the exported HTML are required by the application.
 | Primary text | `#F1F5F9` | Titles and important content |
 | Secondary text | `#94A3B8` | Supporting text |
 | Violet | `#8A4FFF` | Primary actions and selected rail icons |
-| Violet hover | `#9D6BFF` | Hover and focus rings |
+| Violet highlight | `#9D6BFF` | Focus rings |
+| Action hover | `#7740DE` | Maintain white button-text contrast on hover |
 | Soft violet | `rgba(138,79,255,.14)` | Selected navigation and own avatar |
 
 Inter is the preferred UI font with system sans-serif fallbacks. Identifiers
