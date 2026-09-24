@@ -147,7 +147,8 @@
   .chat-shell[data-pane='navigation'] .chat-navigation { display: flex; }
   .chat-shell[data-pane='conversation'] .chat-main { display: flex; }
   .chat-shell[data-pane='details'] .workspace-details { border-left: 0; }
-  .chat-navigation button, .workspace-details button, .nav-action, .send-button { min-height: 44px; }
+  .chat-shell button, .chat-shell input, .chat-shell select { min-height: 44px; }
+  .nav-action, .send-button { min-height: 44px; }
   .chat-navigation input, .workspace-details input, .chat-navigation .navigation-search input { min-height: 44px; }
   .navigation-heading { padding: 18px 16px 14px; }
   .navigation-heading .eyebrow { font-size: 9px; }

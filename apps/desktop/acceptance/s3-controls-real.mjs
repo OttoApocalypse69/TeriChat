@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { openWorkspaceDetails } from './ui-navigation.mjs';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
@@ -317,4 +318,3 @@ try {
   // written; terminate only this harness. Hosted runner owns orphan cleanup.
   if (report.cleanup === 'FAIL') process.exit(1);
 }
-import { openWorkspaceDetails } from './ui-navigation.mjs';
