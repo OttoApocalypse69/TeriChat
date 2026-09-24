@@ -3,6 +3,7 @@ import { friendlyChannelError } from '../lib/workspaces';
 import type { ChannelBody } from '../lib/api';
 
 interface Props {
+  filter?: string;
   workspaceName: string | null;
   channels: ChannelBody[];
   selectedChannelId: string | null;
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export default function ChannelList({
+  filter = '',
   workspaceName,
   channels,
   selectedChannelId,
@@ -55,7 +57,7 @@ export default function ChannelList({
   }
 
   return (
-    <div className="border-b border-zinc-800 p-2">
+    <div className="channel-list border-b border-zinc-800 p-2">
       <div className="mb-1 flex items-center justify-between">
         <h2 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
           Channels · {workspaceName}
@@ -64,7 +66,7 @@ export default function ChannelList({
       </div>
       {error && <p className="mb-1 text-xs text-red-400">{error}</p>}
       <ul className="max-h-40 space-y-0.5 overflow-y-auto">
-        {channels.map((c) => (
+        {channels.filter(c => c.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase().replace(/^#/, ''))).map((c) => (
           <li key={c.id}>
             <button
               type="button"
@@ -83,6 +85,9 @@ export default function ChannelList({
           </li>
         ))}
       </ul>
+      {filter.trim() && channels.length > 0 && !channels.some(c => c.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase().replace(/^#/, ''))) && (
+        <p className="navigation-no-results">No matching channels.</p>
+      )}
       {!loading && !error && channels.length === 0 && (
         <p className="px-1 py-1 text-xs text-zinc-500">
           No channels yet — create one below.

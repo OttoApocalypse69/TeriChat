@@ -83,7 +83,7 @@
   font-size: 13px;
 }
 
-.login-input::placeholder { color: var(--text-muted, #64748b); }
+.login-input::placeholder { color: var(--text-secondary, #94a3b8); }
 .login-card button:focus-visible, .login-input:focus-visible { outline: 2px solid var(--brand-hover, #9d6bff); outline-offset: 3px; }
 .login-input:focus { border-color: var(--brand, #8a4fff); }
 .login-secret { position: relative; }

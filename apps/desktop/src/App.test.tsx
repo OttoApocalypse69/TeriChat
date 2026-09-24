@@ -57,6 +57,32 @@ beforeEach(async () => {
 });
 afterEach(async () => { await flush(() => root.unmount()); host.remove(); vi.restoreAllMocks(); });
 
+it('filters loaded conversations without resetting the active composer or fetching again', async () => {
+  await login(); await click('Peer'); await type('Message', 'preserved draft');
+  const composer = input('Message');
+  const calls = vi.mocked(ApiClient.prototype.listConversations).mock.calls.length;
+  await type('Find a conversation', 'unmatched');
+  expect(host.querySelector('.conversation-row')).toBeNull();
+  expect(host.textContent).toContain('No matching conversations.');
+  expect(input('Message')).toBe(composer);
+  expect(composer.value).toBe('preserved draft');
+  await type('Find a conversation', 'PEER');
+  expect(host.querySelector('.conversation-row')?.textContent).toContain('Peer');
+  expect(ApiClient.prototype.listConversations).toHaveBeenCalledTimes(calls);
+});
+
+it('filters channel names without changing the selected conversation', async () => {
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.mocked(ApiClient.prototype.listChannels).mockResolvedValue([channel('general')]);
+  await login(); await click('general'); await type('Message', 'channel draft');
+  await type('Find a conversation', '#GENERAL');
+  expect(host.querySelector('.channel-list button[aria-current="page"]')?.textContent).toContain('general');
+  await type('Find a conversation', '#missing');
+  expect(host.querySelector('.channel-list button[aria-current="page"]')).toBeNull();
+  expect(host.textContent).toContain('No matching channels.');
+  expect(input('Message').value).toBe('channel draft');
+});
+
 it('does not publish a deferred conversation list from the previous account', async () => {
   const old = deferred<ReturnType<typeof row>[]>();
   vi.mocked(ApiClient.prototype.listConversations).mockReturnValueOnce(old.promise);

@@ -13,6 +13,7 @@ import {
 } from '../lib/store';
 
 interface Props {
+  filter?: string;
   conversations: ChatConversation[];
   messagesByConversation: Map<string, ChatMessage[]>;
   selectedId: string | null;
@@ -21,6 +22,7 @@ interface Props {
 }
 
 export default function ConversationList({
+  filter = '',
   conversations,
   messagesByConversation,
   selectedId,
@@ -48,7 +50,9 @@ export default function ConversationList({
 
   // Newest activity first; quiet conversations fall back to the
   // server-reported last position so reloads keep a stable order.
-  const ordered = sortConversations(conversations, messagesByConversation);
+  const ordered = sortConversations(conversations, messagesByConversation).filter(c =>
+    `${conversationLabel(c)} ${conversationSublabel(c)}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()),
+  );
 
   return (
     <div className="conversation-list flex flex-col">
@@ -124,7 +128,7 @@ export default function ConversationList({
         })}
         {ordered.length === 0 && (
           <li className="px-2 py-4 text-xs text-zinc-400">
-            No conversations yet — open a DM above.
+            {filter.trim() ? 'No matching conversations.' : 'No conversations yet — open a DM above.'}
           </li>
         )}
       </ul>
