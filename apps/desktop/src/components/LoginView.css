@@ -109,16 +109,19 @@
   font-weight: 600;
 }
 
-.login-submit:not(:disabled):hover { background: var(--brand-hover, #9d6bff); }
+.login-submit:not(:disabled):hover { background: var(--brand-action-hover, #7740de); }
 .login-submit:disabled { opacity: .45; }
 .login-submit svg { width: 18px; height: 18px; }
 .login-notice { margin-top: 6px; padding-top: 18px; border-top: 1px solid var(--border-subtle, #252b3b); color: var(--text-secondary, #94a3b8); font-size: 12px; line-height: 18px; text-align: center; }
 .login-notice strong { color: var(--text-primary, #f1f5f9); font-weight: 500; }
 .login-footer { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 24px; color: var(--text-secondary, #94a3b8); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; line-height: 16px; text-align: center; }
 
+@media (max-width: 767px) {
+  .login-modes button { min-height: 44px; }
+}
+
 @media (max-width: 480px) {
   .login-screen { padding: 24px 16px; }
   .login-card { padding: 24px; }
-  .login-modes button { min-height: 44px; }
   .login-input { font-size: 16px; }
 }

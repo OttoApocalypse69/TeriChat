@@ -96,7 +96,7 @@ async function login(page, handle) {
 async function openDm(page, handle) {
   await page.getByPlaceholder('peer handle → open DM').fill(handle);
   await page.getByRole('button', { name: 'Open DM', exact: true }).click();
-  await page.locator('main').getByText(handle, { exact: true }).waitFor();
+  await page.locator('main').getByRole('heading', { name: handle, exact: true }).waitFor();
   await page.getByPlaceholder('Message (demo plaintext → opaque envelope)').waitFor();
 }
 async function send(page, text) {
@@ -107,7 +107,7 @@ async function send(page, text) {
 async function bodies(page, expected) {
   await until(async () => (await page.locator('main p.whitespace-pre-wrap').allTextContents()).length === expected.length, `render ${expected.length} messages`);
   assert.deepEqual(await page.locator('main p.whitespace-pre-wrap').allTextContents(), expected);
-  const seqs = await page.locator('main p.text-\\[10px\\]').allTextContents();
+  const seqs = await page.locator('main .message-sequence').allTextContents();
   assert.deepEqual(seqs.map(s => Number(s.match(/^#(\d+)/)?.[1])), expected.map((_, i) => i + 1));
 }
 function observe(page, key) {

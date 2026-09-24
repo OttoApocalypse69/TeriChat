@@ -4,12 +4,16 @@ import { createServer } from 'vite';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { openWorkspaceDetails } from './ui-navigation.mjs';
 
 // Presentation/interaction evidence only. All account data is synthetic.
 const desktop = fileURLToPath(new URL('../', import.meta.url));
 process.chdir(desktop);
 const artifact = path.join(desktop, '.acceptance', 'stitch-ui', new Date().toISOString().replaceAll(':', '-'));
 mkdirSync(artifact, { recursive: true });
+const git = args => execFileSync('git', args, { cwd: desktop, encoding: 'utf8' }).trim();
+const source = { head: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), workingTreeClean: git(['status', '--porcelain']) === '' };
 const vite = await createServer({ root: desktop, envFile: false, server: { host: '127.0.0.1', port: 0, strictPort: false }, define: { 'import.meta.env.VITE_API_URL': JSON.stringify('http://synthetic.test') } });
 const at = '2026-09-24T14:05:00Z';
 const message = (id, sender, text, seq, conversation = 'dm') => ({ id, sender_id: sender, ciphertext_b64: Buffer.from(text).toString('base64'), seq, conversation_id: conversation, sent_at: at, client_msg_id: `client-${id}` });
@@ -67,6 +71,8 @@ try {
   await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await page.getByRole('button', { name: /Alex Rivera/ }).click();
   await page.getByText('The new workspace is ready.', { exact: false }).waitFor();
+  await page.locator('main').getByRole('heading', { name: 'Alex Rivera', exact: true }).waitFor();
+  assert.deepEqual(await page.locator('main .message-sequence').allTextContents(), ['#1', '#2', '#3']);
   const draft = page.getByRole('textbox', { name: 'Message', exact: true });
   assert.equal(await page.locator('#workspace-details').isVisible(), false, 'details initially closed');
   await snapshot('dm-desktop');
@@ -85,7 +91,7 @@ try {
     await page.setViewportSize({ width, height: 1000 });
     await snapshot(`chat-${width}`);
     assert.equal(await page.locator('.plaintext-warning').isVisible(), true);
-    await page.getByRole('button', { name: 'Workspace details', exact: true }).last().click();
+    await openWorkspaceDetails(page);
     assert.equal(await page.locator('#workspace-details').isVisible(), true);
     const activity = page.getByRole('button', { name: 'Your activity', exact: true });
     if (await activity.getAttribute('aria-expanded') !== 'true') await activity.click();
@@ -96,6 +102,7 @@ try {
     assert.equal(await draft.inputValue(), 'Keep this draft');
     await page.getByRole('button', { name: 'Sessions', exact: true }).click();
     await page.getByRole('heading', { name: 'Account sessions', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'End this session and log out' }).waitFor();
     await snapshot(`sessions-${width}`);
     await page.getByRole('button', { name: 'Close sessions' }).click();
     assert.equal(await draft.inputValue(), 'Keep this draft');
@@ -124,7 +131,8 @@ try {
   await page.getByRole('button', { name: 'End this session and log out' }).click();
   await page.getByRole('button', { name: 'Log in', exact: true }).waitFor();
   assert.deepEqual(pageErrors, [], 'no uncaught browser errors');
-  writeFileSync(path.join(artifact, 'result.json'), JSON.stringify({ result: 'PASS', scope: 'UI-only; synthetic HTTP fixtures, not backend evidence', measurements, checks: ['filter', 'send', 'details controls at all sizes', 'draft retention', 'visible focus', 'session close and self revoke', 'conversation draft reset', '200% equivalent CSS reflow'], pageErrors }, null, 2));
+  assert.equal(git(['rev-parse', 'HEAD']), source.head, 'candidate unchanged during acceptance');
+  writeFileSync(path.join(artifact, 'result.json'), JSON.stringify({ result: 'PASS', source, scope: 'UI-only; synthetic HTTP fixtures, not backend evidence', measurements, checks: ['filter', 'send', 'details controls at all sizes', 'draft retention', 'visible focus', 'session close and self revoke', 'conversation draft reset', '200% equivalent CSS reflow', 'shared real-driver navigation', 'sequence and heading selectors'], pageErrors }, null, 2));
   console.log(`PASS: Stitch UI interaction and responsive acceptance. Artifacts: ${artifact}`);
 } catch (error) {
   writeFileSync(path.join(artifact, 'failure.txt'), String(error.stack ?? error));

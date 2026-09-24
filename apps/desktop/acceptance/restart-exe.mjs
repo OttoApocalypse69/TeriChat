@@ -141,7 +141,7 @@ async function login(page, handle) {
 async function openDm(page, handle) {
   await page.getByPlaceholder('peer handle → open DM').fill(handle);
   await page.getByRole('button', { name: 'Open DM', exact: true }).click();
-  await page.locator('main').getByText(handle, { exact: true }).waitFor({ timeout: 30000 });
+  await page.locator('main').getByRole('heading', { name: handle, exact: true }).waitFor({ timeout: 30000 });
   await page.getByPlaceholder(COMPOSER).waitFor({ timeout: 30000 });
 }
 async function send(page, text) {
@@ -156,7 +156,7 @@ async function bodies(page, expected) {
     60000,
   );
   assert.deepEqual(await page.locator('main p.whitespace-pre-wrap').allTextContents(), expected);
-  const seqs = await page.locator('main p.text-\\[10px\\]').allTextContents();
+  const seqs = await page.locator('main .message-sequence').allTextContents();
   assert.deepEqual(
     seqs.map((s) => Number(s.match(/^#(\d+)/)?.[1])),
     expected.map((_, i) => i + 1),
