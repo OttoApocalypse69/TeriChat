@@ -1,0 +1,269 @@
+.session-panel {
+  width: 100%;
+  max-width: 840px;
+  min-width: 0;
+  margin-inline: auto;
+  padding: clamp(20px, 4vw, 48px);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.session-panel__header {
+  margin-bottom: 32px;
+}
+
+.session-panel__eyebrow {
+  margin: 0 0 9px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.session-panel__eyebrow span {
+  margin-inline: 8px;
+  color: var(--text-muted);
+}
+
+.session-panel__title {
+  margin: 0 0 8px;
+  font-size: clamp(22px, 3vw, 28px);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  line-height: 1.25;
+}
+
+.session-panel__intro,
+.session-panel__description,
+.session-panel__pagination-note {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.session-panel__section-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.session-panel__section-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.session-panel__section-heading svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.session-panel__description {
+  margin-bottom: 20px;
+  font-size: 12px;
+}
+
+.session-panel__list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-panel__card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-surface);
+}
+
+.session-panel__card--current {
+  border-color: rgba(138, 79, 255, 0.4);
+}
+
+.session-panel__card-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.session-panel__card-heading h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.session-panel__session-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+.session-panel__session-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.session-panel__card--current .session-panel__session-icon {
+  background: var(--brand-soft);
+  color: #c4a5ff;
+}
+
+.session-panel__current-badge {
+  margin-left: auto;
+  padding: 3px 9px;
+  border: 1px solid rgba(138, 79, 255, 0.3);
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: #d7c4ff;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.session-panel__identifiers {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 16px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-panel__identifiers p,
+.session-panel__timestamps p {
+  min-width: 0;
+  margin: 0;
+}
+
+.session-panel__identifiers code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: inherit;
+}
+
+.session-panel__card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.session-panel__timestamps {
+  display: grid;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-panel__timestamps span {
+  color: var(--text-primary);
+}
+
+.session-panel__button {
+  min-height: 36px;
+  max-width: 100%;
+  padding: 7px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.session-panel__button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.session-panel__button:focus-visible {
+  outline: 2px solid var(--brand-hover);
+  outline-offset: 3px;
+}
+
+.session-panel__button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.session-panel__button--end {
+  color: #ff9bad;
+}
+
+.session-panel__button--end:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.session-panel__feedback,
+.session-panel__empty {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.session-panel__feedback p {
+  margin: 0 0 10px;
+}
+
+.session-panel__feedback--error {
+  border-color: rgba(244, 63, 94, 0.4);
+  color: var(--text-primary);
+}
+
+.session-panel__empty {
+  padding-block: 28px;
+  border-style: dashed;
+  text-align: center;
+}
+
+.session-panel__pagination-note {
+  margin: 16px 0 12px;
+  font-size: 11px;
+}
+
+@media (max-width: 520px) {
+  .session-panel__card {
+    padding: 16px;
+  }
+
+  .session-panel__card-footer > .session-panel__button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-panel__button {
+    transition: none;
+  }
+}
