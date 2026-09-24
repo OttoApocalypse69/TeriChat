@@ -58,6 +58,12 @@ try {
   const snapshot = async name => {
     const size = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));
     assert.ok(size.scrollWidth <= size.width, `${name}: no horizontal overflow`);
+    if (size.width < 768) {
+      const smallTargets = await page.locator('button, input, select').evaluateAll(elements => elements
+        .filter(element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 && rect.height < 44; })
+        .map(element => ({ label: element.getAttribute('aria-label') ?? element.textContent, height: element.getBoundingClientRect().height })));
+      assert.deepEqual(smallTargets, [], `${name}: mobile controls have 44px minimum height`);
+    }
     measurements.push({ name, ...size });
     await page.screenshot({ path: path.join(artifact, `${name}.png`) });
   };
