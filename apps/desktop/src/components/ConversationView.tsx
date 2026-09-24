@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { decodeOpaqueText } from '../lib/api';
 import type { GatewayStatus } from '../lib/gateway';
 import {
@@ -25,6 +25,7 @@ interface Props {
   onSend: (text: string) => Promise<void>;
   title?: string | null;
   isActivePane?: boolean;
+  headerActions?: ReactNode;
 }
 
 export default function ConversationView({
@@ -38,6 +39,7 @@ export default function ConversationView({
   onSend,
   title,
   isActivePane = true,
+  headerActions,
 }: Props) {
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
@@ -91,10 +93,15 @@ export default function ConversationView({
 
   if (!conversation) {
     return (
+      <>
+      {headerActions}
       <div className="conversation-empty flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-zinc-400">
+        <span className="empty-mark" aria-hidden>UC</span>
+        <span className="eyebrow">A little closer, wherever you are</span>
         <span className="text-lg font-semibold text-zinc-100">Your conversations, in one place</span>
         <span>Select a conversation or open a DM to start chatting.</span>
       </div>
+      </>
     );
   }
 
@@ -107,14 +114,14 @@ export default function ConversationView({
       <div className="conversation-header flex shrink-0 items-center gap-3 border-b border-zinc-800 px-5 py-4">
         <span
           aria-hidden
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold text-zinc-200"
+          className="conversation-avatar"
         >
-          {avatarInitial(conversation)}
+          {conversation.kind === 'channel' ? '#' : avatarInitial(conversation)}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-semibold text-zinc-100">
+          <h2 className="block truncate text-lg font-semibold text-zinc-100">
             {heading}
-          </span>
+          </h2>
           {sub && (
             <span className="block truncate text-[11px] text-zinc-500">
               {sub}
@@ -124,11 +131,17 @@ export default function ConversationView({
         <span className="ml-auto shrink-0">
           <ConnectionIndicator status={status} />
         </span>
+        {headerActions}
       </div>
       <p className="plaintext-warning shrink-0 border-b border-amber-900/40 bg-amber-950/20 px-5 py-2 text-xs leading-relaxed text-amber-200/90">
         Alpha demo: envelopes carry demo plaintext — not end-to-end encrypted.
       </p>
       <div ref={scrollRef} className="message-history min-h-0 flex-1 space-y-3 overflow-y-auto p-5" aria-label="Message history">
+        <div className="conversation-intro">
+          <span className="intro-symbol" aria-hidden>{conversation.kind === 'channel' ? '#' : '@'}</span>
+          <h3>{conversation.kind === 'channel' ? `Welcome to ${heading}` : `Your conversation with ${heading}`}</h3>
+          <p>{conversation.kind === 'channel' ? 'A shared space for this workspace.' : 'Your direct messages, together in one place.'}</p>
+        </div>
         {loading && <p className="text-sm text-zinc-400">Loading history…</p>}
         {messages.map((m) => {
           const divider =
@@ -138,26 +151,22 @@ export default function ConversationView({
           return (
             <div key={m.id}>
               {divider && (
-                <p className="py-1 text-center text-[11px] font-medium text-zinc-500">
-                  — {divider} —
+                <p className="day-divider">
+                  <span>{divider}</span>
                 </p>
               )}
-              <div
-                className={`message-bubble max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed ${
-                  mine
-                    ? 'ml-auto bg-emerald-900 text-emerald-50'
-                    : 'bg-zinc-800 text-zinc-100'
-                }`}
-              >
-                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+              <div className={`message-row ${mine ? 'message-row-own' : ''}`}>
+                <span className="message-avatar" aria-hidden>{mine ? 'Y' : senderLabel(meId, m.sender_id, conversation).slice(0, 1).toUpperCase()}</span>
+                <div className="message-bubble">
+                <p className="message-meta">
+                  <strong>{senderLabel(meId, m.sender_id, conversation)}</strong>
+                  <time dateTime={m.sent_at ?? undefined}>{formatClockTime(m.sent_at)}</time>
+                  <span className="message-sequence">#{m.seq}</span>
+                </p>
+                <p className="message-text whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                   {decodeOpaqueText(m.ciphertext_b64)}
                 </p>
-                <p className="message-meta mt-2 text-[10px] text-zinc-300">
-                  #{m.seq} {senderLabel(meId, m.sender_id, conversation)}
-                  {formatClockTime(m.sent_at)
-                    ? ` · ${formatClockTime(m.sent_at)}`
-                    : ''}
-                </p>
+                </div>
               </div>
             </div>
           );
@@ -170,10 +179,11 @@ export default function ConversationView({
       </div>
       {error && <p role="alert" className="px-4 py-1 text-sm text-red-400">{error}</p>}
       {sendError && <p role="alert" className="px-4 py-1 text-sm text-red-400">{sendError}</p>}
-      <form onSubmit={submit} className="message-composer flex shrink-0 gap-2 border-t border-zinc-800 p-4">
+      <form onSubmit={submit} className="message-composer">
+        <div className="composer-field">
         <input
           aria-label="Message"
-          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-sm"
+          className="min-w-0 flex-1"
           placeholder="Message (demo plaintext → opaque envelope)"
           value={draft}
           onChange={(e) => {
@@ -184,10 +194,12 @@ export default function ConversationView({
         <button
           type="submit"
           disabled={sending || !draft.trim()}
-          className="shrink-0 rounded-lg bg-emerald-400 px-4 py-3 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+          className="send-button disabled:opacity-40"
         >
           {sending ? '…' : 'Send'}
         </button>
+        </div>
+        <p className="composer-hint"><span>Enter to send</span><span>Alpha demo · plaintext messages</span></p>
       </form>
     </div>
   );

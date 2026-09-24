@@ -88,6 +88,7 @@ function AuthenticatedApp({ session, onLogout }: {
     if (sessionsOpen) sessionsRegion.current?.focus();
   }, [sessionsOpen]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [navigationQuery, setNavigationQuery] = useState('');
   // Presentation only: hiding a pane must not unmount its composer or panels.
   const [pane, setPane] = useState<'navigation' | 'conversation' | 'details'>('navigation');
   const navigationRef = useRef<HTMLElement>(null);
@@ -503,7 +504,7 @@ function AuthenticatedApp({ session, onLogout }: {
   }, [selectedId]);
 
   return (
-    <div className="chat-shell flex h-full flex-col bg-zinc-950 text-zinc-100" data-pane={pane}>
+    <div className="chat-shell flex h-full flex-col bg-zinc-950 text-zinc-100" data-pane={pane} data-sessions-open={sessionsOpen === true}>
       <header className="app-header flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
         <span className="min-w-0 text-sm font-semibold">
           <span className="brand-name">UnknownChat</span> <span className="account-handle block truncate text-xs font-normal text-zinc-400">@{handle}</span>
@@ -529,26 +530,33 @@ function AuthenticatedApp({ session, onLogout }: {
         <SessionPanel api={api} onSessionEnded={sessionEnded} />
       </div>}
       <div className="chat-layout flex min-h-0 flex-1">
+        <nav className="workspace-rail" aria-label="Workspace switcher">
+          <button type="button" className="rail-home" title="Conversations" aria-label="Show conversations" onClick={() => setPane('navigation')}>UC</button>
+          <WorkspaceList
+            workspaces={wsStore.workspaces}
+            selectedWorkspaceId={selectedWorkspaceId}
+            loading={wsLoading}
+            error={wsError}
+            onSelect={id => { selectWorkspace(id); setPane('navigation'); }}
+            onRetry={() => void refreshWorkspaces()}
+          />
+          <span className="rail-version" title="Alpha demo">α0</span>
+        </nav>
         <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation flex shrink-0 flex-col border-r border-zinc-800">
-          <h1 className="px-4 pb-2 pt-4 text-lg font-semibold">Conversations</h1>
+          <div className="navigation-heading">
+            <span className="eyebrow">Your space to connect</span>
+            <h1>Conversations</h1>
+          </div>
+          {wsError && <p role="alert" className="mx-4 mb-3 text-xs text-red-300">{wsError}</p>}
+          <label className="navigation-search">
+            <span aria-hidden>⌕</span>
+            <input type="search" aria-label="Filter conversations and channels" placeholder="Find a conversation…" value={navigationQuery} onChange={event => setNavigationQuery(event.target.value)} />
+          </label>
           {selectedWorkspace && <button type="button" className="details-toggle nav-action mx-3 mb-2" onClick={() => setPane('details')}>Workspace details</button>}
           {selected && <button type="button" className="mobile-only nav-action mx-3 mb-2" onClick={() => setPane('conversation')}>Return to conversation</button>}
           <div className="shrink-0">
-            <WorkspaceList
-              workspaces={wsStore.workspaces}
-              selectedWorkspaceId={selectedWorkspaceId}
-              loading={wsLoading}
-              error={wsError}
-              onSelect={selectWorkspace}
-              onRetry={() => void refreshWorkspaces()}
-            />
-          </div>
-          <CreateWorkspace onCreate={createWorkspace} />
-          <div className="shrink-0 border-b border-zinc-800">
-            <JoinWorkspace onJoin={joinByCode} />
-          </div>
-          <div className="shrink-0">
             <ChannelList
+              filter={navigationQuery}
               key={selectedWorkspaceId ?? 'no-workspace'}
               workspaceName={selectedWorkspace?.name ?? null}
               channels={channels}
@@ -561,6 +569,7 @@ function AuthenticatedApp({ session, onLogout }: {
           </div>
           <div className="shrink-0">
             <ConversationList
+              filter={navigationQuery}
               conversations={dmConversations}
               messagesByConversation={store.messages}
               selectedId={selectedId}
@@ -568,13 +577,22 @@ function AuthenticatedApp({ session, onLogout }: {
               onOpenDm={openDm}
             />
           </div>
+          <div className="workspace-actions">
+            <h2 className="eyebrow">Make room for your people</h2>
+            <CreateWorkspace onCreate={createWorkspace} />
+            <JoinWorkspace onJoin={joinByCode} />
+          </div>
+          <div className="navigation-account">
+            <span className="account-avatar" aria-hidden>{handle.slice(0, 1).toUpperCase()}</span>
+            <span className="min-w-0"><strong className="block truncate">@{handle}</strong><span className="text-xs text-zinc-400">Alpha 0 · It sends bro</span></span>
+          </div>
         </aside>
         <main ref={conversationRef} tabIndex={-1} aria-label="Conversation" className="chat-main min-w-0 flex-1" key={selectedId ?? 'none'}>
-          <div className="pane-toolbar">
+          <ConversationView
+            headerActions={<div className="pane-toolbar">
             <button type="button" className="mobile-only nav-action" onClick={() => setPane('navigation')}>← Back to conversations</button>
             {selectedWorkspace && <button type="button" className="details-toggle nav-action" aria-controls="workspace-details" onClick={() => setPane('details')}>Workspace details</button>}
-          </div>
-          <ConversationView
+          </div>}
             isActivePane={pane === 'conversation'}
             conversation={selected}
             messages={messages}

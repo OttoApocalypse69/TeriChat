@@ -253,6 +253,7 @@
 }
 
 @media (max-width: 520px) {
+  .session-panel__button { min-height: 44px; }
   .session-panel__card {
     padding: 16px;
   }
