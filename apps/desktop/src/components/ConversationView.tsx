@@ -85,10 +85,11 @@ export default function ConversationView({
   const pendingTail = useRef(false);
   // Opening with an unread backlog lands on the NEW divider, not past it;
   // after that, only a reader already at the end is carried to new messages.
-  const dividerPlaced = useRef<string | null>(null);
+  const dividerPlaced = useRef<string | null>(null); // id of the placed divider's message
   const stickToTail = useRef(true);
   useLayoutEffect(() => {
     stickToTail.current = true;
+    dividerPlaced.current = null;
   }, [conversationId]);
   useLayoutEffect(() => {
     pendingTail.current = true;
@@ -99,14 +100,16 @@ export default function ConversationView({
     const atTail = () => el.scrollHeight - el.scrollTop - el.clientHeight <= TAIL_SLACK_PX;
     const followPendingTail = () => {
       if (pendingTail.current && el.clientHeight > 0) {
-        const divider = firstNewId && dividerPlaced.current !== conversationId
+        // Each distinct divider (on open, or on return to a hidden pane) is
+        // positioned once; afterwards only a reader at the end is carried.
+        const divider = firstNewId && dividerPlaced.current !== firstNewId
           ? el.querySelector<HTMLElement>('.new-divider')
           : null;
         if (divider) {
           el.scrollTop += divider.getBoundingClientRect().top - el.getBoundingClientRect().top - DIVIDER_MARGIN_PX;
-          dividerPlaced.current = conversationId;
+          dividerPlaced.current = firstNewId;
           stickToTail.current = atTail();
-        } else if (dividerPlaced.current !== conversationId || stickToTail.current) {
+        } else if (dividerPlaced.current === null || stickToTail.current) {
           el.scrollTop = el.scrollHeight;
         }
         pendingTail.current = false;

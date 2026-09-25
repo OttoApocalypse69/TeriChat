@@ -623,3 +623,45 @@ it('drops the channels of a left workspace from the unread total', async () => {
   expect(document.title).not.toMatch(/^\(/);
 });
 
+it('gives messages that arrived while the pane was hidden a fresh NEW divider', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  vi.spyOn(ApiClient.prototype, 'listSessions').mockResolvedValue({ sessions: [], next_cursor: null });
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true);
+  await login(); await click('Peer'); await flush();
+  expect(markRead).toHaveBeenLastCalledWith('dm', 2);
+
+  // The sessions overlay hides the whole layout while a new message lands.
+  await click('Sessions');
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2), fromPeer(3)]);
+  await flush(() => gateways[0].onEvent(event(3)));
+  await flush();
+  expect(markRead).not.toHaveBeenCalledWith('dm', 3);
+
+  await click('Close sessions');
+  await flush();
+  const divider = host.querySelector('main .new-divider');
+  expect(divider?.nextElementSibling?.querySelector('.message-sequence')?.textContent).toBe('#3');
+});
+
+it('retries a read whose request stalled once the stall times out', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockReturnValue(new Promise(() => {}));
+  visibility(true);
+  await login();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    await click('Peer'); await flush();
+    expect(markRead).toHaveBeenCalledTimes(1);
+    await flush(() => window.dispatchEvent(new Event('focus')));
+    expect(markRead).toHaveBeenCalledTimes(1);
+    await flush(() => { vi.advanceTimersByTime(15_000); });
+    await flush(() => window.dispatchEvent(new Event('focus')));
+    expect(markRead).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+

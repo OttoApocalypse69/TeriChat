@@ -50,6 +50,24 @@ interface Session {
   handle: string;
 }
 
+/** Tracks a CSS media query; environments without matchMedia count as matching. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => typeof window.matchMedia !== 'function' || window.matchMedia(query).matches);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const list = window.matchMedia(query);
+    const update = () => setMatches(list.matches);
+    update();
+    list.addEventListener('change', update);
+    return () => list.removeEventListener('change', update);
+  }, [query]);
+  return matches;
+}
+
+// A read request that neither succeeds nor fails in this time stops blocking
+// retries for the same position (half-open connection, stalled server).
+const READ_REQUEST_TIMEOUT_MS = 15_000;
+
 export default function App() {
   const loginApi = useMemo(() => new ApiClient(apiBaseUrl()), []);
   const [session, setSession] = useState<Session | null>(null);
@@ -563,15 +581,29 @@ function AuthenticatedApp({ session, onLogout }: {
     .filter(w => wsStore.channelsFor(w.id).some(ch => (unreadByConversation.get(ch.conversation_id) ?? 0) > 0))
     .map(w => w.id));
 
-  // The "new" divider sits where the marker was when the conversation opened,
-  // and only when something was unread then; reading must not move it.
-  // Derived during render (not in an effect) so the divider exists in the
-  // very first commit, before the read effect can run.
-  const [unreadSnapshot, setUnreadSnapshot] = useState<{ id: string | null; seq: number | null }>({ id: null, seq: null });
-  if (unreadSnapshot.id !== selectedId) {
+  // Whether the conversation pane is on screen, by the same rules as the CSS:
+  // phones show one pane, the details pane replaces it below 1200px, and the
+  // sessions overlay hides the whole layout.
+  const wideLayout = useMediaQuery('(min-width: 768px)');
+  const fullLayout = useMediaQuery('(min-width: 1200px)');
+  const conversationShown = !sessionsOpen && (wideLayout
+    ? !(pane === 'details' && !fullLayout)
+    : pane === 'conversation');
+  const [shown, setShown] = useState({ now: conversationShown, epoch: 0 });
+  if (shown.now !== conversationShown) {
+    setShown({ now: conversationShown, epoch: conversationShown ? shown.epoch + 1 : shown.epoch });
+  }
+
+  // The "new" divider sits where the marker was when the conversation was
+  // opened or shown again, and only when something was unread then; reading
+  // must not move it. Derived during render (not in an effect) so the divider
+  // exists in the very first commit, before the read effect can run.
+  const viewKey = `${selectedId ?? ''}:${shown.epoch}`;
+  const [unreadSnapshot, setUnreadSnapshot] = useState<{ key: string | null; seq: number | null }>({ key: null, seq: null });
+  if (unreadSnapshot.key !== viewKey) {
     const seq = selected?.last_read_seq;
     const unread = selectedId ? (unreadByConversation.get(selectedId) ?? 0) : 0;
-    setUnreadSnapshot({ id: selectedId, seq: seq != null && unread > 0 ? seq : null });
+    setUnreadSnapshot({ key: viewKey, seq: seq != null && unread > 0 ? seq : null });
   }
 
   // Whether the history is scrolled to its end. Written synchronously by the
@@ -615,6 +647,12 @@ function AuthenticatedApp({ session, onLogout }: {
     const target = selectedLatestSeq;
     if ((readInFlight.current.get(id) ?? -1) >= target) return;
     readInFlight.current.set(id, target);
+    const release = () => {
+      if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
+    };
+    // A stalled request must not suppress retries forever; a late answer is
+    // still applied (markers are monotonic), it just no longer blocks.
+    const timeout = setTimeout(release, READ_REQUEST_TIMEOUT_MS);
     void api.markRead(id, target).then(marker => {
       if (!live.current) return;
       storeRef.current.setReadMarker(id, marker.last_read_seq, true);
@@ -622,7 +660,8 @@ function AuthenticatedApp({ session, onLogout }: {
     }, () => {
       // Unconfirmed: the next message, focus change or selection retries.
     }).finally(() => {
-      if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
+      clearTimeout(timeout);
+      release();
     });
   }, [api, bump, selected, selectedLatestSeq, markersSupported, sessionsOpen, pane, attentionTick, tailTick]);
 
@@ -759,7 +798,7 @@ function AuthenticatedApp({ session, onLogout }: {
             error={error}
             onSend={send}
             title={selected?.kind === 'channel' ? channelTitle : null}
-            unreadAfterSeq={unreadSnapshot.id === selectedId ? unreadSnapshot.seq : null}
+            unreadAfterSeq={unreadSnapshot.key === viewKey ? unreadSnapshot.seq : null}
             onTailVisibleChange={handleTailVisible}
           />
         </main>
