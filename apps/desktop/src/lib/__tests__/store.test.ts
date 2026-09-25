@@ -233,6 +233,9 @@ describe('group rosters', () => {
   it('parses member handles: separators, @ prefixes, duplicates and self', () => {
     expect(parseMemberHandles(' @ana, bo  cy,,@ana\n@@teri ', 'teri')).toEqual(['ana', 'bo', 'cy']);
     expect(parseMemberHandles(' , @ ', 'teri')).toEqual([]);
-    expect(parseMemberHandles('Ana ana')).toEqual(['Ana', 'ana']);
+    // Handles are case-insensitive server-side: one person, and never yourself.
+    expect(parseMemberHandles('Ana ana ANA')).toEqual(['ana']);
+    expect(parseMemberHandles('@TERI, bo', 'teri')).toEqual(['bo']);
+    expect(parseMemberHandles('@teri', 'Teri')).toEqual([]);
   });
 });

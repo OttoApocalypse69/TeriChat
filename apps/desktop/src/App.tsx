@@ -104,7 +104,11 @@ function AuthenticatedApp({ session, onLogout }: {
     if (pane === 'navigation') (navigationRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]') ?? navigationRef.current)?.focus();
     if (pane === 'details') detailsRef.current?.focus();
   }, [pane, selectedId]);
+  // Bumped on every conversation selection change, so slow async work can
+  // tell whether the user navigated elsewhere while it was pending.
+  const navigationRevision = useRef(0);
   function openConversation(id: string) {
+    navigationRevision.current += 1;
     setSelectedId(id);
     setPane('conversation');
   }
@@ -285,6 +289,11 @@ function AuthenticatedApp({ session, onLogout }: {
       // Snapshot focus at arrival: a DM that lands while the window is
       // unfocused earns one toast after its text loads (see below).
       const wasUnfocused = isWindowUnfocused();
+      // An event for a conversation this client has never listed (a group or
+      // DM someone just created with us) needs the list to name and show it.
+      const eventConversation = gatewayEventInfo(event)?.conversationId;
+      const unknown = eventConversation !== undefined
+        && !storeRef.current.conversations.some(c => c.id === eventConversation);
       const fresh = storeRef.current.applyGatewayEvent(event);
       const replay = fresh ? null : gatewayEventInfo(event);
       // Deduplicate event effects, not an unfinished history fetch.
@@ -319,7 +328,7 @@ function AuthenticatedApp({ session, onLogout }: {
         const conv = storeRef.current.conversations.find(
           c => c.id === info.conversationId,
         );
-        if (conv?.kind === 'dm' && !conv.peer_handle) void refreshConversations();
+        if (unknown || (conv?.kind === 'dm' && !conv.peer_handle)) void refreshConversations();
       }
     };
 
@@ -396,10 +405,13 @@ function AuthenticatedApp({ session, onLogout }: {
   async function createGroup(memberInput: string): Promise<void> {
     const handles = parseMemberHandles(memberInput, handle);
     if (handles.length === 0) throw new Error('Add at least one other person’s handle.');
+    const revision = navigationRevision.current;
     const conv = await api.createGroup(handles);
     if (!live.current) return;
     storeRef.current.addConversation(conv);
-    openConversation(conv.id);
+    // Never yank a user (and their draft) out of a conversation they opened
+    // while the group was being created; the new group is listed either way.
+    if (navigationRevision.current === revision) openConversation(conv.id);
     bump();
     await refreshConversations();
     await refreshHistory(conv.id);
@@ -421,6 +433,7 @@ function AuthenticatedApp({ session, onLogout }: {
       ...wsStoreRef.current.workspaces.filter(workspace => workspace.id !== created.id), created,
     ]);
     wsStoreRef.current.selectWorkspace(created.id);
+    navigationRevision.current += 1;
     setSelectedId(null);
     bump();
     // The discarded initial list may contain other memberships not yet loaded.

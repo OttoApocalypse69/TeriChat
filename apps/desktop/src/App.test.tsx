@@ -450,3 +450,35 @@ it('rejects a group that would contain only the caller without calling the serve
   expect(createGroup).not.toHaveBeenCalled();
   expect(host.querySelector('form[aria-label="New group"] [role="alert"]')?.textContent).toContain('at least one other');
 });
+
+it('lists a slow-to-create group without pulling the user out of a conversation they opened meanwhile', async () => {
+  const pending = deferred<{ id: string; kind: string; members: string[] }>();
+  vi.spyOn(ApiClient.prototype, 'createGroup').mockReturnValue(pending.promise);
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), row('dm2', 'Second')]);
+  await login();
+  await click('New group');
+  await type('handles, comma-separated', 'ana');
+  await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  await click('Second');
+  await type('Message', 'draft typed while the group was pending');
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), row('dm2', 'Second'), { ...row('grp', ''), kind: 'group', peer_handle: null, peer_display_name: null }]);
+  await flush(() => pending.resolve({ id: 'grp', kind: 'group', members: ['a', 'ana'] }));
+  await flush();
+  expect(host.querySelector('main h2')?.textContent).toBe('Second');
+  expect(input('Message').value).toBe('draft typed while the group was pending');
+  expect([...host.querySelectorAll('.conversation-row')].some(r => r.textContent?.includes('Group'))).toBe(true);
+});
+
+it('refreshes the list when a message arrives for a conversation this client never listed', async () => {
+  await login();
+  const calls = vi.mocked(ApiClient.prototype.listConversations).mock.calls.length;
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), {
+    ...row('grp', ''), kind: 'group', members: ['a', 'u1'], peer_handle: null, peer_display_name: null,
+    member_profiles: [{ user_id: 'a', handle: 'a', display_name: '' }, { user_id: 'u1', handle: 'ana', display_name: 'Ana' }],
+  }]);
+  const created: GatewayOutboxEvent = { id: 'e-grp', topic: 'message.created', payload: { conversation_id: 'grp', data: { message_id: 'g1', seq: 1 } } };
+  await flush(() => gateways[0].onEvent(created));
+  await flush();
+  expect(vi.mocked(ApiClient.prototype.listConversations).mock.calls.length).toBeGreaterThan(calls);
+  expect([...host.querySelectorAll('.conversation-row')].map(r => r.textContent).join(' ')).toContain('Ana');
+});

@@ -170,9 +170,19 @@ async fn create_group(
             "group needs at least one member".to_owned(),
         ));
     }
+    // Handles are case-insensitive, so `Ana`/`ana`/`@CREATOR` spellings can
+    // resolve to the same account: dedupe by id and never count the creator.
     let mut members = Vec::with_capacity(body.member_handles.len());
     for handle in &body.member_handles {
-        members.push(auth::user_id_by_handle(pool, handle).await?);
+        let id = auth::user_id_by_handle(pool, handle).await?;
+        if id != bearer.user_id() && !members.contains(&id) {
+            members.push(id);
+        }
+    }
+    if members.is_empty() {
+        return Err(AppError::BadRequest(
+            "group needs at least one other member".to_owned(),
+        ));
     }
     let conversation =
         messaging::create_conversation(pool, bearer.user_id(), "group", &members).await?;
