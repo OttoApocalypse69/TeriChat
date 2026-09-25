@@ -55,6 +55,18 @@ export function unreadCount(
   return fromOthers + missing;
 }
 
+/**
+ * The highest seq that can honestly be marked read: loaded history must be
+ * gapless from the current marker up to it. A later loaded message (say, the
+ * caller's own reply) never carries the marker across an unloaded one.
+ */
+export function readableThrough(messages: ChatMessage[] | undefined, marker: number): number {
+  const loaded = new Set((messages ?? []).map(m => m.seq));
+  let through = marker;
+  while (loaded.has(through + 1)) through += 1;
+  return through;
+}
+
 /** Badge text: exact up to 99. */
 export function unreadBadge(count: number): string {
   return count > 99 ? '99+' : String(count);

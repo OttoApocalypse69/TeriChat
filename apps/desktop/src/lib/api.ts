@@ -225,6 +225,7 @@ export class ApiClient {
     method: string,
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
@@ -234,6 +235,7 @@ export class ApiClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
     if (!res.ok) throw await parseError(res);
     // Add-member / ban return 201 with an empty body, and several member
@@ -298,8 +300,8 @@ export class ApiClient {
   }
 
   /** Advance the caller's private read marker (never moves backwards). */
-  markRead(conversationId: string, seq: number): Promise<ReadMarkerBody> {
-    return this.req<ReadMarkerBody>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/read`, { seq });
+  markRead(conversationId: string, seq: number, signal?: AbortSignal): Promise<ReadMarkerBody> {
+    return this.req<ReadMarkerBody>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/read`, { seq }, signal);
   }
 
   /** Caller-scoped conversation list with DM peers + last positions. */
