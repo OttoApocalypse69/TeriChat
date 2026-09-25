@@ -264,6 +264,13 @@ describe('private unread state', () => {
     expect(unreadCount(conv(), undefined, 'me')).toBe(3);
   });
 
+  it('keeps a gap below your own loaded reply unread', () => {
+    // Peer's seq 3 failed to load; the caller's reply (seq 4) did.
+    const loaded = [msg(1), msg(2), msg(4, 'me')];
+    expect(unreadCount(conv({ last_seq: 4 }), loaded, 'me')).toBe(1);
+    expect(unreadCount(conv({ last_seq: 4, last_read_seq: 4 }), loaded, 'me')).toBe(0);
+  });
+
   it('never guesses when the server sent no marker', () => {
     expect(unreadCount(conv({ last_read_seq: undefined }), five, 'me')).toBe(0);
     expect(unreadCount(conv({ last_read_seq: null }), five, 'me')).toBe(0);

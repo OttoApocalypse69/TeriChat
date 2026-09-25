@@ -228,12 +228,30 @@ function AuthenticatedApp({ session, onLogout }: {
     [api, bump],
   );
 
+  // Channel access can end server-side (kick, ban): the server drops the
+  // participation, so the channel disappears from the next list. Each row
+  // remembers the latest list request that confirmed it; only the newest
+  // request's answer may prune, and only rows confirmed before it was issued.
+  const listRevision = useRef(0);
+  const confirmedAt = useRef(new Map<string, number>());
   const refreshConversations = useCallback(async () => {
     if (!live.current) return;
+    const revision = ++listRevision.current;
     try {
       const rows = await api.listConversations();
       if (!live.current) return;
-      for (const row of rows) storeRef.current.addConversation(row);
+      for (const row of rows) {
+        storeRef.current.addConversation(row);
+        confirmedAt.current.set(row.id, Math.max(confirmedAt.current.get(row.id) ?? 0, revision));
+      }
+      if (revision === listRevision.current) {
+        const listed = new Set(rows.map(row => row.id));
+        const revoked = storeRef.current.conversations
+          .filter(c => c.kind === 'channel' && !listed.has(c.id) && (confirmedAt.current.get(c.id) ?? Infinity) < revision)
+          .map(c => c.id);
+        storeRef.current.removeConversations(revoked);
+        for (const id of revoked) confirmedAt.current.delete(id);
+      }
       bump();
     } catch (err) {
       if (live.current) setError(err instanceof Error ? err.message : 'conversations failed');
@@ -655,6 +673,8 @@ function AuthenticatedApp({ session, onLogout }: {
     const timeout = setTimeout(release, READ_REQUEST_TIMEOUT_MS);
     void api.markRead(id, target).then(marker => {
       if (!live.current) return;
+      // The server just proved membership; a list issued earlier must not prune it.
+      confirmedAt.current.set(id, listRevision.current);
       storeRef.current.setReadMarker(id, marker.last_read_seq, true);
       bump();
     }, () => {

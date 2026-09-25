@@ -36,8 +36,10 @@ export interface ChatConversation {
 
 /**
  * Messages from other people after the caller's read marker. Unknown markers
- * (older servers) count as zero rather than guessing. Positions the server
- * reported but history has not loaded yet still count.
+ * (older servers) count as zero rather than guessing. Every position after
+ * the marker that history has not loaded still counts, including gaps below
+ * a loaded message (e.g. a peer's message whose fetch failed just before
+ * the caller's own reply loaded).
  */
 export function unreadCount(
   conv: ChatConversation,
@@ -46,11 +48,11 @@ export function unreadCount(
 ): number {
   const read = conv.last_read_seq;
   if (read == null) return 0;
-  const loaded = messages ?? [];
-  const maxLoaded = loaded.reduce((max, m) => Math.max(max, m.seq), 0);
-  const fromOthers = loaded.filter(m => m.seq > read && m.sender_id !== meId).length;
-  const unloaded = Math.max(0, (conv.last_seq ?? 0) - Math.max(maxLoaded, read));
-  return fromOthers + unloaded;
+  const after = (messages ?? []).filter(m => m.seq > read);
+  const latest = after.reduce((max, m) => Math.max(max, m.seq), Math.max(conv.last_seq ?? 0, read));
+  const fromOthers = after.filter(m => m.sender_id !== meId).length;
+  const missing = Math.max(0, latest - read - new Set(after.map(m => m.seq)).size);
+  return fromOthers + missing;
 }
 
 /** Badge text: exact up to 99. */

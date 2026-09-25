@@ -665,3 +665,26 @@ it('retries a read whose request stalled once the stall times out', async () => 
   }
 });
 
+const listedChannel = { id: 'old-channel-conv', kind: 'channel', members: [], peer_handle: null, peer_display_name: null, last_seq: 2, last_sent_at: null, last_read_seq: 0 };
+
+it('prunes a channel the server stopped listing (remote kick or ban) on the next refresh', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }, listedChannel]);
+  await login();
+  expect(document.title).toMatch(/^\(2\)/);
+  // Removed elsewhere: the reconnect's list no longer carries the channel.
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }]);
+  await flush(() => gateways[0].onStatus('connected'));
+  await flush();
+  expect(document.title).not.toMatch(/^\(/);
+});
+
+it('keeps a channel opened this session that no list has carried yet', async () => {
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.mocked(ApiClient.prototype.listChannels).mockResolvedValue([channel('general')]);
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }]);
+  await login(); await click('general');
+  await flush(() => gateways[0].onStatus('connected'));
+  await flush();
+  expect(host.querySelector('main h2')?.textContent).toBe('#general');
+});
+
