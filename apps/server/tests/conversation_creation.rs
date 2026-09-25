@@ -448,3 +448,65 @@ async fn http_group_list_carries_member_profiles_not_channel_rosters() {
     assert_eq!(row(channel.id)["member_profiles"], serde_json::json!([]));
     f.close().await;
 }
+
+#[tokio::test]
+async fn http_group_creation_dedupes_case_variants_and_rejects_self_only() {
+    let f = Fixture::new().await;
+    let (a, a_handle, token) = f.user().await;
+    let (b, b_handle, _) = f.user().await;
+    let create = |handles: serde_json::Value| {
+        let app = f.router();
+        let token = token.clone();
+        async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/conversations")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"member_handles": handles}).to_string(),
+                ))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    // Only the creator, spelled differently: rejected, and nothing is created.
+    let (status, _) = create(serde_json::json!([
+        a_handle.to_uppercase(),
+        format!("  {a_handle} ")
+    ]))
+    .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    let groups: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE kind = 'group'")
+        .fetch_one(&f.observer)
+        .await
+        .unwrap();
+    assert_eq!(groups, 0);
+
+    // Case variants of one member collapse to a single id; the creator is added once.
+    let (status, body) = create(serde_json::json!([
+        b_handle,
+        b_handle.to_uppercase(),
+        a_handle
+    ]))
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    let mut members: Vec<Uuid> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().parse().unwrap())
+        .collect();
+    members.sort();
+    let mut expected = vec![a, b];
+    expected.sort();
+    assert_eq!(members, expected);
+    f.close().await;
+}

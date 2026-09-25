@@ -185,12 +185,14 @@ export function memberProfile(conv: ChatConversation | null, userId: string): Me
 /**
  * Parse free-form group member input ("@ana, bo  cy") into unique handles,
  * dropping the caller's own handle (the server adds the creator anyway).
+ * Handles are case-insensitive server-side, so compare them lowercased.
  */
 export function parseMemberHandles(input: string, ownHandle?: string): string[] {
+  const own = ownHandle?.trim().toLowerCase();
   const seen = new Set<string>();
   for (const raw of input.split(/[\s,]+/)) {
-    const handle = raw.replace(/^@+/, '');
-    if (handle && handle !== ownHandle) seen.add(handle);
+    const handle = raw.replace(/^@+/, '').toLowerCase();
+    if (handle && handle !== own) seen.add(handle);
   }
   return [...seen];
 }
