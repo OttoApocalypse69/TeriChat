@@ -14,6 +14,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::collections::HashSet;
+
 use crate::auth;
 use crate::errors::AppError;
 use crate::messaging;
@@ -63,6 +65,15 @@ struct ConversationSummaryBody {
     peer_display_name: Option<String>,
     last_seq: Option<i64>,
     last_sent_at: Option<DateTime<Utc>>,
+    /// `dm`/`group` rosters so clients can name senders; empty for channels.
+    member_profiles: Vec<MemberProfileBody>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemberProfileBody {
+    user_id: Uuid,
+    handle: String,
+    display_name: String,
 }
 
 impl From<messaging::ConversationSummary> for ConversationSummaryBody {
@@ -75,6 +86,15 @@ impl From<messaging::ConversationSummary> for ConversationSummaryBody {
             peer_display_name: row.peer_display_name,
             last_seq: row.last_seq,
             last_sent_at: row.last_sent_at,
+            member_profiles: row
+                .member_profiles
+                .into_iter()
+                .map(|profile| MemberProfileBody {
+                    user_id: profile.user_id,
+                    handle: profile.handle,
+                    display_name: profile.display_name,
+                })
+                .collect(),
         }
     }
 }
@@ -141,20 +161,37 @@ async fn create_dm(
     ))
 }
 
+/// Other members a single group-creation request may name. Matches the
+/// client's `MAX_GROUP_MEMBERS`; a group DM is small, not a workspace.
+const MAX_GROUP_HANDLES: usize = 50;
+
 async fn create_group(
     State(state): State<AppState>,
     bearer: Bearer,
     Json(body): Json<GroupBody>,
 ) -> Result<(StatusCode, Json<ConversationBody>), AppError> {
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
-    if body.member_handles.is_empty() {
-        return Err(AppError::BadRequest(
-            "group needs at least one member".to_owned(),
-        ));
+    // Bound the work (one lookup per handle) before doing any of it.
+    if body.member_handles.len() > MAX_GROUP_HANDLES {
+        return Err(AppError::BadRequest(format!(
+            "a group can start with at most {MAX_GROUP_HANDLES} other members"
+        )));
     }
+    // Handles are case-insensitive, so `Ana`/`ana`/`@CREATOR` spellings can
+    // resolve to the same account: dedupe by id and never count the creator.
+    let mut seen = HashSet::with_capacity(body.member_handles.len());
     let mut members = Vec::with_capacity(body.member_handles.len());
     for handle in &body.member_handles {
-        members.push(auth::user_id_by_handle(pool, handle).await?);
+        let id = auth::user_id_by_handle(pool, handle).await?;
+        if id != bearer.user_id() && seen.insert(id) {
+            members.push(id);
+        }
+    }
+    // A group DM has 3+ participants; two people talk in a DM.
+    if members.len() < 2 {
+        return Err(AppError::BadRequest(
+            "a group needs at least two other members; use a DM for one".to_owned(),
+        ));
     }
     let conversation =
         messaging::create_conversation(pool, bearer.user_id(), "group", &members).await?;

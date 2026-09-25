@@ -8,11 +8,12 @@ import {
   dayKey,
   dayLabel,
   formatClockTime,
+  memberProfile,
   senderLabel,
   type ChatConversation,
   type ChatMessage,
 } from '../lib/store';
-import { BrandMark, OpenLockIcon, SendIcon } from './icons';
+import { BrandMark, OpenLockIcon, PeopleIcon, SendIcon } from './icons';
 
 interface Props {
   conversation: ChatConversation | null;
@@ -114,13 +115,15 @@ export default function ConversationView({
     );
   }
 
-  const heading = title ?? conversationLabel(conversation);
+  const heading = title ?? conversationLabel(conversation, meId);
   const sub = title ? conversation.kind : conversationSublabel(conversation);
   const isChannel = conversation.kind === 'channel';
-  // One colour per person across the list, header and history.
+  const isGroup = conversation.kind === 'group';
+  // One colour per person across the list, header and history: key by handle.
   const personKey = (senderId: string) => senderId === meId
     ? (meHandle ?? meId)
-    : conversation.kind === 'dm' && conversation.peer_handle ? conversation.peer_handle : senderId;
+    : memberProfile(conversation, senderId)?.handle
+      ?? (conversation.kind === 'dm' && conversation.peer_handle ? conversation.peer_handle : senderId);
   const peerKey = conversation.peer_handle ?? conversation.id;
 
   let lastDay = '';
@@ -128,7 +131,8 @@ export default function ConversationView({
     <div className="conversation-view flex min-h-0 flex-1 flex-col">
       <div className="conversation-header">
         <span className="conversation-title">
-          {!isChannel && <span aria-hidden className="avatar avatar-28" style={{ background: avatarGradient(peerKey) }}>{avatarInitial(conversation)}</span>}
+          {isGroup && <span aria-hidden className="tile h-7 w-7"><PeopleIcon size={15} /></span>}
+          {!isChannel && !isGroup && <span aria-hidden className="avatar avatar-28" style={{ background: avatarGradient(peerKey) }}>{avatarInitial(conversation)}</span>}
           <span className="conversation-title-text">
             <h2>
               {/* Channel titles keep their literal "#name" text; the hash is styled as the glyph. */}
@@ -153,9 +157,11 @@ export default function ConversationView({
         <div className="conversation-intro">
           {isChannel
             ? <span className="tile h-10 w-10 font-display text-xl" aria-hidden>#</span>
-            : <span className="avatar h-10 w-10 text-[15px]" aria-hidden style={{ background: avatarGradient(peerKey) }}>{avatarInitial(conversation)}</span>}
-          <h3>{isChannel ? `Welcome to ${heading}` : `Your conversation with ${heading}`}</h3>
-          <p>{isChannel ? 'A shared space for this workspace.' : 'Your direct messages, together in one place.'}</p>
+            : isGroup
+              ? <span className="tile h-10 w-10" aria-hidden><PeopleIcon size={20} /></span>
+              : <span className="avatar h-10 w-10 text-[15px]" aria-hidden style={{ background: avatarGradient(peerKey) }}>{avatarInitial(conversation)}</span>}
+          <h3>{isChannel ? `Welcome to ${heading}` : isGroup ? `Your group with ${heading}` : `Your conversation with ${heading}`}</h3>
+          <p>{isChannel ? 'A shared space for this workspace.' : isGroup ? 'Everyone here sees every message in this group.' : 'Your direct messages, together in one place.'}</p>
         </div>
         {loading && <p className="history-note meta-mono">Loading history…</p>}
         {messages.map((m, index) => {

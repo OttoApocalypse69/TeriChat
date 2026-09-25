@@ -395,3 +395,135 @@ async fn lookup_preserves_historical_records_and_exact_membership() {
     }
     f.close().await;
 }
+
+#[tokio::test]
+async fn http_group_list_carries_member_profiles_not_channel_rosters() {
+    let f = Fixture::new().await;
+    let (a, a_handle, token) = f.user().await;
+    let (b, b_handle, _) = f.user().await;
+    let (c, _, _) = f.user().await;
+    let (dee, dee_handle, _) = f.user().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/conversations")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"member_handles": [b_handle, dee_handle]}).to_string(),
+        ))
+        .unwrap();
+    let response = f.router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let group: Uuid = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let channel = messaging::create_conversation(&f.pool, a, "channel", &[c])
+        .await
+        .unwrap();
+
+    let request = Request::builder()
+        .uri("/v1/conversations")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = f.router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let row = |id: Uuid| {
+        rows.iter()
+            .find(|row| row["id"] == id.to_string())
+            .expect("listed")
+    };
+    let mut profiles = row(group)["member_profiles"].as_array().unwrap().clone();
+    profiles.sort_by_key(|p| p["handle"].as_str().unwrap().to_owned());
+    let mut expected = vec![
+        serde_json::json!({"user_id": a, "handle": a_handle, "display_name": "Synthetic"}),
+        serde_json::json!({"user_id": b, "handle": b_handle, "display_name": "Synthetic"}),
+        serde_json::json!({"user_id": dee, "handle": dee_handle, "display_name": "Synthetic"}),
+    ];
+    expected.sort_by_key(|p| p["handle"].as_str().unwrap().to_owned());
+    assert_eq!(profiles, expected, "exact wire shape the client reads");
+    assert_eq!(row(channel.id)["member_profiles"], serde_json::json!([]));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn http_group_creation_dedupes_case_variants_and_rejects_self_only() {
+    let f = Fixture::new().await;
+    let (a, a_handle, token) = f.user().await;
+    let (b, b_handle, _) = f.user().await;
+    let (c, c_handle, _) = f.user().await;
+    let create = |handles: serde_json::Value| {
+        let app = f.router();
+        let token = token.clone();
+        async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/conversations")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"member_handles": handles}).to_string(),
+                ))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    // Only the creator, spelled differently: rejected, and nothing is created.
+    let (status, _) = create(serde_json::json!([
+        a_handle.to_uppercase(),
+        format!("  {a_handle} ")
+    ]))
+    .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    // One other person (twice, in two spellings) is a DM, not a group DM.
+    let (status, _) = create(serde_json::json!([
+        b_handle,
+        b_handle.to_uppercase(),
+        a_handle
+    ]))
+    .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    // Oversized requests are refused before any handle lookup.
+    let many: Vec<String> = (0..51).map(|i| format!("nobody-{i}")).collect();
+    let (status, body) = create(serde_json::json!(many)).await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert!(body.to_string().contains("at most 50"));
+    let groups: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE kind = 'group'")
+        .fetch_one(&f.observer)
+        .await
+        .unwrap();
+    assert_eq!(groups, 0);
+
+    // Case variants collapse to one id each; the creator is added once.
+    let (status, body) = create(serde_json::json!([
+        b_handle,
+        b_handle.to_uppercase(),
+        c_handle,
+        a_handle
+    ]))
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    let mut members: Vec<Uuid> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().parse().unwrap())
+        .collect();
+    members.sort();
+    let mut expected = vec![a, b, c];
+    expected.sort();
+    assert_eq!(members, expected);
+    f.close().await;
+}

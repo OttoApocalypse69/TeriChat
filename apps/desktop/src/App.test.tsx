@@ -423,3 +423,64 @@ it.each(['Close sessions', 'Escape', 'Sessions'])('completes self-revoke after i
   expect(host.textContent).toContain('Log in'); expect(ApiClient.prototype.logout).not.toHaveBeenCalled();
   expect(ApiClient.prototype.listSessions).toHaveBeenCalledTimes(1);
 });
+
+it('creates a group from handles, then names it from the refreshed roster', async () => {
+  const created = { id: 'grp', kind: 'group', members: ['a', 'u1', 'u2'] };
+  const roster = { ...created, peer_handle: null, peer_display_name: null, last_seq: null, last_sent_at: null,
+    member_profiles: [{ user_id: 'a', handle: 'a', display_name: '' }, { user_id: 'u1', handle: 'ana', display_name: 'Ana' }, { user_id: 'u2', handle: 'bo', display_name: '' }] };
+  const createGroup = vi.spyOn(ApiClient.prototype, 'createGroup').mockResolvedValue(created);
+  await login();
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), roster]);
+  await click('New group');
+  // The caller's own handle and duplicates are dropped before the request.
+  await type('handles, comma-separated', '@ana, bo, a, ana');
+  await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(createGroup).toHaveBeenCalledWith(['ana', 'bo']);
+  expect(host.querySelector('main h2')?.textContent).toBe('Ana, @bo');
+  expect(host.querySelector('.conversation-row[aria-current="page"]')?.textContent).toContain('Ana, @bo');
+  expect(host.querySelector('form[aria-label="New group"]')).toBeNull();
+});
+
+it('rejects groups with fewer than two other people without calling the server', async () => {
+  const createGroup = vi.spyOn(ApiClient.prototype, 'createGroup');
+  await login();
+  await click('New group');
+  for (const members of ['@a', 'ana, a', 'ana, ANA']) {
+    await type('handles, comma-separated', members);
+    await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(host.querySelector('form[aria-label="New group"] [role="alert"]')?.textContent).toContain('at least two other');
+  }
+  expect(createGroup).not.toHaveBeenCalled();
+});
+
+it('lists a slow-to-create group without pulling the user out of a conversation they opened meanwhile', async () => {
+  const pending = deferred<{ id: string; kind: string; members: string[] }>();
+  vi.spyOn(ApiClient.prototype, 'createGroup').mockReturnValue(pending.promise);
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), row('dm2', 'Second')]);
+  await login();
+  await click('New group');
+  await type('handles, comma-separated', 'ana, bo');
+  await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  await click('Second');
+  await type('Message', 'draft typed while the group was pending');
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), row('dm2', 'Second'), { ...row('grp', ''), kind: 'group', peer_handle: null, peer_display_name: null }]);
+  await flush(() => pending.resolve({ id: 'grp', kind: 'group', members: ['a', 'ana'] }));
+  await flush();
+  expect(host.querySelector('main h2')?.textContent).toBe('Second');
+  expect(input('Message').value).toBe('draft typed while the group was pending');
+  expect([...host.querySelectorAll('.conversation-row')].some(r => r.textContent?.includes('Group'))).toBe(true);
+});
+
+it('refreshes the list when a message arrives for a conversation this client never listed', async () => {
+  await login();
+  const calls = vi.mocked(ApiClient.prototype.listConversations).mock.calls.length;
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), {
+    ...row('grp', ''), kind: 'group', members: ['a', 'u1'], peer_handle: null, peer_display_name: null,
+    member_profiles: [{ user_id: 'a', handle: 'a', display_name: '' }, { user_id: 'u1', handle: 'ana', display_name: 'Ana' }],
+  }]);
+  const created: GatewayOutboxEvent = { id: 'e-grp', topic: 'message.created', payload: { conversation_id: 'grp', data: { message_id: 'g1', seq: 1 } } };
+  await flush(() => gateways[0].onEvent(created));
+  await flush();
+  expect(vi.mocked(ApiClient.prototype.listConversations).mock.calls.length).toBeGreaterThan(calls);
+  expect([...host.querySelectorAll('.conversation-row')].map(r => r.textContent).join(' ')).toContain('Ana');
+});

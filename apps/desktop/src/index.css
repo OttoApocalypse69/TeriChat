@@ -232,6 +232,10 @@
 .conversation-header .channel-glyph { margin-left: 0; font-size: 17px; }
 .pane-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .chat-main > .pane-toolbar { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid #22222d; }
+/* Empty-stage toolbar only holds the phone back button; no bare bar on desktop. */
+@media (min-width: 768px) {
+  .chat-main > .pane-toolbar:not(:has(.details-toggle)) { display: none; }
+}
 .trust-strip { display: flex; align-items: center; gap: 10px; flex-shrink: 0; min-height: 36px; padding: 8px 12px 8px 20px; background: rgb(245 184 75 / 6%); border-bottom: 1px solid rgb(245 184 75 / 18%); color: var(--amber); }
 .plaintext-warning { font-size: 12.5px; line-height: 17px; color: var(--ink-2); }
 .message-history { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 12px 0 8px; }

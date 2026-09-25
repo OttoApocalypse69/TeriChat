@@ -88,6 +88,21 @@ pub struct ConversationSummary {
     pub last_seq: Option<i64>,
     /// `sent_at` of that last message, if any message exists.
     pub last_sent_at: Option<DateTime<Utc>>,
+    /// Handle and display name of every member of a `dm` or `group`, so
+    /// clients can label senders. Empty for `channel`: workspace membership
+    /// has its own gated, paged directory.
+    pub member_profiles: Vec<MemberProfile>,
+}
+
+/// Public identity of a conversation member, as seen by co-members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberProfile {
+    /// Member account id.
+    pub user_id: Uuid,
+    /// Unique handle.
+    pub handle: String,
+    /// Display name.
+    pub display_name: String,
 }
 
 /// One row of the conversation list query: id, kind, last seq, last time.
@@ -145,26 +160,25 @@ pub async fn list_conversations(
         members_by_conv.entry(conv_id).or_default().push(member_id);
     }
 
-    // Peer candidates: the non-caller member of two-member DMs only.
-    let peer_ids: Vec<Uuid> = rows
+    // Profiles for every member of the caller's dm/group rows (channels are
+    // excluded; their membership is the workspace directory's concern).
+    let has_profiles = |kind: &str| kind == "dm" || kind == "group";
+    let mut profile_ids: Vec<Uuid> = rows
         .iter()
-        .filter(|row| row.1 == "dm")
-        .filter_map(|row| {
-            let members = members_by_conv.get(&row.0)?;
-            if members.len() == 2 {
-                members.iter().find(|id| **id != user_id).copied()
-            } else {
-                None
-            }
-        })
+        .filter(|row| has_profiles(&row.1))
+        .filter_map(|row| members_by_conv.get(&row.0))
+        .flatten()
+        .copied()
         .collect();
-    let peer_rows: Vec<(Uuid, String, String)> =
+    profile_ids.sort_unstable();
+    profile_ids.dedup();
+    let profile_rows: Vec<(Uuid, String, String)> =
         sqlx::query_as("SELECT id, handle, display_name FROM users WHERE id = ANY($1)")
-            .bind(&peer_ids)
+            .bind(&profile_ids)
             .fetch_all(pool)
             .await
             .map_err(MessagingError::Database)?;
-    let peers: std::collections::HashMap<Uuid, (String, String)> = peer_rows
+    let profiles: std::collections::HashMap<Uuid, (String, String)> = profile_rows
         .into_iter()
         .map(|row| (row.0, (row.1, row.2)))
         .collect();
@@ -173,14 +187,32 @@ pub async fn list_conversations(
         .into_iter()
         .map(|row| {
             let members = members_by_conv.remove(&row.0).unwrap_or_default();
+            // Peer: the non-caller member of a two-member DM only.
             let peer = if row.1 == "dm" && members.len() == 2 {
                 members
                     .iter()
                     .find(|id| **id != user_id)
-                    .and_then(|id| peers.get(id))
+                    .and_then(|id| profiles.get(id))
             } else {
                 None
             };
+            let mut member_profiles: Vec<MemberProfile> = if has_profiles(&row.1) {
+                members
+                    .iter()
+                    .filter_map(|id| {
+                        profiles
+                            .get(id)
+                            .map(|(handle, display_name)| MemberProfile {
+                                user_id: *id,
+                                handle: handle.clone(),
+                                display_name: display_name.clone(),
+                            })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            member_profiles.sort_by(|a, b| a.handle.cmp(&b.handle));
             ConversationSummary {
                 id: row.0,
                 kind: row.1,
@@ -189,6 +221,7 @@ pub async fn list_conversations(
                 peer_display_name: peer.map(|p| p.1.clone()),
                 last_seq: row.2,
                 last_sent_at: row.3,
+                member_profiles,
             }
         })
         .collect())
@@ -986,6 +1019,87 @@ mod tests {
             .expect("list mallory");
         assert!(!mallory_listed.iter().any(|row| row.id == dm.id));
         assert!(!mallory_listed.iter().any(|row| row.id == group.id));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn list_conversations_member_profiles_scope() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: list_conversations_member_profiles_scope (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let mut users = Vec::new();
+        for (name, display) in [
+            ("mpada", "Profile Ada"),
+            ("mpbob", "Profile Bob"),
+            ("mpcat", "Profile Cat"),
+            ("mpdan", "Profile Dan"),
+        ] {
+            users.push(
+                crate::auth::create_user(
+                    &pool,
+                    &format!("{name}{stamp}"),
+                    &format!("{name}{stamp}@example.com"),
+                    display,
+                    "pw-profile-1",
+                )
+                .await
+                .expect("register"),
+            );
+        }
+        let (ada, bob, cat, dan) = (&users[0], &users[1], &users[2], &users[3]);
+
+        let group = create_conversation(&pool, ada.id, "group", &[bob.id, cat.id])
+            .await
+            .expect("create group");
+        let dm = find_or_create_dm(&pool, ada.id, bob.id)
+            .await
+            .expect("create dm");
+        // Channel participants never leak through this list.
+        let channel = create_conversation(&pool, ada.id, "channel", &[dan.id])
+            .await
+            .expect("create channel conversation");
+
+        let listed = list_conversations(&pool, ada.id).await.expect("list ada");
+        let row = |id: Uuid| listed.iter().find(|row| row.id == id).expect("row");
+
+        let group_profiles = &row(group.id).member_profiles;
+        assert_eq!(
+            group_profiles
+                .iter()
+                .map(|p| p.user_id)
+                .collect::<std::collections::HashSet<_>>(),
+            [ada.id, bob.id, cat.id].into_iter().collect(),
+            "every group member, including the caller"
+        );
+        let cat_profile = group_profiles
+            .iter()
+            .find(|p| p.user_id == cat.id)
+            .expect("cat");
+        assert_eq!(cat_profile.handle, cat.handle);
+        assert_eq!(cat_profile.display_name, cat.display_name);
+        assert!(group_profiles
+            .windows(2)
+            .all(|pair| pair[0].handle <= pair[1].handle));
+
+        assert_eq!(row(dm.id).member_profiles.len(), 2);
+        assert!(row(channel.id).member_profiles.is_empty());
+        assert!(!listed
+            .iter()
+            .flat_map(|row| &row.member_profiles)
+            .any(|p| p.user_id == dan.id));
+
+        // A non-member sees neither the group nor its roster.
+        let dan_listed = list_conversations(&pool, dan.id).await.expect("list dan");
+        assert!(!dan_listed.iter().any(|row| row.id == group.id));
         pool.close().await;
     }
 }
