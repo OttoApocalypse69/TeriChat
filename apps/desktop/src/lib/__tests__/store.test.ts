@@ -231,10 +231,13 @@ describe('group rosters', () => {
   });
 
   it('parses member handles: separators, @ prefixes, duplicates and self', () => {
-    expect(parseMemberHandles(' @ana, bo  cy,,@ana\n@@teri ', 'teri')).toEqual(['ana', 'bo', 'cy']);
+    // Commas and new lines separate; spaces can be part of a handle.
+    expect(parseMemberHandles(' @ana, mary jane,,@ana\n@teri ', 'teri')).toEqual(['ana', 'mary jane']);
     expect(parseMemberHandles(' , @ ', 'teri')).toEqual([]);
+    // Only the display "@" is stripped: a handle may itself start with "@".
+    expect(parseMemberHandles('@@odd')).toEqual(['@odd']);
     // Handles are case-insensitive server-side: one person, and never yourself.
-    expect(parseMemberHandles('Ana ana ANA')).toEqual(['ana']);
+    expect(parseMemberHandles('Ana, ana, ANA')).toEqual(['ana']);
     expect(parseMemberHandles('@TERI, bo', 'teri')).toEqual(['bo']);
     expect(parseMemberHandles('@teri', 'Teri')).toEqual([]);
   });

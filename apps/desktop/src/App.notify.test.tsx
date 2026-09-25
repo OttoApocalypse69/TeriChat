@@ -153,3 +153,35 @@ it('denied permission never errors and never blocks messaging', async () => {
   expect(plugin.sendNotification).not.toHaveBeenCalled();
   expect([...host.querySelectorAll('main p.whitespace-pre-wrap')].map(p => p.textContent)).toEqual(['body-1']);
 });
+
+// A first message for a conversation this client has never listed: the
+// history fetch can finish before the list says what kind of row it is.
+type Summaries = Awaited<ReturnType<ApiClient['listConversations']>>;
+async function unlistedArrival(listed: Summaries[number]) {
+  await login();
+  const socket = await readySocket();
+  unfocused(false);
+  const list = deferred<Summaries>();
+  vi.mocked(ApiClient.prototype.listConversations).mockReturnValueOnce(list.promise);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([{ ...peerMessage(1), conversation_id: listed.id }]);
+  await flush(() => socket.onmessage?.({ data: JSON.stringify({ op: 'event', event: {
+    event_id: `new-${listed.id}`, topic: 'message.created', payload: { conversation_id: listed.id, data: { message_id: 'm1', seq: 1 } },
+  } }) }));
+  await flush();
+  // History is in, the list is not: nothing may be classified yet.
+  expect(plugin.sendNotification).not.toHaveBeenCalled();
+  await flush(() => list.resolve([row(), listed]));
+  await flush();
+}
+
+it('never toasts an unlisted group as a DM, even when history beats the list', async () => {
+  await unlistedArrival({ id: 'grp', kind: 'group', members: ['a', 'peer', 'u2'], peer_handle: null, peer_display_name: null, last_seq: 1, last_sent_at: null });
+  expect(plugin.sendNotification).not.toHaveBeenCalled();
+});
+
+it('toasts a brand-new DM with its real peer name once the list resolves it', async () => {
+  await unlistedArrival({ id: 'dm-new', kind: 'dm', members: ['a', 'peer'], peer_handle: 'newpeer', peer_display_name: 'New Peer', last_seq: 1, last_sent_at: null });
+  expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
+  expect(plugin.sendNotification).toHaveBeenCalledWith({ title: 'New Peer', body: 'body-1' });
+});
+
