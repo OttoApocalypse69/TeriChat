@@ -17,6 +17,7 @@ import {
 import { avatarGradient } from './lib/avatar';
 import {
   ApiClient,
+  ApiError,
   apiBaseUrl,
   encodeOpaqueText,
   newClientMsgId,
@@ -33,6 +34,7 @@ import {
   MAX_GROUP_MEMBERS,
   gatewayEventInfo,
   parseMemberHandles,
+  senderLabel,
   sortConversations,
   toChatMessage,
   unreadBadge,
@@ -68,6 +70,25 @@ function useMediaQuery(query: string): boolean {
 // retries for the same position (half-open connection, stalled server).
 const READ_REQUEST_TIMEOUT_MS = 15_000;
 
+// Typing is shown for this long after the last signal (senders re-send while
+// typing), and announced at most this often per conversation.
+const TYPING_TTL_MS = 6_000;
+const TYPING_RESEND_MS = 3_000;
+
+type Typers = Record<string, Record<string, number>>;
+
+/** Drop expired typists (and empty rooms); unchanged state stays identical. */
+function pruneTypers(current: Typers, now: number): Typers {
+  let changed = false;
+  const next: Typers = {};
+  for (const [conversation, room] of Object.entries(current)) {
+    const live = Object.entries(room).filter(([, until]) => until > now);
+    if (live.length !== Object.keys(room).length) changed = true;
+    if (live.length > 0) next[conversation] = Object.fromEntries(live);
+  }
+  return changed ? next : current;
+}
+
 export default function App() {
   const loginApi = useMemo(() => new ApiClient(apiBaseUrl()), []);
   const [session, setSession] = useState<Session | null>(null);
@@ -102,6 +123,28 @@ function AuthenticatedApp({ session, onLogout }: {
   const gatewayRef = useRef<GatewayClient | null>(null);
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
+
+  // Who is typing where: conversation -> account -> expiry (epoch ms).
+  const [typers, setTypers] = useState<Typers>({});
+  const noteTyping = useCallback((conversationId: string, userId: string, until: number | null) => {
+    setTypers(current => {
+      const room = { ...(current[conversationId] ?? {}) };
+      if (until === null) {
+        if (!(userId in room)) return current;
+        delete room[userId];
+      } else {
+        room[userId] = until;
+      }
+      return pruneTypers({ ...current, [conversationId]: room }, Date.now());
+    });
+  }, []);
+  // One timer for the soonest expiry keeps the indicator honest without polling.
+  useEffect(() => {
+    const soonest = Math.min(...Object.values(typers).flatMap(room => Object.values(room)));
+    if (!Number.isFinite(soonest)) return;
+    const timer = setTimeout(() => setTypers(current => pruneTypers(current, Date.now())), Math.max(0, soonest - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [typers]);
 
 
   const [status, setStatus] = useState<GatewayStatus>('disconnected');
@@ -352,18 +395,21 @@ function AuthenticatedApp({ session, onLogout }: {
         const listed = unresolved ? refreshConversations() : Promise.resolve();
         // Events carry ids only; use the same serialized page drain as selection.
         void Promise.all([refreshHistory(info.conversationId), listed]).then(() => {
+          if (!live.current) return;
+          const row = (storeRef.current.messages.get(info.conversationId) ?? [])
+            .find((m) => m.id === info.messageId);
+          // Their message landed: they are no longer typing it.
+          if (row) noteTyping(info.conversationId, row.sender_id, null);
           // Exactly one toast per incoming message: only first-seen events
           // (`fresh`) notify, never redeliveries, and only the fetched row
           // matching this event (never a neighbor's text).
-          if (!live.current || !wasUnfocused || !fresh) return;
+          if (!wasUnfocused || !fresh) return;
           const arrived = storeRef.current.conversations.find(
             (c) => c.id === info.conversationId,
           ) ?? null;
           // A placeholder the list never resolved has no real kind (it may be
           // a group): never toast it as a DM.
           if (!arrived || arrived.members.length === 0) return;
-          const row = (storeRef.current.messages.get(info.conversationId) ?? [])
-            .find((m) => m.id === info.messageId);
           if (!row) return;
           const content = buildDmNotification(meId, arrived, row);
           if (!content) return;
@@ -398,6 +444,9 @@ function AuthenticatedApp({ session, onLogout }: {
       },
       onEvent,
       onDuplicateEvent: onEvent,
+      onTyping: ({ conversationId, userId }) => {
+        if (live.current) noteTyping(conversationId, userId, Date.now() + TYPING_TTL_MS);
+      },
     });
     gatewayRef.current = gw;
     gw.connect();
@@ -405,7 +454,7 @@ function AuthenticatedApp({ session, onLogout }: {
       gw.close();
       gatewayRef.current = null;
     };
-  }, [api, bump, token, refreshHistory, refreshConversations]);
+  }, [api, bump, token, refreshHistory, refreshConversations, noteTyping]);
 
   // Load conversations + workspaces once per login so DMs survive reload
   // with peer names (not UUIDs).
@@ -565,6 +614,26 @@ function AuthenticatedApp({ session, onLogout }: {
     }
   }
 
+  // Announce typing at most every TYPING_RESEND_MS per conversation. Servers
+  // without the route answer 404 once; stop asking for this login then.
+  const typingSentAt = useRef(new Map<string, number>());
+  const typingSupported = useRef(true);
+  function announceTyping(): void {
+    if (!selected || !typingSupported.current) return;
+    const id = selected.id;
+    const now = Date.now();
+    if (now - (typingSentAt.current.get(id) ?? -Infinity) < TYPING_RESEND_MS) return;
+    typingSentAt.current.set(id, now);
+    void api.sendTyping(id).catch(err => {
+      if (err instanceof ApiError && err.status === 404) typingSupported.current = false;
+    });
+  }
+  const typingNames = selected
+    ? Object.entries(typers[selected.id] ?? {})
+      .filter(([, until]) => until > Date.now())
+      .map(([userId]) => senderLabel(meId, userId, selected))
+    : [];
+
   async function send(text: string): Promise<void> {
     if (!selected) return;
     setSending(true);
@@ -576,6 +645,8 @@ function AuthenticatedApp({ session, onLogout }: {
       });
       if (!live.current) return;
       storeRef.current.mergeOutgoing(toChatMessage(sent));
+      // The next keystroke starts a new message: announce it right away.
+      typingSentAt.current.delete(sent.conversation_id);
       // Mirror the server: a caught-up sender's marker steps over their own
       // message; a sender with unread messages keeps them unread.
       const sentIn = storeRef.current.conversations.find(c => c.id === sent.conversation_id);
@@ -820,6 +891,8 @@ function AuthenticatedApp({ session, onLogout }: {
             title={selected?.kind === 'channel' ? channelTitle : null}
             unreadAfterSeq={unreadSnapshot.key === viewKey ? unreadSnapshot.seq : null}
             onTailVisibleChange={handleTailVisible}
+            typingNames={typingNames}
+            onDraftActivity={announceTyping}
           />
         </main>
         {selectedWorkspace && (

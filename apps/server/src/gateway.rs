@@ -6,7 +6,9 @@
 //! - `{"op":"heartbeat","seq":n}` — echoed as `heartbeat_ack`.
 //!
 //! Server → client: `{"op":"ready",...}`, `{"op":"event","event":{...}}`,
-//! `{"op":"heartbeat_ack","seq":n}`, `{"op":"error","code":...}`.
+//! `{"op":"heartbeat_ack","seq":n}`, `{"op":"error","code":...}`, and the
+//! ephemeral `{"op":"typing","conversation_id":...,"user_id":...}`. Typing
+//! frames carry no event id, are never replayed and never affect resume.
 //!
 //! Auth rides the `?token=` query parameter (bearer). Authorization is
 //! evaluated live per event (not snapshotted): a kick/ban mid-connection
@@ -23,7 +25,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Extension, Query, State,
     },
     response::Response,
 };
@@ -34,6 +36,7 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::messaging::{self, OutboxEntry};
+use crate::typing::{TypingBus, TypingSignal};
 use crate::{errors::AppError, state::AppState, workspaces};
 
 /// `GET /v1/gateway?token=...` query.
@@ -80,6 +83,13 @@ enum ServerFrame {
         /// Machine-readable code.
         code: &'static str,
     },
+    /// Someone else is typing in a conversation this account can see.
+    Typing {
+        /// Conversation being typed in.
+        conversation_id: Uuid,
+        /// Account that is typing.
+        user_id: Uuid,
+    },
 }
 
 async fn send_event(
@@ -109,6 +119,7 @@ async fn send_event(
 /// error when authentication fails.
 pub async fn gateway_handler(
     State(state): State<AppState>,
+    Extension(typing): Extension<TypingBus>,
     Query(params): Query<GatewayParams>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
@@ -120,7 +131,7 @@ pub async fn gateway_handler(
     let session = auth::authenticate(pool, &token)
         .await
         .map_err(|_| AppError::Unauthorized)?;
-    Ok(ws.on_upgrade(move |socket| connection(socket, state, session)))
+    Ok(ws.on_upgrade(move |socket| connection(socket, state, typing, session)))
 }
 
 /// Bound identification independently of client heartbeat traffic.
@@ -163,7 +174,12 @@ async fn identify(
 }
 
 /// Per-connection pump: identify → replay → live.
-async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSession) {
+async fn connection(
+    socket: WebSocket,
+    state: AppState,
+    typing_bus: TypingBus,
+    session: auth::AuthSession,
+) {
     let (mut sink, mut stream) = socket.split();
     let Some(pool) = &state.pool else {
         send_frame(
@@ -203,6 +219,8 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
     }
     let mut validity_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     validity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Subscribed only once streaming: typing from before Ready is stale.
+    let mut typing = Some(typing_bus.subscribe());
     loop {
         let entry = match next_delivery(
             &mut sink,
@@ -211,6 +229,7 @@ async fn connection(socket: WebSocket, state: AppState, session: auth::AuthSessi
             &session,
             &mut replay,
             &mut hub_rx,
+            &mut typing,
             &mut validity_tick,
         )
         .await
@@ -257,6 +276,7 @@ enum Delivery {
 
 /// Keep a pending replay query and its deadline alive while servicing inbound
 /// frames and validity ticks. Neither traffic nor ticks may restart the read.
+#[allow(clippy::too_many_arguments)] // one pump, one owner of each stream
 async fn next_delivery(
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     stream: &mut futures_util::stream::SplitStream<WebSocket>,
@@ -264,6 +284,7 @@ async fn next_delivery(
     session: &auth::AuthSession,
     replay: &mut Replay,
     hub: &mut broadcast::Receiver<OutboxEntry>,
+    typing: &mut Option<broadcast::Receiver<TypingSignal>>,
     validity_tick: &mut tokio::time::Interval,
 ) -> Option<Delivery> {
     let pending = async {
@@ -287,8 +308,36 @@ async fn next_delivery(
         if let Some(delivery) = completed.take() {
             return Some(delivery);
         }
+        let mut typing_closed = false;
         tokio::select! {
             delivery = &mut pending => return delivery,
+            // Best effort, like the replay-preserving control frames below:
+            // relaying a signal never restarts a pending replay read.
+            signal = async {
+                match typing.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match signal {
+                    Ok(signal) if signal.user_id != session.user_id
+                        && signal.recipients.contains(&session.user_id) => {
+                        let operation = async {
+                            if !session_live(pool, session).await { return false; }
+                            send_frame(sink, &ServerFrame::Typing {
+                                conversation_id: signal.conversation_id,
+                                user_id: signal.user_id,
+                            }).await
+                        };
+                        if !with_delivery_progress(&mut pending, &mut completed, operation).await {
+                            return None;
+                        }
+                    }
+                    // Not for us, or skipped while lagging: typing is ephemeral.
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => typing_closed = true,
+                }
+            }
             _ = validity_tick.tick() => {
                 if !with_delivery_progress(&mut pending, &mut completed, session_live(pool, session)).await {
                     return None;
@@ -315,6 +364,9 @@ async fn next_delivery(
                     return None;
                 }
             }
+        }
+        if typing_closed {
+            *typing = None;
         }
     }
 }
@@ -974,6 +1026,130 @@ mod tests {
         }
         server.abort();
 
+        pool.close().await;
+    }
+    async fn typing_post(
+        app: &axum::Router,
+        token: &str,
+        conversation: Uuid,
+    ) -> axum::http::StatusCode {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/v1/conversations/{conversation}/typing"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        tower::ServiceExt::oneshot(app.clone(), request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Give any queued frame time to arrive first, then require the heartbeat
+    /// echo to be the very next frame: nothing else was sent to this socket.
+    async fn nothing_before_heartbeat(socket: &mut Socket, seq: i64) {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        socket
+            .send(ClientMessage::Text(
+                format!(r#"{{"op":"heartbeat","seq":{seq}}}"#).into(),
+            ))
+            .await
+            .unwrap();
+        let Some(Ok(ClientMessage::Text(text))) = next(socket).await else {
+            panic!("heartbeat response");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["op"],
+            "heartbeat_ack",
+            "no other frame may precede the echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_relays_typing_only_to_other_live_members() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let peer = seed_user(&pool).await;
+        let stranger = seed_user(&pool).await;
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let mut sockets = Vec::new();
+        let mut tokens = Vec::new();
+        for who in [peer, user, stranger] {
+            let (_, token) = session(&pool, who).await;
+            let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+                .await
+                .unwrap();
+            identify(&mut socket).await;
+            sockets.push(socket);
+            tokens.push(token);
+        }
+
+        assert_eq!(
+            typing_post(&app, &tokens[1], dm.id).await,
+            axum::http::StatusCode::NO_CONTENT
+        );
+        let Some(Ok(ClientMessage::Text(text))) = next(&mut sockets[0]).await else {
+            panic!("typing frame for the other member");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!({"op": "typing", "conversation_id": dm.id, "user_id": user})
+        );
+
+        // A repeat inside the throttle interval relays nothing; the typist's
+        // own socket and a stranger never see the signal at all.
+        assert_eq!(
+            typing_post(&app, &tokens[1], dm.id).await,
+            axum::http::StatusCode::NO_CONTENT
+        );
+        for (seq, socket) in sockets.iter_mut().enumerate() {
+            nothing_before_heartbeat(socket, i64::try_from(seq).unwrap()).await;
+        }
+        assert_eq!(
+            typing_post(&app, &tokens[2], dm.id).await,
+            axum::http::StatusCode::FORBIDDEN
+        );
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn channel_typing_uses_the_send_gate() {
+        let Some((pool, state, owner)) = fixture().await else {
+            return;
+        };
+        let guest = seed_user(&pool).await;
+        let workspace = workspaces::create_workspace(&pool, owner, "Typing gate")
+            .await
+            .unwrap();
+        let channel = workspaces::create_channel(&pool, owner, workspace.id, "typing")
+            .await
+            .unwrap();
+        workspaces::add_member(&pool, owner, workspace.id, guest, workspaces::Role::Guest)
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (_, owner_token) = session(&pool, owner).await;
+        let (_, guest_token) = session(&pool, guest).await;
+        // Guests read but cannot send, so they cannot announce typing either.
+        assert_eq!(
+            typing_post(&app, &guest_token, channel.conversation_id).await,
+            axum::http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            typing_post(&app, &owner_token, channel.conversation_id).await,
+            axum::http::StatusCode::NO_CONTENT
+        );
         pool.close().await;
     }
 }

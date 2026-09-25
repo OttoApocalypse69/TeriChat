@@ -4,7 +4,7 @@
 //! and exposes a `router()`; this module only merges them with probes, the
 //! gateway, and the other domain routers. No handler logic lives here.
 
-use axum::{routing::get, Router};
+use axum::{routing::get, Extension, Router};
 
 use crate::gateway;
 use crate::health::{health, ready};
@@ -33,4 +33,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::moderation::router())
         .merge(crate::ledger::router())
         .with_state(state)
+        // One typing fan-out per router: HTTP publishes, gateway sockets relay.
+        .layer(Extension(crate::typing::TypingBus::new()))
 }

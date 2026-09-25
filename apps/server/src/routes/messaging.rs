@@ -4,7 +4,7 @@
 //! `crate::workspaces`). No behavior changes from the former `routes.rs`.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     routing::post,
     Json, Router,
@@ -334,6 +334,36 @@ async fn mark_read(
     }))
 }
 
+/// Relay "I am typing" to the conversation's other live members. Gated
+/// exactly like sending: a channel needs workspace membership and SEND, any
+/// other conversation needs participation. Ephemeral: nothing is stored.
+async fn typing(
+    State(state): State<AppState>,
+    Extension(bus): Extension<crate::typing::TypingBus>,
+    bearer: Bearer,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    if let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id).await? {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
+            .await?;
+        if !workspaces::can_send(pool, channel.id, bearer.user_id()).await? {
+            return Err(AppError::Denied("not permitted in this channel".to_owned()));
+        }
+    } else if !messaging::is_member(pool, conversation_id, bearer.user_id()).await? {
+        return Err(messaging::MessagingError::NotMember.into());
+    }
+    let recipients = messaging::participant_ids(pool, conversation_id).await?;
+    bus.publish(crate::typing::TypingSignal {
+        conversation_id,
+        user_id: bearer.user_id(),
+        recipients: recipients.into(),
+    });
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Messaging routes: conversations plus send/history and read markers.
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -343,5 +373,6 @@ pub fn router() -> Router<AppState> {
             post(create_group).get(list_conversations),
         )
         .route("/v1/conversations/{id}/read", post(mark_read))
+        .route("/v1/conversations/{id}/typing", post(typing))
         .route("/v1/messages", post(send_message).get(message_history))
 }

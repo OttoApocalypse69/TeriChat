@@ -297,6 +297,11 @@ export class ApiClient {
     });
   }
 
+  /** Tell the conversation's other members you are typing (ephemeral). */
+  sendTyping(conversationId: string): Promise<void> {
+    return this.req<void>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/typing`);
+  }
+
   /** Advance the caller's private read marker (never moves backwards). */
   markRead(conversationId: string, seq: number): Promise<ReadMarkerBody> {
     return this.req<ReadMarkerBody>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/read`, { seq });

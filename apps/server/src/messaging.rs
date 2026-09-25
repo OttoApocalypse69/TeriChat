@@ -430,6 +430,22 @@ pub async fn find_or_create_dm(
     Ok(conversation)
 }
 
+/// Every participant of a conversation (typing-signal recipients).
+///
+/// # Errors
+///
+/// Returns [`MessagingError::Database`] on query failure.
+pub async fn participant_ids(
+    pool: &sqlx::PgPool,
+    conversation_id: Uuid,
+) -> Result<Vec<Uuid>, MessagingError> {
+    sqlx::query_scalar("SELECT user_id FROM conversation_participants WHERE conversation_id = $1")
+        .bind(conversation_id)
+        .fetch_all(pool)
+        .await
+        .map_err(MessagingError::Database)
+}
+
 /// Membership check. `false` covers both non-members and missing rows.
 ///
 /// # Errors

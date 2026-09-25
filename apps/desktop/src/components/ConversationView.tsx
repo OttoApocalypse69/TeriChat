@@ -31,6 +31,17 @@ interface Props {
   unreadAfterSeq?: number | null;
   /** Whether the end of the history is on screen; reported synchronously. */
   onTailVisibleChange?: (visible: boolean) => void;
+  /** Names of other people typing here right now. */
+  typingNames?: string[];
+  /** The draft changed and is not empty (drives "is typing" for others). */
+  onDraftActivity?: () => void;
+}
+
+function typingText(names: string[]): ReactNode {
+  if (names.length === 0) return null;
+  if (names.length === 1) return <><strong>{names[0]}</strong> is typing…</>;
+  if (names.length === 2) return <><strong>{names[0]}</strong> and <strong>{names[1]}</strong> are typing…</>;
+  return 'Several people are typing…';
 }
 
 // Within this distance of the end, the reader counts as at the tail.
@@ -61,6 +72,8 @@ export default function ConversationView({
   headerActions,
   unreadAfterSeq = null,
   onTailVisibleChange,
+  typingNames = [],
+  onDraftActivity,
 }: Props) {
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
@@ -262,6 +275,12 @@ export default function ConversationView({
       {error && <p role="alert" className="stage-alert text-alert">{error}</p>}
       {sendError && <p role="alert" className="stage-alert text-alert">{sendError}</p>}
       <form onSubmit={submit} className="message-composer">
+        <div className="typing-indicator" aria-live="polite">
+          {typingNames.length > 0 && <>
+            <span className="typing-dots" aria-hidden><span /><span /><span /></span>
+            <span className="truncate">{typingText(typingNames)}</span>
+          </>}
+        </div>
         <div className="composer-field">
           <input
             aria-label="Message"
@@ -270,6 +289,7 @@ export default function ConversationView({
             onChange={(e) => {
               draftRevision.current += 1;
               setDraft(e.target.value);
+              if (e.target.value.trim()) onDraftActivity?.();
             }}
           />
           <div className="composer-toolbar">

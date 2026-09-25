@@ -3,10 +3,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from './App';
-import { ApiClient, encodeOpaqueText, type MessageBody } from './lib/api';
+import { ApiClient, ApiError, encodeOpaqueText, type MessageBody } from './lib/api';
 import type { GatewayOutboxEvent, GatewayStatus } from './lib/gateway';
 
-const gateways = vi.hoisted(() => [] as { onEvent: (e: GatewayOutboxEvent) => void; onStatus: (s: GatewayStatus) => void }[]);
+const gateways = vi.hoisted(() => [] as { onEvent: (e: GatewayOutboxEvent) => void; onStatus: (s: GatewayStatus) => void; onTyping?: (s: { conversationId: string; userId: string }) => void }[]);
 vi.mock('./lib/gateway', () => ({ GatewayClient: class {
   constructor(options: typeof gateways[number]) { gateways.push(options); }
   connect() {}
@@ -686,5 +686,57 @@ it('keeps a channel opened this session that no list has carried yet', async () 
   await flush(() => gateways[0].onStatus('connected'));
   await flush();
   expect(host.querySelector('main h2')?.textContent).toBe('#general');
+});
+
+it('shows who is typing in the open conversation until it expires or their message lands', async () => {
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1)]);
+  await login(); await click('Peer'); await flush();
+  const typing = () => host.querySelector('main .typing-indicator')?.textContent;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  try {
+    await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer' }));
+    expect(typing()).toBe('Peer is typing…');
+    // Other conversations' typists never show here.
+    await flush(() => gateways[0].onTyping?.({ conversationId: 'elsewhere', userId: 'x' }));
+    expect(typing()).toBe('Peer is typing…');
+    await flush(() => { vi.advanceTimersByTime(6_100); });
+    expect(typing()).toBe('');
+
+    // Typing again, then their message arrives: the indicator clears at once.
+    await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer' }));
+    expect(typing()).toBe('Peer is typing…');
+    vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+    await flush(() => gateways[0].onEvent(event(2)));
+    await flush();
+    expect(typing()).toBe('');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('announces typing at most every few seconds and stops against servers without it', async () => {
+  const sendTyping = vi.spyOn(ApiClient.prototype, 'sendTyping').mockResolvedValue(undefined);
+  await login(); await click('Peer');
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    await type('Message', 'h');
+    await type('Message', 'he');
+    await type('Message', '');
+    expect(sendTyping).toHaveBeenCalledTimes(1);
+    expect(sendTyping).toHaveBeenCalledWith('dm');
+    vi.advanceTimersByTime(3_000);
+    await type('Message', 'hey');
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+
+    sendTyping.mockRejectedValue(new ApiError(404, 'not_found', 'not found'));
+    vi.advanceTimersByTime(3_000);
+    await type('Message', 'hey!');
+    await flush();
+    vi.advanceTimersByTime(3_000);
+    await type('Message', 'hey!!');
+    expect(sendTyping).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
