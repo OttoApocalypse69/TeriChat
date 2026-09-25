@@ -35,6 +35,8 @@ import {
   parseMemberHandles,
   sortConversations,
   toChatMessage,
+  unreadBadge,
+  unreadCount,
 } from './lib/store';
 import {
   WorkspaceStore,
@@ -47,6 +49,24 @@ interface Session {
   meId: string;
   handle: string;
 }
+
+/** Tracks a CSS media query; environments without matchMedia count as matching. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => typeof window.matchMedia !== 'function' || window.matchMedia(query).matches);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const list = window.matchMedia(query);
+    const update = () => setMatches(list.matches);
+    update();
+    list.addEventListener('change', update);
+    return () => list.removeEventListener('change', update);
+  }, [query]);
+  return matches;
+}
+
+// A read request that neither succeeds nor fails in this time stops blocking
+// retries for the same position (half-open connection, stalled server).
+const READ_REQUEST_TIMEOUT_MS = 15_000;
 
 export default function App() {
   const loginApi = useMemo(() => new ApiClient(apiBaseUrl()), []);
@@ -208,12 +228,30 @@ function AuthenticatedApp({ session, onLogout }: {
     [api, bump],
   );
 
+  // Channel access can end server-side (kick, ban): the server drops the
+  // participation, so the channel disappears from the next list. Each row
+  // remembers the latest list request that confirmed it; only the newest
+  // request's answer may prune, and only rows confirmed before it was issued.
+  const listRevision = useRef(0);
+  const confirmedAt = useRef(new Map<string, number>());
   const refreshConversations = useCallback(async () => {
     if (!live.current) return;
+    const revision = ++listRevision.current;
     try {
       const rows = await api.listConversations();
       if (!live.current) return;
-      for (const row of rows) storeRef.current.addConversation(row);
+      for (const row of rows) {
+        storeRef.current.addConversation(row);
+        confirmedAt.current.set(row.id, Math.max(confirmedAt.current.get(row.id) ?? 0, revision));
+      }
+      if (revision === listRevision.current) {
+        const listed = new Set(rows.map(row => row.id));
+        const revoked = storeRef.current.conversations
+          .filter(c => c.kind === 'channel' && !listed.has(c.id) && (confirmedAt.current.get(c.id) ?? Infinity) < revision)
+          .map(c => c.id);
+        storeRef.current.removeConversations(revoked);
+        for (const id of revoked) confirmedAt.current.delete(id);
+      }
       bump();
     } catch (err) {
       if (live.current) setError(err instanceof Error ? err.message : 'conversations failed');
@@ -477,6 +515,11 @@ function AuthenticatedApp({ session, onLogout }: {
   /** Drop a left workspace from local state and clear its selection. */
   function handleLeftWorkspace(workspaceId: string): void {
     if (!live.current) return;
+    // Its channels are no longer reachable: drop them (and their unread
+    // counts) instead of keeping ghost rows until reload.
+    storeRef.current.removeConversations(
+      wsStoreRef.current.channelsFor(workspaceId).map(channel => channel.conversation_id),
+    );
     workspaceListRevision.current += 1;
     setWsLoading(false);
     wsStoreRef.current.setWorkspaces(
@@ -513,6 +556,8 @@ function AuthenticatedApp({ session, onLogout }: {
       openConversation(channel.conversation_id);
       bump();
       await refreshHistory(channel.conversation_id);
+      // History made us a participant; the summary now carries the marker.
+      await refreshConversations();
     } catch (err) {
       // Let ChannelList render the friendly (403-aware) message; rethrow so
       // its form error path triggers.
@@ -531,6 +576,10 @@ function AuthenticatedApp({ session, onLogout }: {
       });
       if (!live.current) return;
       storeRef.current.mergeOutgoing(toChatMessage(sent));
+      // Mirror the server: a caught-up sender's marker steps over their own
+      // message; a sender with unread messages keeps them unread.
+      const sentIn = storeRef.current.conversations.find(c => c.id === sent.conversation_id);
+      if (sentIn?.last_read_seq === sent.seq - 1) storeRef.current.setReadMarker(sent.conversation_id, sent.seq);
       bump();
     } finally {
       if (live.current) setSending(false);
@@ -541,6 +590,110 @@ function AuthenticatedApp({ session, onLogout }: {
     if (selectedId) void refreshHistory(selectedId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
+
+  // ---- Private unread state (never shared with other members) ----
+  const unreadByConversation = new Map(
+    store.conversations.map(c => [c.id, unreadCount(c, store.messages.get(c.id), meId)]),
+  );
+  const unreadWorkspaceIds = new Set(wsStore.workspaces
+    .filter(w => wsStore.channelsFor(w.id).some(ch => (unreadByConversation.get(ch.conversation_id) ?? 0) > 0))
+    .map(w => w.id));
+
+  // Whether the conversation pane is on screen, by the same rules as the CSS:
+  // phones show one pane, the details pane replaces it below 1200px, and the
+  // sessions overlay hides the whole layout.
+  const wideLayout = useMediaQuery('(min-width: 768px)');
+  const fullLayout = useMediaQuery('(min-width: 1200px)');
+  const conversationShown = !sessionsOpen && (wideLayout
+    ? !(pane === 'details' && !fullLayout)
+    : pane === 'conversation');
+  const [shown, setShown] = useState({ now: conversationShown, epoch: 0 });
+  if (shown.now !== conversationShown) {
+    setShown({ now: conversationShown, epoch: conversationShown ? shown.epoch + 1 : shown.epoch });
+  }
+
+  // The "new" divider sits where the marker was when the conversation was
+  // opened or shown again, and only when something was unread then; reading
+  // must not move it. Derived during render (not in an effect) so the divider
+  // exists in the very first commit, before the read effect can run.
+  const viewKey = `${selectedId ?? ''}:${shown.epoch}`;
+  const [unreadSnapshot, setUnreadSnapshot] = useState<{ key: string | null; seq: number | null }>({ key: null, seq: null });
+  if (unreadSnapshot.key !== viewKey) {
+    const seq = selected?.last_read_seq;
+    const unread = selectedId ? (unreadByConversation.get(selectedId) ?? 0) : 0;
+    setUnreadSnapshot({ key: viewKey, seq: seq != null && unread > 0 ? seq : null });
+  }
+
+  // Whether the history is scrolled to its end. Written synchronously by the
+  // conversation's layout effect so a read never outruns the scroll position.
+  const tailVisible = useRef(true);
+  const [tailTick, setTailTick] = useState(0);
+  const handleTailVisible = useCallback((visible: boolean) => {
+    if (tailVisible.current === visible) return;
+    tailVisible.current = visible;
+    setTailTick(tick => tick + 1);
+  }, []);
+
+  // Re-check visibility when the window regains focus or the tab is shown.
+  const [attentionTick, setAttentionTick] = useState(0);
+  useEffect(() => {
+    const poke = () => setAttentionTick(tick => tick + 1);
+    window.addEventListener('focus', poke);
+    document.addEventListener('visibilitychange', poke);
+    return () => {
+      window.removeEventListener('focus', poke);
+      document.removeEventListener('visibilitychange', poke);
+    };
+  }, []);
+
+  // A conversation is read only while someone can see it: its pane has
+  // layout, the tab is visible, the window has focus and sessions are closed.
+  // Unread messages count as seen only once the history's end is on screen.
+  const readInFlight = useRef(new Map<string, number>());
+  const selectedLatestSeq = selectedId ? store.maxSeq(selectedId) : 0;
+  // A server that returned any marker supports them, so a conversation added
+  // this session without one (e.g. a new channel) can still be marked read.
+  const markersSupported = store.conversations.some(c => typeof c.last_read_seq === 'number');
+  useEffect(() => {
+    if (!selected) return;
+    const known = selected.last_read_seq ?? (markersSupported ? 0 : null);
+    if (known == null || selectedLatestSeq <= known) return;
+    if (sessionsOpen || document.visibilityState === 'hidden' || !document.hasFocus()) return;
+    if ((conversationRef.current?.getClientRects().length ?? 0) === 0) return;
+    if (!tailVisible.current) return;
+    const id = selected.id;
+    const target = selectedLatestSeq;
+    if ((readInFlight.current.get(id) ?? -1) >= target) return;
+    readInFlight.current.set(id, target);
+    const release = () => {
+      if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
+    };
+    // A stalled request must not suppress retries forever; a late answer is
+    // still applied (markers are monotonic), it just no longer blocks.
+    const timeout = setTimeout(release, READ_REQUEST_TIMEOUT_MS);
+    void api.markRead(id, target).then(marker => {
+      if (!live.current) return;
+      // The server just proved membership; a list issued earlier must not prune it.
+      confirmedAt.current.set(id, listRevision.current);
+      storeRef.current.setReadMarker(id, marker.last_read_seq, true);
+      bump();
+    }, () => {
+      // Unconfirmed: the next message, focus change or selection retries.
+    }).finally(() => {
+      clearTimeout(timeout);
+      release();
+    });
+  }, [api, bump, selected, selectedLatestSeq, markersSupported, sessionsOpen, pane, attentionTick, tailTick]);
+
+  const baseTitle = useRef(document.title);
+  const totalUnread = [...unreadByConversation.values()].reduce((sum, n) => sum + n, 0);
+  useEffect(() => {
+    document.title = totalUnread > 0 ? `(${unreadBadge(totalUnread)}) ${baseTitle.current}` : baseTitle.current;
+  }, [totalUnread]);
+  useEffect(() => {
+    const base = baseTitle.current;
+    return () => { document.title = base; };
+  }, []);
 
   const closeSessions = () => { setSessionsOpen(false); sessionsButton.current?.focus(); };
   return (
@@ -584,6 +737,7 @@ function AuthenticatedApp({ session, onLogout }: {
           <span className="rail-divider" aria-hidden />
           <WorkspaceList
             workspaces={wsStore.workspaces}
+            unreadWorkspaceIds={unreadWorkspaceIds}
             selectedWorkspaceId={selectedWorkspaceId}
             loading={wsLoading}
             error={wsError}
@@ -612,6 +766,7 @@ function AuthenticatedApp({ session, onLogout }: {
           <div className="shrink-0">
             <ChannelList
               filter={navigationQuery}
+              unreadByConversation={unreadByConversation}
               key={selectedWorkspaceId ?? 'no-workspace'}
               workspaceName={selectedWorkspace?.name ?? null}
               channels={channels}
@@ -663,6 +818,8 @@ function AuthenticatedApp({ session, onLogout }: {
             error={error}
             onSend={send}
             title={selected?.kind === 'channel' ? channelTitle : null}
+            unreadAfterSeq={unreadSnapshot.key === viewKey ? unreadSnapshot.seq : null}
+            onTailVisibleChange={handleTailVisible}
           />
         </main>
         {selectedWorkspace && (

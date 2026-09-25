@@ -88,6 +88,9 @@ pub struct ConversationSummary {
     pub last_seq: Option<i64>,
     /// `sent_at` of that last message, if any message exists.
     pub last_sent_at: Option<DateTime<Utc>>,
+    /// The caller's own read position (highest seq they have read). Private:
+    /// never another member's marker.
+    pub last_read_seq: i64,
     /// Handle and display name of every member of a `dm` or `group`, so
     /// clients can label senders. Empty for `channel`: workspace membership
     /// has its own gated, paged directory.
@@ -105,8 +108,9 @@ pub struct MemberProfile {
     pub display_name: String,
 }
 
-/// One row of the conversation list query: id, kind, last seq, last time.
-type ConversationListRow = (Uuid, String, Option<i64>, Option<DateTime<Utc>>);
+/// One row of the conversation list query: id, kind, last seq, last time,
+/// and the caller's read marker.
+type ConversationListRow = (Uuid, String, Option<i64>, Option<DateTime<Utc>>, i64);
 
 /// List the caller's conversations (dm/group/channel rows where the caller
 /// is a participant), newest activity first.
@@ -129,7 +133,8 @@ pub async fn list_conversations(
     let rows: Vec<ConversationListRow> = sqlx::query_as(
         r"SELECT c.id, c.kind,
             (SELECT MAX(m.seq) FROM messages m WHERE m.conversation_id = c.id),
-            (SELECT MAX(m.sent_at) FROM messages m WHERE m.conversation_id = c.id)
+            (SELECT MAX(m.sent_at) FROM messages m WHERE m.conversation_id = c.id),
+            p.last_read_seq
           FROM conversations c
           JOIN conversation_participants p ON p.conversation_id = c.id
           WHERE p.user_id = $1
@@ -221,6 +226,7 @@ pub async fn list_conversations(
                 peer_display_name: peer.map(|p| p.1.clone()),
                 last_seq: row.2,
                 last_sent_at: row.3,
+                last_read_seq: row.4,
                 member_profiles,
             }
         })
@@ -529,8 +535,53 @@ pub async fn send_message(
         seq,
     )
     .await?;
+    // Your own message is never unread for you, but only when you were
+    // already caught up: if someone else's message took the previous seq and
+    // you have not marked it read, stepping over it would hide it. The
+    // participant row is locked above, so this cannot race a marker update.
+    sqlx::query(
+        "UPDATE conversation_participants SET last_read_seq = $3
+         WHERE conversation_id = $1 AND user_id = $2 AND last_read_seq = $3 - 1",
+    )
+    .bind(conversation_id)
+    .bind(sender_id)
+    .bind(seq)
+    .execute(&mut *tx)
+    .await
+    .map_err(MessagingError::Database)?;
     tx.commit().await.map_err(MessagingError::Database)?;
     Ok((message, true))
+}
+
+/// Advance the caller's private read marker to `seq`, returning the stored
+/// marker. Markers only move forward and never past the last assigned
+/// sequence, so a stale or oversized request cannot rewind or skip ahead.
+///
+/// # Errors
+///
+/// [`MessagingError::NotMember`] when the caller is not a participant;
+/// [`MessagingError::Database`] on query failure.
+pub async fn mark_read(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    seq: i64,
+) -> Result<i64, MessagingError> {
+    let marker: Option<i64> = sqlx::query_scalar(
+        r"UPDATE conversation_participants p
+             SET last_read_seq = GREATEST(p.last_read_seq, LEAST($3, c.next_seq - 1)),
+                 last_read_at = now()
+            FROM conversations c
+           WHERE c.id = p.conversation_id AND p.conversation_id = $1 AND p.user_id = $2
+       RETURNING p.last_read_seq",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .bind(seq.max(0))
+    .fetch_optional(pool)
+    .await
+    .map_err(MessagingError::Database)?;
+    marker.ok_or(MessagingError::NotMember)
 }
 
 /// Insert the sequenced message row plus its outbox event inside the caller's

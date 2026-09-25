@@ -69,6 +69,14 @@ export interface ConversationSummaryBody {
   last_sent_at: string | null;
   /** DM/group roster; older servers omit it and channels return it empty. */
   member_profiles?: MemberProfileBody[];
+  /** The caller's private read marker; older servers omit it. */
+  last_read_seq?: number;
+}
+
+/** POST /v1/conversations/{id}/read response: the stored, monotonic marker. */
+export interface ReadMarkerBody {
+  conversation_id: string;
+  last_read_seq: number;
 }
 
 export interface MessageBody {
@@ -287,6 +295,11 @@ export class ApiClient {
     return this.req<ConversationBody>('POST', '/v1/conversations', {
       member_handles,
     });
+  }
+
+  /** Advance the caller's private read marker (never moves backwards). */
+  markRead(conversationId: string, seq: number): Promise<ReadMarkerBody> {
+    return this.req<ReadMarkerBody>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/read`, { seq });
   }
 
   /** Caller-scoped conversation list with DM peers + last positions. */

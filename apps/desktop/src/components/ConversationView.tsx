@@ -27,7 +27,16 @@ interface Props {
   title?: string | null;
   isActivePane?: boolean;
   headerActions?: ReactNode;
+  /** Read marker when this conversation opened; later messages are new. */
+  unreadAfterSeq?: number | null;
+  /** Whether the end of the history is on screen; reported synchronously. */
+  onTailVisibleChange?: (visible: boolean) => void;
 }
+
+// Within this distance of the end, the reader counts as at the tail.
+const TAIL_SLACK_PX = 48;
+// Breathing room left above the NEW divider when opening at it.
+const DIVIDER_MARGIN_PX = 16;
 
 // Same author within five minutes reads as one block: no repeated header.
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -50,6 +59,8 @@ export default function ConversationView({
   title,
   isActivePane = true,
   headerActions,
+  unreadAfterSeq = null,
+  onTailVisibleChange,
 }: Props) {
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
@@ -64,29 +75,63 @@ export default function ConversationView({
     setSendError(null);
   }, [conversationId]);
 
+  // The first message from someone else after the opening marker.
+  const firstNewId = unreadAfterSeq == null
+    ? null
+    : messages.find(m => m.seq > unreadAfterSeq && m.sender_id !== meId)?.id ?? null;
+
   // Hidden mounted panes have no scroll box. Reconcile pending follows when
   // navigation or CSS breakpoint layout reveals this conversation, not on focus.
   const pendingTail = useRef(false);
+  // Opening with an unread backlog lands on the NEW divider, not past it;
+  // after that, only a reader already at the end is carried to new messages.
+  const dividerPlaced = useRef<string | null>(null); // id of the placed divider's message
+  const stickToTail = useRef(true);
+  useLayoutEffect(() => {
+    stickToTail.current = true;
+    dividerPlaced.current = null;
+  }, [conversationId]);
   useLayoutEffect(() => {
     pendingTail.current = true;
   }, [messages.length, conversationId]);
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const atTail = () => el.scrollHeight - el.scrollTop - el.clientHeight <= TAIL_SLACK_PX;
     const followPendingTail = () => {
       if (pendingTail.current && el.clientHeight > 0) {
-        el.scrollTop = el.scrollHeight;
+        // Each distinct divider (on open, or on return to a hidden pane) is
+        // positioned once; afterwards only a reader at the end is carried.
+        const divider = firstNewId && dividerPlaced.current !== firstNewId
+          ? el.querySelector<HTMLElement>('.new-divider')
+          : null;
+        if (divider) {
+          el.scrollTop += divider.getBoundingClientRect().top - el.getBoundingClientRect().top - DIVIDER_MARGIN_PX;
+          dividerPlaced.current = firstNewId;
+          stickToTail.current = atTail();
+        } else if (dividerPlaced.current === null || stickToTail.current) {
+          el.scrollTop = el.scrollHeight;
+        }
         pendingTail.current = false;
       }
+      onTailVisibleChange?.(atTail());
+    };
+    const onScroll = () => {
+      stickToTail.current = atTail();
+      onTailVisibleChange?.(stickToTail.current);
     };
     followPendingTail();
+    el.addEventListener('scroll', onScroll, { passive: true });
     // ResizeObserver also fires when display:none becomes a real layout box.
     // Consumed pending state leaves readers alone on ordinary viewport resizes.
-    if (typeof ResizeObserver === 'undefined') return;
+    if (typeof ResizeObserver === 'undefined') return () => el.removeEventListener('scroll', onScroll);
     const observer = new ResizeObserver(followPendingTail);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, [messages.length, conversationId, isActivePane]);
+    return () => {
+      observer.disconnect();
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [messages.length, conversationId, isActivePane, firstNewId, onTailVisibleChange]);
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -170,7 +215,8 @@ export default function ConversationView({
           lastDay = dayKey(m.sent_at);
           const mine = m.sender_id === meId;
           const author = senderLabel(meId, m.sender_id, conversation);
-          const follow = !divider && continuesGroup(messages[index - 1], m);
+          const isFirstNew = m.id === firstNewId;
+          const follow = !divider && !isFirstNew && continuesGroup(messages[index - 1], m);
           const clock = formatClockTime(m.sent_at);
           return (
             <div key={m.id}>
@@ -178,6 +224,11 @@ export default function ConversationView({
                 <p className="day-divider">
                   <span>{divider}</span>
                 </p>
+              )}
+              {isFirstNew && (
+                <div className="new-divider" role="separator" aria-label="New messages">
+                  <span aria-hidden>NEW</span>
+                </div>
               )}
               <div className={`message-row${mine ? ' message-row-own' : ''}${follow ? ' message-row--follow' : ''}`}>
                 <div className="message-gutter">

@@ -4,7 +4,7 @@
 //! `crate::workspaces`). No behavior changes from the former `routes.rs`.
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::post,
     Json, Router,
@@ -65,6 +65,8 @@ struct ConversationSummaryBody {
     peer_display_name: Option<String>,
     last_seq: Option<i64>,
     last_sent_at: Option<DateTime<Utc>>,
+    /// The caller's own read marker; never another member's.
+    last_read_seq: i64,
     /// `dm`/`group` rosters so clients can name senders; empty for channels.
     member_profiles: Vec<MemberProfileBody>,
 }
@@ -86,6 +88,7 @@ impl From<messaging::ConversationSummary> for ConversationSummaryBody {
             peer_display_name: row.peer_display_name,
             last_seq: row.last_seq,
             last_sent_at: row.last_sent_at,
+            last_read_seq: row.last_read_seq,
             member_profiles: row
                 .member_profiles
                 .into_iter()
@@ -295,7 +298,43 @@ async fn message_history(
     ))
 }
 
-/// Messaging routes: conversations plus send/history.
+/// `POST /v1/conversations/{id}/read` request: the highest seq now read.
+#[derive(Debug, Deserialize)]
+struct ReadBody {
+    seq: i64,
+}
+
+/// The caller's stored (monotonic, clamped) read marker.
+#[derive(Debug, Serialize)]
+struct ReadMarkerBody {
+    conversation_id: Uuid,
+    last_read_seq: i64,
+}
+
+async fn mark_read(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(conversation_id): Path<Uuid>,
+    Json(body): Json<ReadBody>,
+) -> Result<Json<ReadMarkerBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Same read gate as history: workspace members may mark channels read,
+    // strangers get the membership wall rather than a participant oracle.
+    if let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id).await? {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
+            .await?;
+    }
+    let last_read_seq =
+        messaging::mark_read(pool, bearer.user_id(), conversation_id, body.seq).await?;
+    Ok(Json(ReadMarkerBody {
+        conversation_id,
+        last_read_seq,
+    }))
+}
+
+/// Messaging routes: conversations plus send/history and read markers.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/conversations/dm", post(create_dm))
@@ -303,5 +342,6 @@ pub fn router() -> Router<AppState> {
             "/v1/conversations",
             post(create_group).get(list_conversations),
         )
+        .route("/v1/conversations/{id}/read", post(mark_read))
         .route("/v1/messages", post(send_message).get(message_history))
 }

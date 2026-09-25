@@ -453,6 +453,59 @@ it('rejects groups with fewer than two other people without calling the server',
   expect(createGroup).not.toHaveBeenCalled();
 });
 
+const fromPeer = (seq: number): MessageBody => ({ ...message(seq), sender_id: 'peer' });
+const unreadRow = { ...row(), last_seq: 2, last_read_seq: 0 };
+function visibility(focused: boolean, laidOut = true) {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(focused);
+  vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue({ length: laidOut ? 1 : 0 } as DOMRectList);
+}
+
+it('shows private unread counts and marks read only once the conversation is seen', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(false);
+  await login();
+  expect(host.querySelector('.conversation-row .unread-badge')?.textContent).toBe('2');
+  expect(document.title).toMatch(/^\(2\)/);
+
+  await click('Peer');
+  await flush();
+  expect(markRead).not.toHaveBeenCalled();
+  expect(host.querySelector('main .new-divider')).not.toBeNull();
+
+  visibility(true);
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  await flush();
+  expect(markRead).toHaveBeenCalledTimes(1);
+  expect(markRead).toHaveBeenCalledWith('dm', 2);
+  expect(host.querySelector('.conversation-row .unread-badge')).toBeNull();
+  expect(document.title).not.toMatch(/^\(/);
+  // The divider stays where the conversation was opened, even once read.
+  expect(host.querySelector('main .new-divider')).not.toBeNull();
+});
+
+it('never marks a hidden pane read', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true, false);
+  await login(); await click('Peer');
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  expect(markRead).not.toHaveBeenCalled();
+  expect(host.querySelector('.conversation-row .unread-badge')?.textContent).toBe('2');
+});
+
+it('stays inert against servers without read markers', async () => {
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead');
+  visibility(true);
+  await login(); await click('Peer');
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  expect(markRead).not.toHaveBeenCalled();
+  expect(host.querySelector('.unread-badge, main .new-divider')).toBeNull();
+});
+
 it('lists a slow-to-create group without pulling the user out of a conversation they opened meanwhile', async () => {
   const pending = deferred<{ id: string; kind: string; members: string[] }>();
   vi.spyOn(ApiClient.prototype, 'createGroup').mockReturnValue(pending.promise);
@@ -484,3 +537,154 @@ it('refreshes the list when a message arrives for a conversation this client nev
   expect(vi.mocked(ApiClient.prototype.listConversations).mock.calls.length).toBeGreaterThan(calls);
   expect([...host.querySelectorAll('.conversation-row')].map(r => r.textContent).join(' ')).toContain('Ana');
 });
+
+/** jsdom has no layout: give `.message-history` a browser-like scroll box. */
+function stubScrollBox(scrollHeight = 1000, clientHeight = 200, dividerOffset = 500): () => void {
+  const tops = new WeakMap<Element, number>();
+  const isBox = (el: Element) => el.classList.contains('message-history');
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get(this: HTMLElement) { return isBox(this) ? scrollHeight : 0; } });
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get(this: HTMLElement) { return isBox(this) ? clientHeight : 0; } });
+  Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+    configurable: true,
+    get(this: HTMLElement) { return tops.get(this) ?? 0; },
+    set(this: HTMLElement, value: number) { tops.set(this, Math.max(0, Math.min(value, isBox(this) ? scrollHeight - clientHeight : 0))); },
+  });
+  // The NEW divider sits `dividerOffset` into the content; its viewport rect
+  // moves with the box's scroll position, as in a real browser.
+  const rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const box = this.closest<HTMLElement>('.message-history');
+    const top = isBox(this) ? 100 : this.classList.contains('new-divider') && box ? 100 + dividerOffset - box.scrollTop : 0;
+    return { top, bottom: top, left: 0, right: 0, height: 0, width: 0, x: 0, y: top, toJSON() {} } as DOMRect;
+  });
+  return () => {
+    rects.mockRestore();
+    for (const key of ['scrollHeight', 'clientHeight', 'scrollTop']) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[key];
+  };
+}
+
+it('does not mark read until the end of an unread backlog is on screen', async () => {
+  const restore = stubScrollBox();
+  try {
+    vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+    vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+    const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+    visibility(true);
+    await login(); await click('Peer');
+    await flush(() => window.dispatchEvent(new Event('focus')));
+    expect(markRead).not.toHaveBeenCalled();
+    const box = host.querySelector<HTMLElement>('main .message-history')!;
+    await flush(() => { box.scrollTop = 800; box.dispatchEvent(new Event('scroll')); });
+    await flush();
+    expect(markRead).toHaveBeenCalledWith('dm', 2);
+  } finally {
+    restore();
+  }
+});
+
+it('marks a conversation that arrived without a marker once markers are known', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }, row('dm2', 'Second')]);
+  vi.mocked(ApiClient.prototype.history).mockImplementation(async id => id === 'dm2'
+    ? [{ ...fromPeer(1), id: 's1', conversation_id: 'dm2' }, { ...fromPeer(2), id: 's2', conversation_id: 'dm2' }]
+    : [fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true);
+  await login(); await click('Second');
+  await flush();
+  expect(markRead).toHaveBeenCalledWith('dm2', 2);
+});
+
+it('keeps unseen messages unread when replying before catching up', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  vi.spyOn(ApiClient.prototype, 'sendMessage').mockResolvedValue(message(3));
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(false);
+  await login(); await click('Peer');
+  await type('Message', 'reply without reading'); await click('Send');
+  expect(host.querySelector('.conversation-row .unread-badge')?.textContent).toBe('2');
+  visibility(true);
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  await flush();
+  expect(markRead).toHaveBeenCalledWith('dm', 3);
+});
+
+it('drops the channels of a left workspace from the unread total', async () => {
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.mocked(ApiClient.prototype.listChannels).mockResolvedValue([channel('general')]);
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([
+    { ...unreadRow, last_read_seq: 2 },
+    { id: 'old-channel-conv', kind: 'channel', members: [], peer_handle: null, peer_display_name: null, last_seq: 2, last_sent_at: null, last_read_seq: 0 },
+  ]);
+  vi.spyOn(ApiClient.prototype, 'leaveWorkspace').mockResolvedValue(undefined);
+  await login();
+  expect(document.title).toMatch(/^\(2\)/);
+  await click('Workspace details');
+  await click('Leave workspace');
+  expect(document.title).not.toMatch(/^\(/);
+});
+
+it('gives messages that arrived while the pane was hidden a fresh NEW divider', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  vi.spyOn(ApiClient.prototype, 'listSessions').mockResolvedValue({ sessions: [], next_cursor: null });
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true);
+  await login(); await click('Peer'); await flush();
+  expect(markRead).toHaveBeenLastCalledWith('dm', 2);
+
+  // The sessions overlay hides the whole layout while a new message lands.
+  await click('Sessions');
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2), fromPeer(3)]);
+  await flush(() => gateways[0].onEvent(event(3)));
+  await flush();
+  expect(markRead).not.toHaveBeenCalledWith('dm', 3);
+
+  await click('Close sessions');
+  await flush();
+  const divider = host.querySelector('main .new-divider');
+  expect(divider?.nextElementSibling?.querySelector('.message-sequence')?.textContent).toBe('#3');
+});
+
+it('retries a read whose request stalled once the stall times out', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockReturnValue(new Promise(() => {}));
+  visibility(true);
+  await login();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    await click('Peer'); await flush();
+    expect(markRead).toHaveBeenCalledTimes(1);
+    await flush(() => window.dispatchEvent(new Event('focus')));
+    expect(markRead).toHaveBeenCalledTimes(1);
+    await flush(() => { vi.advanceTimersByTime(15_000); });
+    await flush(() => window.dispatchEvent(new Event('focus')));
+    expect(markRead).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+const listedChannel = { id: 'old-channel-conv', kind: 'channel', members: [], peer_handle: null, peer_display_name: null, last_seq: 2, last_sent_at: null, last_read_seq: 0 };
+
+it('prunes a channel the server stopped listing (remote kick or ban) on the next refresh', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }, listedChannel]);
+  await login();
+  expect(document.title).toMatch(/^\(2\)/);
+  // Removed elsewhere: the reconnect's list no longer carries the channel.
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }]);
+  await flush(() => gateways[0].onStatus('connected'));
+  await flush();
+  expect(document.title).not.toMatch(/^\(/);
+});
+
+it('keeps a channel opened this session that no list has carried yet', async () => {
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.mocked(ApiClient.prototype.listChannels).mockResolvedValue([channel('general')]);
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }]);
+  await login(); await click('general');
+  await flush(() => gateways[0].onStatus('connected'));
+  await flush();
+  expect(host.querySelector('main h2')?.textContent).toBe('#general');
+});
+
