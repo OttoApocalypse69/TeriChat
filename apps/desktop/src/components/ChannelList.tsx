@@ -4,6 +4,8 @@ import type { ChannelBody } from '../lib/api';
 
 interface Props {
   filter?: string;
+  /** Private unread counts keyed by channel conversation id. */
+  unreadByConversation?: Map<string, number>;
   workspaceName: string | null;
   channels: ChannelBody[];
   selectedChannelId: string | null;
@@ -15,6 +17,7 @@ interface Props {
 
 export default function ChannelList({
   filter = '',
+  unreadByConversation,
   workspaceName,
   channels,
   selectedChannelId,
@@ -69,20 +72,25 @@ export default function ChannelList({
       </div>
       {error && <p className="text-alert px-2 pb-1">{error}</p>}
       <ul>
-        {visible.map((c) => (
-          <li key={c.id}>
-            <button
-              type="button"
-              onClick={() => onSelect(c.id)}
-              aria-current={c.id === selectedChannelId ? 'page' : undefined}
-              className="nav-row"
-              title={`#${c.name}`}
-            >
-              {/* One inline run keeps the accessible name "#name". */}
-              <span className="nav-row-label"><span className="channel-glyph">#</span>{c.name}</span>
-            </button>
-          </li>
-        ))}
+        {visible.map((c) => {
+          const unread = unreadByConversation?.get(c.conversation_id) ?? 0;
+          return (
+            <li key={c.id}>
+              <button
+                type="button"
+                onClick={() => onSelect(c.id)}
+                aria-current={c.id === selectedChannelId ? 'page' : undefined}
+                aria-describedby={unread > 0 ? `unread-${c.conversation_id}` : undefined}
+                className={`nav-row${unread > 0 ? ' nav-row--unread' : ''}`}
+                title={`#${c.name}`}
+              >
+                {/* One inline run keeps the accessible name "#name". */}
+                <span className="nav-row-label"><span className="channel-glyph">#</span>{c.name}</span>
+                {unread > 0 && <span id={`unread-${c.conversation_id}`} hidden>{unread} unread</span>}
+              </button>
+            </li>
+          );
+        })}
       </ul>
       {filter.trim() && channels.length > 0 && visible.length === 0 && (
         <p className="navigation-no-results">No matching channels.</p>

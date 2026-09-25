@@ -2,6 +2,8 @@ import type { WorkspaceBody } from '../lib/api';
 
 interface Props {
   workspaces: WorkspaceBody[];
+  /** Workspaces with unread channels among those loaded this session. */
+  unreadWorkspaceIds?: Set<string>;
   selectedWorkspaceId: string | null;
   loading: boolean;
   error: string | null;
@@ -11,6 +13,7 @@ interface Props {
 
 export default function WorkspaceList({
   workspaces,
+  unreadWorkspaceIds,
   selectedWorkspaceId,
   loading,
   error,
@@ -48,12 +51,14 @@ export default function WorkspaceList({
               onClick={() => onSelect(w.id)}
               aria-pressed={w.id === selectedWorkspaceId}
               aria-label={`${w.name} ${w.my_role}`}
-              className="rail-tile rail-workspace"
+              aria-describedby={unreadWorkspaceIds?.has(w.id) ? `unread-ws-${w.id}` : undefined}
+              className={`rail-tile rail-workspace${unreadWorkspaceIds?.has(w.id) ? ' rail-workspace--unread' : ''}`}
               title={`${w.name} (${w.my_role})`}
             >
               <span className="rail-tile-rim" aria-hidden />
               <span className="rail-tile-face" aria-hidden>{w.name.trim().slice(0, 2).toUpperCase()}</span>
               <span className="sr-only">{w.name} {w.my_role}</span>
+              {unreadWorkspaceIds?.has(w.id) && <span id={`unread-ws-${w.id}`} hidden>Unread messages</span>}
             </button>
           </li>
         ))}

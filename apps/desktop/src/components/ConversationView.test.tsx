@@ -16,10 +16,10 @@ const message = (seq: number, sender: string, sentAt: string): ChatMessage => ({
   client_msg_id: `c${seq}`, ciphertext_b64: btoa(`body-${seq}`),
 });
 
-async function render(messages: ChatMessage[], conversation: ChatConversation = dm, title: string | null = null) {
+async function render(messages: ChatMessage[], conversation: ChatConversation = dm, title: string | null = null, unreadAfterSeq: number | null = null) {
   await act(async () => root.render(
     <ConversationView conversation={conversation} messages={messages} meId="me" meHandle="me"
-      loading={false} sending={false} error={null} onSend={async () => {}} title={title} />,
+      loading={false} sending={false} error={null} onSend={async () => {}} title={title} unreadAfterSeq={unreadAfterSeq} />,
   ));
 }
 
@@ -59,4 +59,30 @@ it('styles the channel hash without changing the literal title text', async () =
   await render([], { id: 'ch', kind: 'channel', members: [] }, '#general');
   expect(host.querySelector('h2')?.textContent).toBe('#general');
   expect(host.querySelector('h2 .channel-glyph')?.textContent).toBe('#');
+});
+
+it('puts one NEW divider before the first unread message from someone else', async () => {
+  const history = [
+    message(1, 'peer', '2026-09-24T14:00:00Z'),
+    message(2, 'me', '2026-09-24T14:01:00Z'),
+    message(3, 'peer', '2026-09-24T14:02:00Z'),
+    message(4, 'peer', '2026-09-24T14:03:00Z'),
+  ];
+  await render(history, dm, null, 1);
+  const dividers = host.querySelectorAll('.new-divider');
+  expect(dividers).toHaveLength(1);
+  // Own message 2 is never "new"; the divider sits right above message 3,
+  // which also restarts the author header instead of grouping.
+  const next = dividers[0].nextElementSibling;
+  expect(next?.querySelector('.message-sequence')?.textContent).toBe('#3');
+  expect(next?.classList.contains('message-row--follow')).toBe(false);
+  expect(dividers[0].getAttribute('aria-label')).toBe('New messages');
+});
+
+it('shows no divider without a marker or when only your own messages follow it', async () => {
+  const history = [message(1, 'peer', '2026-09-24T14:00:00Z'), message(2, 'me', '2026-09-24T14:01:00Z')];
+  await render(history, dm, null, null);
+  expect(host.querySelector('.new-divider')).toBeNull();
+  await render(history, dm, null, 1);
+  expect(host.querySelector('.new-divider')).toBeNull();
 });

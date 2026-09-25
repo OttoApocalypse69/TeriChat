@@ -450,3 +450,56 @@ it('rejects a group that would contain only the caller without calling the serve
   expect(createGroup).not.toHaveBeenCalled();
   expect(host.querySelector('form[aria-label="New group"] [role="alert"]')?.textContent).toContain('at least one other');
 });
+
+const fromPeer = (seq: number): MessageBody => ({ ...message(seq), sender_id: 'peer' });
+const unreadRow = { ...row(), last_seq: 2, last_read_seq: 0 };
+function visibility(focused: boolean, laidOut = true) {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(focused);
+  vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue({ length: laidOut ? 1 : 0 } as DOMRectList);
+}
+
+it('shows private unread counts and marks read only once the conversation is seen', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(false);
+  await login();
+  expect(host.querySelector('.conversation-row .unread-badge')?.textContent).toBe('2');
+  expect(document.title).toMatch(/^\(2\)/);
+
+  await click('Peer');
+  await flush();
+  expect(markRead).not.toHaveBeenCalled();
+  expect(host.querySelector('main .new-divider')).not.toBeNull();
+
+  visibility(true);
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  await flush();
+  expect(markRead).toHaveBeenCalledTimes(1);
+  expect(markRead).toHaveBeenCalledWith('dm', 2);
+  expect(host.querySelector('.conversation-row .unread-badge')).toBeNull();
+  expect(document.title).not.toMatch(/^\(/);
+  // The divider stays where the conversation was opened, even once read.
+  expect(host.querySelector('main .new-divider')).not.toBeNull();
+});
+
+it('never marks a hidden pane read', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true, false);
+  await login(); await click('Peer');
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  expect(markRead).not.toHaveBeenCalled();
+  expect(host.querySelector('.conversation-row .unread-badge')?.textContent).toBe('2');
+});
+
+it('stays inert against servers without read markers', async () => {
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead');
+  visibility(true);
+  await login(); await click('Peer');
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  expect(markRead).not.toHaveBeenCalled();
+  expect(host.querySelector('.unread-badge, main .new-divider')).toBeNull();
+});

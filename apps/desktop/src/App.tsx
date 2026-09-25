@@ -34,6 +34,8 @@ import {
   parseMemberHandles,
   sortConversations,
   toChatMessage,
+  unreadBadge,
+  unreadCount,
 } from './lib/store';
 import {
   WorkspaceStore,
@@ -510,6 +512,8 @@ function AuthenticatedApp({ session, onLogout }: {
       });
       if (!live.current) return;
       storeRef.current.mergeOutgoing(toChatMessage(sent));
+      // The server advances the sender's marker with the send.
+      storeRef.current.setReadMarker(sent.conversation_id, sent.seq);
       bump();
     } finally {
       if (live.current) setSending(false);
@@ -520,6 +524,69 @@ function AuthenticatedApp({ session, onLogout }: {
     if (selectedId) void refreshHistory(selectedId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
+
+  // ---- Private unread state (never shared with other members) ----
+  const unreadByConversation = new Map(
+    store.conversations.map(c => [c.id, unreadCount(c, store.messages.get(c.id), meId)]),
+  );
+  const unreadWorkspaceIds = new Set(wsStore.workspaces
+    .filter(w => wsStore.channelsFor(w.id).some(ch => (unreadByConversation.get(ch.conversation_id) ?? 0) > 0))
+    .map(w => w.id));
+
+  // The "new" divider sits where the marker was when the conversation opened,
+  // and only when something was unread then; reading must not move it.
+  const [unreadSnapshot, setUnreadSnapshot] = useState<{ id: string; seq: number } | null>(null);
+  useEffect(() => {
+    const seq = selected?.last_read_seq;
+    const unread = selectedId ? (unreadByConversation.get(selectedId) ?? 0) : 0;
+    setUnreadSnapshot(selectedId && seq != null && unread > 0 ? { id: selectedId, seq } : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  // Re-check visibility when the window regains focus or the tab is shown.
+  const [attentionTick, setAttentionTick] = useState(0);
+  useEffect(() => {
+    const poke = () => setAttentionTick(tick => tick + 1);
+    window.addEventListener('focus', poke);
+    document.addEventListener('visibilitychange', poke);
+    return () => {
+      window.removeEventListener('focus', poke);
+      document.removeEventListener('visibilitychange', poke);
+    };
+  }, []);
+
+  // A conversation is read only while someone can see it: its pane has
+  // layout, the tab is visible, the window has focus and sessions are closed.
+  const readInFlight = useRef(new Map<string, number>());
+  const selectedLatestSeq = selectedId ? store.maxSeq(selectedId) : 0;
+  useEffect(() => {
+    if (!selected || selected.last_read_seq == null || selectedLatestSeq <= selected.last_read_seq) return;
+    if (sessionsOpen || document.visibilityState === 'hidden' || !document.hasFocus()) return;
+    if ((conversationRef.current?.getClientRects().length ?? 0) === 0) return;
+    const id = selected.id;
+    const target = selectedLatestSeq;
+    if ((readInFlight.current.get(id) ?? -1) >= target) return;
+    readInFlight.current.set(id, target);
+    void api.markRead(id, target).then(marker => {
+      if (!live.current) return;
+      storeRef.current.setReadMarker(id, marker.last_read_seq);
+      bump();
+    }, () => {
+      // Unconfirmed: the next message, focus change or selection retries.
+    }).finally(() => {
+      if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
+    });
+  }, [api, bump, selected, selectedLatestSeq, sessionsOpen, pane, attentionTick]);
+
+  const baseTitle = useRef(document.title);
+  const totalUnread = [...unreadByConversation.values()].reduce((sum, n) => sum + n, 0);
+  useEffect(() => {
+    document.title = totalUnread > 0 ? `(${unreadBadge(totalUnread)}) ${baseTitle.current}` : baseTitle.current;
+  }, [totalUnread]);
+  useEffect(() => {
+    const base = baseTitle.current;
+    return () => { document.title = base; };
+  }, []);
 
   const closeSessions = () => { setSessionsOpen(false); sessionsButton.current?.focus(); };
   return (
@@ -563,6 +630,7 @@ function AuthenticatedApp({ session, onLogout }: {
           <span className="rail-divider" aria-hidden />
           <WorkspaceList
             workspaces={wsStore.workspaces}
+            unreadWorkspaceIds={unreadWorkspaceIds}
             selectedWorkspaceId={selectedWorkspaceId}
             loading={wsLoading}
             error={wsError}
@@ -591,6 +659,7 @@ function AuthenticatedApp({ session, onLogout }: {
           <div className="shrink-0">
             <ChannelList
               filter={navigationQuery}
+              unreadByConversation={unreadByConversation}
               key={selectedWorkspaceId ?? 'no-workspace'}
               workspaceName={selectedWorkspace?.name ?? null}
               channels={channels}
@@ -642,6 +711,7 @@ function AuthenticatedApp({ session, onLogout }: {
             error={error}
             onSend={send}
             title={selected?.kind === 'channel' ? channelTitle : null}
+            unreadAfterSeq={unreadSnapshot?.id === selectedId ? unreadSnapshot.seq : null}
           />
         </main>
         {selectedWorkspace && (

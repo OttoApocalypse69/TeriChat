@@ -9,6 +9,8 @@ import {
   lastActivityAt,
   sortConversations,
   truncatePreview,
+  unreadBadge,
+  unreadCount,
   type ChatConversation,
   type ChatMessage,
 } from '../lib/store';
@@ -138,13 +140,15 @@ export default function ConversationList({
             lastActivityAt(c, loaded.length > 0 ? loaded : undefined),
           );
           const sub = conversationSublabel(c);
+          const unread = meId ? unreadCount(c, loaded, meId) : 0;
           return (
             <li key={c.id}>
               <button
                 type="button"
                 onClick={() => onSelect(c.id)}
                 aria-current={c.id === selectedId ? 'page' : undefined}
-                className="conversation-row"
+                aria-describedby={unread > 0 ? `unread-${c.id}` : undefined}
+                className={`conversation-row${unread > 0 ? ' conversation-row--unread' : ''}`}
               >
                 {c.kind === 'group'
                   ? <span aria-hidden className="tile h-8 w-8"><PeopleIcon /></span>
@@ -156,11 +160,15 @@ export default function ConversationList({
                     <span className="conversation-row-name">{conversationLabel(c, meId)}</span>
                     {when && <span className="conversation-row-time">{when}</span>}
                   </span>
-                  <span className="conversation-row-preview">
-                    {sub && <span className="conversation-row-sub">{sub} · </span>}
-                    {preview}
+                  <span className="conversation-row-bottom">
+                    <span className="conversation-row-preview">
+                      {sub && <span className="conversation-row-sub">{sub} · </span>}
+                      {preview}
+                    </span>
+                    {unread > 0 && <span className="unread-badge" aria-hidden>{unreadBadge(unread)}</span>}
                   </span>
                 </span>
+                {unread > 0 && <span id={`unread-${c.id}`} hidden>{unread} unread</span>}
               </button>
             </li>
           );

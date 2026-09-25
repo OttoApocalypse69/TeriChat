@@ -14,6 +14,8 @@ import {
   senderLabel,
   sortConversations,
   truncatePreview,
+  unreadBadge,
+  unreadCount,
   upsertConversation,
   type ChatConversation,
   type ChatMessage,
@@ -234,5 +236,47 @@ describe('group rosters', () => {
     expect(parseMemberHandles(' @ana, bo  cy,,@ana\n@@teri ', 'teri')).toEqual(['ana', 'bo', 'cy']);
     expect(parseMemberHandles(' , @ ', 'teri')).toEqual([]);
     expect(parseMemberHandles('Ana ana')).toEqual(['Ana', 'ana']);
+  });
+});
+
+describe('private unread state', () => {
+  const msg = (seq: number, sender = 'peer'): ChatMessage => ({
+    id: `m${seq}`, conversation_id: 'c', sender_id: sender, seq, ciphertext_b64: '', client_msg_id: `c${seq}`, sent_at: '',
+  });
+  const conv = (over: Partial<ChatConversation> = {}): ChatConversation => ({
+    id: 'c', kind: 'dm', members: ['me', 'peer'], last_seq: 5, last_read_seq: 2, ...over,
+  });
+  const five = [1, 2, 3, 4, 5].map(seq => msg(seq, seq === 4 ? 'me' : 'peer'));
+
+  it('counts only other people’s messages after the marker', () => {
+    expect(unreadCount(conv(), five, 'me')).toBe(2);
+    expect(unreadCount(conv({ last_read_seq: 5 }), five, 'me')).toBe(0);
+  });
+
+  it('counts server-reported positions that history has not loaded yet', () => {
+    expect(unreadCount(conv({ last_seq: 9 }), [msg(3)], 'me')).toBe(7);
+    expect(unreadCount(conv(), undefined, 'me')).toBe(3);
+  });
+
+  it('never guesses when the server sent no marker', () => {
+    expect(unreadCount(conv({ last_read_seq: undefined }), five, 'me')).toBe(0);
+    expect(unreadCount(conv({ last_read_seq: null }), five, 'me')).toBe(0);
+  });
+
+  it('caps the badge at 99+', () => {
+    expect(unreadBadge(99)).toBe('99');
+    expect(unreadBadge(100)).toBe('99+');
+  });
+
+  it('moves markers forward only, and never invents one', () => {
+    const store = new ChatStore();
+    store.addConversation(conv());
+    store.addConversation({ id: 'legacy', kind: 'dm', members: [] });
+    store.setReadMarker('c', 4);
+    store.setReadMarker('c', 3);
+    store.setReadMarker('legacy', 9);
+    store.setReadMarker('missing', 1);
+    expect(store.conversations.find(c => c.id === 'c')?.last_read_seq).toBe(4);
+    expect(store.conversations.find(c => c.id === 'legacy')?.last_read_seq).toBeUndefined();
   });
 });

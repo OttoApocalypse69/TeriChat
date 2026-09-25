@@ -30,6 +30,32 @@ export interface ChatConversation {
   last_sent_at?: string | null;
   /** DM/group roster with handles; absent from older servers and channels. */
   member_profiles?: MemberProfileBody[];
+  /** The caller's private read marker; absent when the server predates it. */
+  last_read_seq?: number | null;
+}
+
+/**
+ * Messages from other people after the caller's read marker. Unknown markers
+ * (older servers) count as zero rather than guessing. Positions the server
+ * reported but history has not loaded yet still count.
+ */
+export function unreadCount(
+  conv: ChatConversation,
+  messages: ChatMessage[] | undefined,
+  meId: string,
+): number {
+  const read = conv.last_read_seq;
+  if (read == null) return 0;
+  const loaded = messages ?? [];
+  const maxLoaded = loaded.reduce((max, m) => Math.max(max, m.seq), 0);
+  const fromOthers = loaded.filter(m => m.seq > read && m.sender_id !== meId).length;
+  const unloaded = Math.max(0, (conv.last_seq ?? 0) - Math.max(maxLoaded, read));
+  return fromOthers + unloaded;
+}
+
+/** Badge text: exact up to 99. */
+export function unreadBadge(count: number): string {
+  return count > 99 ? '99+' : String(count);
 }
 
 export function toChatMessage(m: MessageBody): ChatMessage {
@@ -314,6 +340,13 @@ export class ChatStore {
       this.historyCursor(conversationId),
     );
     this.historySeq.set(conversationId, cursor);
+  }
+
+  /** Advance the caller's read marker; markers never move backwards. */
+  setReadMarker(conversationId: string, seq: number): void {
+    const conv = this.conversations.find(c => c.id === conversationId);
+    if (!conv || conv.last_read_seq == null || seq <= conv.last_read_seq) return;
+    this.conversations = upsertConversation(this.conversations, { ...conv, last_read_seq: seq });
   }
 
   maxSeq(conversationId: string): number {

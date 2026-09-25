@@ -27,6 +27,8 @@ interface Props {
   title?: string | null;
   isActivePane?: boolean;
   headerActions?: ReactNode;
+  /** Read marker when this conversation opened; later messages are new. */
+  unreadAfterSeq?: number | null;
 }
 
 // Same author within five minutes reads as one block: no repeated header.
@@ -50,6 +52,7 @@ export default function ConversationView({
   title,
   isActivePane = true,
   headerActions,
+  unreadAfterSeq = null,
 }: Props) {
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
@@ -127,6 +130,10 @@ export default function ConversationView({
   const peerKey = conversation.peer_handle ?? conversation.id;
 
   let lastDay = '';
+  // The first message from someone else after the opening marker.
+  const firstNewId = unreadAfterSeq == null
+    ? null
+    : messages.find(m => m.seq > unreadAfterSeq && m.sender_id !== meId)?.id ?? null;
   return (
     <div className="conversation-view flex min-h-0 flex-1 flex-col">
       <div className="conversation-header">
@@ -170,7 +177,8 @@ export default function ConversationView({
           lastDay = dayKey(m.sent_at);
           const mine = m.sender_id === meId;
           const author = senderLabel(meId, m.sender_id, conversation);
-          const follow = !divider && continuesGroup(messages[index - 1], m);
+          const isFirstNew = m.id === firstNewId;
+          const follow = !divider && !isFirstNew && continuesGroup(messages[index - 1], m);
           const clock = formatClockTime(m.sent_at);
           return (
             <div key={m.id}>
@@ -178,6 +186,11 @@ export default function ConversationView({
                 <p className="day-divider">
                   <span>{divider}</span>
                 </p>
+              )}
+              {isFirstNew && (
+                <div className="new-divider" role="separator" aria-label="New messages">
+                  <span aria-hidden>NEW</span>
+                </div>
               )}
               <div className={`message-row${mine ? ' message-row-own' : ''}${follow ? ' message-row--follow' : ''}`}>
                 <div className="message-gutter">
