@@ -51,6 +51,13 @@ export interface ConversationBody {
   members: string[];
 }
 
+/** A DM/group co-member as returned by GET /v1/conversations. */
+export interface MemberProfileBody {
+  user_id: string;
+  handle: string;
+  display_name: string;
+}
+
 /** GET /v1/conversations entry: caller-scoped, with the DM peer resolved. */
 export interface ConversationSummaryBody {
   id: string;
@@ -60,6 +67,8 @@ export interface ConversationSummaryBody {
   peer_display_name: string | null;
   last_seq: number | null;
   last_sent_at: string | null;
+  /** DM/group roster; older servers omit it and channels return it empty. */
+  member_profiles?: MemberProfileBody[];
 }
 
 export interface MessageBody {

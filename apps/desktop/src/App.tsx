@@ -31,6 +31,7 @@ import {
 import {
   ChatStore,
   gatewayEventInfo,
+  parseMemberHandles,
   sortConversations,
   toChatMessage,
 } from './lib/store';
@@ -391,6 +392,19 @@ function AuthenticatedApp({ session, onLogout }: {
     await refreshHistory(conv.id);
   }
 
+  /** Create a group from free-form handles, then land in it with names resolved. */
+  async function createGroup(memberInput: string): Promise<void> {
+    const handles = parseMemberHandles(memberInput, handle);
+    if (handles.length === 0) throw new Error('Add at least one other person’s handle.');
+    const conv = await api.createGroup(handles);
+    if (!live.current) return;
+    storeRef.current.addConversation(conv);
+    openConversation(conv.id);
+    bump();
+    await refreshConversations();
+    await refreshHistory(conv.id);
+  }
+
   function selectWorkspace(id: string): void {
     wsStoreRef.current.selectWorkspace(id);
     bump();
@@ -590,11 +604,13 @@ function AuthenticatedApp({ session, onLogout }: {
           <div className="shrink-0">
             <ConversationList
               filter={navigationQuery}
+              meId={meId}
               conversations={dmConversations}
               messagesByConversation={store.messages}
               selectedId={selectedId}
               onSelect={openConversation}
               onOpenDm={openDm}
+              onCreateGroup={createGroup}
             />
           </div>
           <div className="workspace-actions">

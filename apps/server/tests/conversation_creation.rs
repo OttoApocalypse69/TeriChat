@@ -395,3 +395,56 @@ async fn lookup_preserves_historical_records_and_exact_membership() {
     }
     f.close().await;
 }
+
+#[tokio::test]
+async fn http_group_list_carries_member_profiles_not_channel_rosters() {
+    let f = Fixture::new().await;
+    let (a, a_handle, token) = f.user().await;
+    let (b, b_handle, _) = f.user().await;
+    let (c, _, _) = f.user().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/conversations")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"member_handles": [b_handle]}).to_string(),
+        ))
+        .unwrap();
+    let response = f.router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let group: Uuid = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let channel = messaging::create_conversation(&f.pool, a, "channel", &[c])
+        .await
+        .unwrap();
+
+    let request = Request::builder()
+        .uri("/v1/conversations")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = f.router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let row = |id: Uuid| {
+        rows.iter()
+            .find(|row| row["id"] == id.to_string())
+            .expect("listed")
+    };
+    let mut profiles = row(group)["member_profiles"].as_array().unwrap().clone();
+    profiles.sort_by_key(|p| p["handle"].as_str().unwrap().to_owned());
+    let mut expected = vec![
+        serde_json::json!({"user_id": a, "handle": a_handle, "display_name": "Synthetic"}),
+        serde_json::json!({"user_id": b, "handle": b_handle, "display_name": "Synthetic"}),
+    ];
+    expected.sort_by_key(|p| p["handle"].as_str().unwrap().to_owned());
+    assert_eq!(profiles, expected, "exact wire shape the client reads");
+    assert_eq!(row(channel.id)["member_profiles"], serde_json::json!([]));
+    f.close().await;
+}

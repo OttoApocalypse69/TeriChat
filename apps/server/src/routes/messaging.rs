@@ -63,6 +63,15 @@ struct ConversationSummaryBody {
     peer_display_name: Option<String>,
     last_seq: Option<i64>,
     last_sent_at: Option<DateTime<Utc>>,
+    /// `dm`/`group` rosters so clients can name senders; empty for channels.
+    member_profiles: Vec<MemberProfileBody>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemberProfileBody {
+    user_id: Uuid,
+    handle: String,
+    display_name: String,
 }
 
 impl From<messaging::ConversationSummary> for ConversationSummaryBody {
@@ -75,6 +84,15 @@ impl From<messaging::ConversationSummary> for ConversationSummaryBody {
             peer_display_name: row.peer_display_name,
             last_seq: row.last_seq,
             last_sent_at: row.last_sent_at,
+            member_profiles: row
+                .member_profiles
+                .into_iter()
+                .map(|profile| MemberProfileBody {
+                    user_id: profile.user_id,
+                    handle: profile.handle,
+                    display_name: profile.display_name,
+                })
+                .collect(),
         }
     }
 }

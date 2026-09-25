@@ -423,3 +423,30 @@ it.each(['Close sessions', 'Escape', 'Sessions'])('completes self-revoke after i
   expect(host.textContent).toContain('Log in'); expect(ApiClient.prototype.logout).not.toHaveBeenCalled();
   expect(ApiClient.prototype.listSessions).toHaveBeenCalledTimes(1);
 });
+
+it('creates a group from handles, then names it from the refreshed roster', async () => {
+  const created = { id: 'grp', kind: 'group', members: ['a', 'u1', 'u2'] };
+  const roster = { ...created, peer_handle: null, peer_display_name: null, last_seq: null, last_sent_at: null,
+    member_profiles: [{ user_id: 'a', handle: 'a', display_name: '' }, { user_id: 'u1', handle: 'ana', display_name: 'Ana' }, { user_id: 'u2', handle: 'bo', display_name: '' }] };
+  const createGroup = vi.spyOn(ApiClient.prototype, 'createGroup').mockResolvedValue(created);
+  await login();
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), roster]);
+  await click('New group');
+  // The caller's own handle and duplicates are dropped before the request.
+  await type('handles, comma-separated', '@ana, bo a ana');
+  await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(createGroup).toHaveBeenCalledWith(['ana', 'bo']);
+  expect(host.querySelector('main h2')?.textContent).toBe('Ana, @bo');
+  expect(host.querySelector('.conversation-row[aria-current="page"]')?.textContent).toContain('Ana, @bo');
+  expect(host.querySelector('form[aria-label="New group"]')).toBeNull();
+});
+
+it('rejects a group that would contain only the caller without calling the server', async () => {
+  const createGroup = vi.spyOn(ApiClient.prototype, 'createGroup');
+  await login();
+  await click('New group');
+  await type('handles, comma-separated', '@a');
+  await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(createGroup).not.toHaveBeenCalled();
+  expect(host.querySelector('form[aria-label="New group"] [role="alert"]')?.textContent).toContain('at least one other');
+});

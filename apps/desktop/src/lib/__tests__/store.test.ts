@@ -10,6 +10,7 @@ import {
   gatewayEventInfo,
   lastActivityAt,
   mergeMessages,
+  parseMemberHandles,
   senderLabel,
   sortConversations,
   truncatePreview,
@@ -200,5 +201,38 @@ describe('gateway event routing', () => {
     expect(
       gatewayEventInfo({ id: 'e2', topic: 'other', payload: {} }),
     ).toBeNull();
+  });
+});
+
+describe('group rosters', () => {
+  const profile = (user_id: string, handle: string, display_name = '') => ({ user_id, handle, display_name });
+  const group = (profiles = [profile('me', 'teri', 'Teri'), profile('u1', 'ana', 'Ana'), profile('u2', 'bo')]): ChatConversation => ({
+    id: 'g', kind: 'group', members: profiles.map(p => p.user_id), member_profiles: profiles,
+  });
+
+  it('names a group by its other members, never the caller or raw ids', () => {
+    expect(conversationLabel(group(), 'me')).toBe('Ana, @bo');
+    expect(conversationSublabel(group())).toBe('3 members');
+    const big = group(['me', 'a', 'b', 'c', 'd', 'e'].map(id => profile(id, `h${id}`, `N${id}`)));
+    expect(conversationLabel(big, 'me')).toBe('Na, Nb, Nc +2');
+  });
+
+  it('falls back to a member count when the server sent no roster', () => {
+    const legacy: ChatConversation = { id: 'g', kind: 'group', members: ['me', 'u1', 'u2'] };
+    expect(conversationLabel(legacy, 'me')).toBe('Group · 3 members');
+    expect(conversationSublabel(legacy)).toBeNull();
+  });
+
+  it('labels group senders from the roster', () => {
+    expect(senderLabel('me', 'u1', group())).toBe('Ana');
+    expect(senderLabel('me', 'u2', group())).toBe('@bo');
+    expect(senderLabel('me', 'me', group())).toBe('you');
+    expect(senderLabel('me', 'stranger-id-1234', group())).toBe('stranger');
+  });
+
+  it('parses member handles: separators, @ prefixes, duplicates and self', () => {
+    expect(parseMemberHandles(' @ana, bo  cy,,@ana\n@@teri ', 'teri')).toEqual(['ana', 'bo', 'cy']);
+    expect(parseMemberHandles(' , @ ', 'teri')).toEqual([]);
+    expect(parseMemberHandles('Ana ana')).toEqual(['Ana', 'ana']);
   });
 });

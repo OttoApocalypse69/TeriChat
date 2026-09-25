@@ -2,7 +2,7 @@
 // Dedup keys: message `id` and per-conversation `client_msg_id` (the send
 // idempotency key). Gateway event ids are tracked separately for resume.
 
-import type { ConversationBody, MessageBody } from './api';
+import type { ConversationBody, MemberProfileBody, MessageBody } from './api';
 import type { GatewayOutboxEvent } from './gateway';
 
 export interface ChatMessage {
@@ -28,6 +28,8 @@ export interface ChatConversation {
   last_seq?: number | null;
   /** `sent_at` of that last message, when the server reported activity. */
   last_sent_at?: string | null;
+  /** DM/group roster with handles; absent from older servers and channels. */
+  member_profiles?: MemberProfileBody[];
 }
 
 export function toChatMessage(m: MessageBody): ChatMessage {
@@ -113,7 +115,7 @@ export function gatewayEventInfo(
 }
 
 /** Primary row title: peer name for DMs, never a raw UUID. */
-export function conversationLabel(conv: ChatConversation): string {
+export function conversationLabel(conv: ChatConversation, meId?: string): string {
   if (conv.kind === 'dm') {
     if (conv.peer_display_name) return conv.peer_display_name;
     if (conv.peer_handle) return `@${conv.peer_handle}`;
@@ -121,6 +123,12 @@ export function conversationLabel(conv: ChatConversation): string {
   }
   if (conv.kind === 'channel') return 'Channel';
   if (conv.kind === 'group') {
+    // Groups are named by their other members once the roster is known.
+    const others = (conv.member_profiles ?? []).filter(p => p.user_id !== meId).map(profileName);
+    if (others.length > 0) {
+      const shown = others.slice(0, 3).join(', ');
+      return others.length > 3 ? `${shown} +${others.length - 3}` : shown;
+    }
     return conv.members.length > 0
       ? `Group · ${conv.members.length} members`
       : 'Group';
@@ -128,12 +136,37 @@ export function conversationLabel(conv: ChatConversation): string {
   return conv.kind || 'Conversation';
 }
 
-/** Secondary row line for DMs: the handle behind the display name. */
+/** Secondary row line: the handle behind a DM name, or a named group's size. */
 export function conversationSublabel(conv: ChatConversation): string | null {
   if (conv.kind === 'dm' && conv.peer_display_name && conv.peer_handle) {
     return `@${conv.peer_handle}`;
   }
+  if (conv.kind === 'group' && (conv.member_profiles?.length ?? 0) > 0) {
+    return `${conv.members.length} members`;
+  }
   return null;
+}
+
+function profileName(profile: MemberProfileBody): string {
+  return profile.display_name.trim() || `@${profile.handle}`;
+}
+
+/** The roster entry for a sender, when the server resolved one. */
+export function memberProfile(conv: ChatConversation | null, userId: string): MemberProfileBody | null {
+  return conv?.member_profiles?.find(p => p.user_id === userId) ?? null;
+}
+
+/**
+ * Parse free-form group member input ("@ana, bo  cy") into unique handles,
+ * dropping the caller's own handle (the server adds the creator anyway).
+ */
+export function parseMemberHandles(input: string, ownHandle?: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of input.split(/[\s,]+/)) {
+    const handle = raw.replace(/^@+/, '');
+    if (handle && handle !== ownHandle) seen.add(handle);
+  }
+  return [...seen];
 }
 
 /** Single avatar letter from the peer name (or kind fallback). */
@@ -145,7 +178,7 @@ export function avatarInitial(conv: ChatConversation): string {
   return (src.charAt(0) || '?').toUpperCase();
 }
 
-/** Sender tag under a message: `you` for self, peer name for DMs. */
+/** Sender tag under a message: `you` for self, else the DM peer or roster name. */
 export function senderLabel(
   meId: string,
   senderId: string,
@@ -156,6 +189,8 @@ export function senderLabel(
     if (conv.peer_display_name) return conv.peer_display_name;
     if (conv.peer_handle) return `@${conv.peer_handle}`;
   }
+  const profile = memberProfile(conv, senderId);
+  if (profile) return profileName(profile);
   return senderId.slice(0, 8);
 }
 
