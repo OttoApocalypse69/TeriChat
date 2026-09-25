@@ -45,57 +45,56 @@ export default function ChannelList({
 
   if (!workspaceName) {
     return (
-      <div className="border-b border-zinc-800 p-2">
-        <h2 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-          Channels
-        </h2>
-        <p className="px-1 py-1 text-xs text-zinc-500">
+      <div className="channel-list">
+        <div className="nav-section-head">
+          <h2 className="label-mono">Channels</h2>
+        </div>
+        <p className="navigation-no-results">
           Select a workspace to see channels.
         </p>
       </div>
     );
   }
 
+  const query = filter.trim().toLocaleLowerCase().replace(/^#/, '');
+  const visible = channels.filter(c => c.name.toLocaleLowerCase().includes(query));
   return (
-    <div className="channel-list border-b border-zinc-800 p-2">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-          Channels · {workspaceName}
+    <div className="channel-list">
+      <div className="nav-section-head">
+        {/* The workspace name is the navigator title; keep it for assistive tech. */}
+        <h2 className="label-mono">
+          Channels<span className="sr-only"> · {workspaceName}</span>
         </h2>
-        {loading && <span className="text-[11px] text-zinc-500">…</span>}
+        {loading && <span className="meta-mono" aria-hidden>…</span>}
       </div>
-      {error && <p className="mb-1 text-xs text-red-400">{error}</p>}
-      <ul className="max-h-40 space-y-0.5 overflow-y-auto">
-        {channels.filter(c => c.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase().replace(/^#/, ''))).map((c) => (
+      {error && <p className="text-alert px-2 pb-1">{error}</p>}
+      <ul>
+        {visible.map((c) => (
           <li key={c.id}>
             <button
               type="button"
               onClick={() => onSelect(c.id)}
               aria-current={c.id === selectedChannelId ? 'page' : undefined}
-              className={`w-full truncate rounded px-2 py-1.5 text-left text-sm ${
-                c.id === selectedChannelId
-                  ? 'bg-emerald-950 font-semibold'
-                  : 'hover:bg-zinc-800'
-              }`}
+              className="nav-row"
               title={`#${c.name}`}
             >
-              <span className="mr-1 text-zinc-500">#</span>
-              {c.name}
+              {/* One inline run keeps the accessible name "#name". */}
+              <span className="nav-row-label"><span className="channel-glyph">#</span>{c.name}</span>
             </button>
           </li>
         ))}
       </ul>
-      {filter.trim() && channels.length > 0 && !channels.some(c => c.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase().replace(/^#/, ''))) && (
+      {filter.trim() && channels.length > 0 && visible.length === 0 && (
         <p className="navigation-no-results">No matching channels.</p>
       )}
       {!loading && !error && channels.length === 0 && (
-        <p className="px-1 py-1 text-xs text-zinc-500">
+        <p className="navigation-no-results">
           No channels yet — create one below.
         </p>
       )}
-      <form onSubmit={create} className="mt-2 flex gap-1">
+      <form onSubmit={create} className="nav-inline-form">
         <input
-          className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          className="field field-sm flex-1"
           aria-label="New channel name"
           placeholder="new channel name"
           value={name}
@@ -104,12 +103,12 @@ export default function ChannelList({
         <button
           type="submit"
           disabled={busy || !name.trim()}
-          className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs font-semibold disabled:opacity-40"
+          className="btn btn-secondary shrink-0"
         >
           {busy ? '…' : 'Add'}
         </button>
       </form>
-      {createError && <p className="mt-1 text-xs text-red-400">{createError}</p>}
+      {createError && <p className="text-alert px-1 pt-1">{createError}</p>}
     </div>
   );
 }

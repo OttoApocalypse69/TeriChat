@@ -5,7 +5,7 @@ import { controlError, timestamp } from './SessionPanel';
 interface Props { api: ApiClient; workspaceId: string; meId: string }
 export default function WorkspaceActivity(props: Props) {
   const [open, setOpen] = useState(false);
-  return <div><button className="nav-action m-3" aria-expanded={open}
+  return <div className="panel-section"><button className="nav-action self-start" aria-expanded={open}
     onClick={() => setOpen(value => !value)}>Your activity</button>
     {open && <Activity key={`${props.meId}:${props.workspaceId}`} {...props} />}</div>;
 }
@@ -48,16 +48,16 @@ function Activity({ api, workspaceId, meId }: Props) {
     epoch.current += 1; busy.current = false; void load();
     return () => { epoch.current += 1; };
   }, [load]);
-  return <section aria-label="Your workspace activity" className="space-y-2 border-b border-zinc-800 p-3 text-xs">
-    <h2 className="font-semibold">Your workspace activity</h2>
-    <p className="text-zinc-400">Only your messages in this workspace’s current channels. Counts update eventually and may lag behind sending. Pages are a live view; totals and channel counts may differ while updating.</p>
-    <button className="nav-action" disabled={loading} onClick={() => void load()}>Refresh activity</button>
-    {loading && <p role="status">Loading activity…</p>}
-    {error && <div role="alert"><p>{error}</p><button className="nav-action" disabled={loading} onClick={() => void load(failedCursor.current)}>Retry activity</button></div>}
-    {stats && <div><p className="text-sm font-semibold">{stats.message_count} messages across current channels</p><p>Last message recorded: {timestamp(stats.last_message_at)}</p></div>}
-    {!loading && !error && rows.length === 0 && <p>No current channels.</p>}
-    <ul className="space-y-2">{rows.map(row => <li key={row.channel_id} className="rounded border border-zinc-800 p-2"><p className="font-medium">#{row.name}</p><p>{row.message_count} messages</p><p>Last message recorded: {timestamp(row.last_message_at)}</p></li>)}</ul>
-    {rows.length > 0 && <p>{rows.length} channels loaded{cursor ? ' · more available' : '.'}</p>}
-    {cursor && <button className="nav-action" disabled={loading} onClick={() => void load(cursor)}>Load more activity</button>}
+  return <section aria-label="Your workspace activity" className="flex flex-col items-start gap-2 text-xs">
+    <h2 className="label-mono">Your workspace activity</h2>
+    <p className="text-muted">Only your messages in this workspace’s current channels. Counts update eventually and may lag behind sending. Pages are a live view; totals and channel counts may differ while updating.</p>
+    <button className="btn btn-sm btn-ghost" disabled={loading} onClick={() => void load()}>Refresh activity</button>
+    {loading && <p role="status" className="text-muted">Loading activity…</p>}
+    {error && <div role="alert" className="text-alert flex flex-col items-start gap-2"><p>{error}</p><button className="btn btn-sm btn-secondary" disabled={loading} onClick={() => void load(failedCursor.current)}>Retry activity</button></div>}
+    {stats && <div className="card w-full px-3 py-2.5"><p className="text-[13px] font-semibold text-ink-1">{stats.message_count} messages across current channels</p><p className="meta-mono mt-1">Last message recorded: {timestamp(stats.last_message_at)}</p></div>}
+    {!loading && !error && rows.length === 0 && <p className="text-muted">No current channels.</p>}
+    <ul className="flex w-full flex-col gap-1.5">{rows.map(row => <li key={row.channel_id} className="panel-row"><p className="font-medium text-ink-1">#{row.name}</p><p className="text-ink-2">{row.message_count} messages</p><p className="meta-mono">Last message recorded: {timestamp(row.last_message_at)}</p></li>)}</ul>
+    {rows.length > 0 && <p className="meta-mono">{rows.length} channels loaded{cursor ? ' · more available' : '.'}</p>}
+    {cursor && <button className="btn btn-sm btn-secondary" disabled={loading} onClick={() => void load(cursor)}>Load more activity</button>}
   </section>;
 }

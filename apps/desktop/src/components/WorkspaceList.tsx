@@ -19,19 +19,17 @@ export default function WorkspaceList({
 }: Props) {
   return (
     <div className="rail-workspaces">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="sr-only">
-          Workspaces
-        </h2>
-        {loading && <span className="text-[11px] text-zinc-500">…</span>}
-      </div>
+      <h2 className="sr-only">
+        Workspaces
+      </h2>
+      <span className="rail-label" aria-hidden>{loading ? '···' : 'SPACES'}</span>
       {error && (
-        <div className="mb-1">
+        <div className="flex flex-col items-center gap-1">
           <p className="rail-error" title={error}>!</p>
           <button
             type="button"
             onClick={onRetry}
-            className="mt-1 rounded bg-zinc-800 px-2 py-0.5 text-xs"
+            className="btn btn-sm btn-secondary"
           >
             Retry
           </button>
@@ -50,10 +48,11 @@ export default function WorkspaceList({
               onClick={() => onSelect(w.id)}
               aria-pressed={w.id === selectedWorkspaceId}
               aria-label={`${w.name} ${w.my_role}`}
-              className="rail-workspace"
+              className="rail-tile rail-workspace"
               title={`${w.name} (${w.my_role})`}
             >
-              <span aria-hidden>{w.name.trim().slice(0, 2).toUpperCase()}</span>
+              <span className="rail-tile-rim" aria-hidden />
+              <span className="rail-tile-face" aria-hidden>{w.name.trim().slice(0, 2).toUpperCase()}</span>
               <span className="sr-only">{w.name} {w.my_role}</span>
             </button>
           </li>

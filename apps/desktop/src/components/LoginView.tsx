@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ApiClient } from '../lib/api';
+import { ArrowIcon, BrandMark, EyeIcon, OpenLockIcon } from './icons';
 import './LoginView.css';
 
 interface Props {
@@ -48,12 +49,8 @@ export default function LoginView({ api, onAuthed }: Props) {
           aria-labelledby="login-title"
         >
           <header className="login-brand">
-            <div className="login-mark" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5H9l-5.5 3V6A1.5 1.5 0 0 1 5 4.5Z" />
-                <path d="M8 9h8M8 13h5" />
-              </svg>
-            </div>
+            <BrandMark size={48} className="login-mark" />
+            <span className="login-kicker">Unknown Cyberia · Alpha 0</span>
             <h1>UnknownChat</h1>
             <p>Your conversations, together.</p>
           </header>
@@ -133,11 +130,7 @@ export default function LoginView({ api, onAuthed }: Props) {
                 aria-pressed={showPassword}
                 onClick={() => setShowPassword(!showPassword)}
               >
-                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
-                  <circle cx="12" cy="12" r="3" />
-                  {showPassword && <path d="m4 3 16 18" />}
-                </svg>
+                <EyeIcon size={18} crossed={showPassword} />
               </button>
             </div>
           </div>
@@ -148,10 +141,11 @@ export default function LoginView({ api, onAuthed }: Props) {
             className="login-submit"
           >
             {busy ? '…' : mode === 'login' ? 'Log in' : 'Register + log in'}
-            {!busy && <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>}
+            {!busy && <ArrowIcon size={16} />}
           </button>
           <p className="login-notice">
-            <strong>Demo plaintext.</strong> Messages are not end-to-end encrypted. Use synthetic data only.
+            <OpenLockIcon size={14} />
+            <span><strong>Demo plaintext.</strong> Messages are not end-to-end encrypted. Use synthetic data only.</span>
           </p>
         </form>
         <footer className="login-footer">Alpha 0 <span aria-hidden="true">·</span> Development preview</footer>

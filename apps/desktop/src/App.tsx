@@ -12,6 +12,10 @@ import WorkspaceList from './components/WorkspaceList';
 import SessionPanel from './components/SessionPanel';
 import WorkspaceActivity from './components/WorkspaceActivity';
 import {
+  BrandMark, ChatIcon, DevicesIcon, LogoutIcon, OpenLockIcon, PanelIcon, SearchIcon,
+} from './components/icons';
+import { avatarGradient } from './lib/avatar';
+import {
   ApiClient,
   apiBaseUrl,
   encodeOpaqueText,
@@ -503,35 +507,46 @@ function AuthenticatedApp({ session, onLogout }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
+  const closeSessions = () => { setSessionsOpen(false); sessionsButton.current?.focus(); };
   return (
-    <div className="chat-shell flex h-full flex-col bg-zinc-950 text-zinc-100" data-pane={pane} data-sessions-open={sessionsOpen === true}>
-      <header className="app-header flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
-        <span className="min-w-0 text-sm font-semibold">
-          <span className="brand-name">UnknownChat</span> <span className="account-handle block truncate text-xs font-normal text-zinc-400">@{handle}</span>
+    <div className="chat-shell" data-pane={pane} data-sessions-open={sessionsOpen === true}>
+      <header className="app-header">
+        <span className="topbar-brand">
+          <span className="topbar-mark"><BrandMark /></span>
+          <span className="brand-name">UnknownChat</span>
+          <span className="topbar-phase tag tag-line">Alpha 0</span>
         </span>
-        <span className="flex items-center gap-3">
-          <ConnectionIndicator status={status} />
+        <span className="topbar-actions">
           <button ref={sessionsButton} type="button" aria-expanded={sessionsOpen ?? false} aria-controls="account-sessions"
-            className="rounded bg-zinc-800 px-2 py-1 text-xs" onClick={() => setSessionsOpen(open => !open)}>Sessions</button>
+            className="btn btn-ghost" onClick={() => setSessionsOpen(open => !open)}><DevicesIcon />Sessions</button>
           <button
             type="button"
             onClick={logout}
-            className="rounded bg-zinc-800 px-2 py-1 text-xs"
+            className="btn btn-ghost"
           >
-            Log out
+            <LogoutIcon />Log out
           </button>
+          <span className="topbar-divider" aria-hidden />
+          <span className="topbar-account">
+            <span className="avatar avatar-28" aria-hidden style={{ background: avatarGradient(handle) }}>{handle.slice(0, 1).toUpperCase()}</span>
+            <span className="account-handle">@{handle}</span>
+          </span>
         </span>
       </header>
       {sessionsOpen !== null && <div id="account-sessions" hidden={!sessionsOpen} ref={sessionsRegion} tabIndex={-1}
-        className="max-h-[60dvh] shrink-0 overflow-y-auto border-b border-zinc-700" onKeyDown={event => {
-          if (event.key === 'Escape') { setSessionsOpen(false); sessionsButton.current?.focus(); }
+        onKeyDown={event => {
+          if (event.key === 'Escape') closeSessions();
         }}>
-        <button className="nav-action mx-4 mt-3" onClick={() => { setSessionsOpen(false); sessionsButton.current?.focus(); }}>Close sessions</button>
+        <button className="nav-action" onClick={closeSessions}>Close sessions</button>
         <SessionPanel api={api} onSessionEnded={sessionEnded} />
       </div>}
-      <div className="chat-layout flex min-h-0 flex-1">
+      <div className="chat-layout">
         <nav className="workspace-rail" aria-label="Workspace switcher">
-          <button type="button" className="rail-home" title="Conversations" aria-label="Show conversations" onClick={() => setPane('navigation')}>UC</button>
+          <button type="button" className="rail-tile rail-home" title="Conversations" aria-label="Show conversations" onClick={() => setPane('navigation')}>
+            <span className="rail-tile-rim" aria-hidden />
+            <span className="rail-tile-face" aria-hidden><ChatIcon size={20} /></span>
+          </button>
+          <span className="rail-divider" aria-hidden />
           <WorkspaceList
             workspaces={wsStore.workspaces}
             selectedWorkspaceId={selectedWorkspaceId}
@@ -540,20 +555,25 @@ function AuthenticatedApp({ session, onLogout }: {
             onSelect={id => { selectWorkspace(id); setPane('navigation'); }}
             onRetry={() => void refreshWorkspaces()}
           />
-          <span className="rail-version" title="Alpha demo">α0</span>
+          <span className="rail-version rail-label" title="Alpha demo">α0</span>
         </nav>
-        <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation flex shrink-0 flex-col border-r border-zinc-800">
+        <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation">
           <div className="navigation-heading">
-            <span className="eyebrow">Your space to connect</span>
-            <h1>Conversations</h1>
+            <h1>
+              <span className="display-m">{selectedWorkspace?.name ?? 'Conversations'}</span>
+              {selectedWorkspace && <span className="navigation-kind">WORKSPACE</span>}
+            </h1>
+            <span className="meta-mono">{selectedWorkspace ? `you are ${selectedWorkspace.my_role}` : 'Direct messages'}</span>
           </div>
-          {wsError && <p role="alert" className="mx-4 mb-3 text-xs text-red-300">{wsError}</p>}
+          {wsError && <p role="alert" className="text-alert mx-4 mt-3">{wsError}</p>}
           <label className="navigation-search">
-            <span aria-hidden>⌕</span>
+            <SearchIcon size={14} />
             <input type="search" aria-label="Filter conversations and channels" placeholder="Find a conversation…" value={navigationQuery} onChange={event => setNavigationQuery(event.target.value)} />
           </label>
-          {selectedWorkspace && <button type="button" className="details-toggle nav-action mx-3 mb-2" onClick={() => setPane('details')}>Workspace details</button>}
-          {selected && <button type="button" className="mobile-only nav-action mx-3 mb-2" onClick={() => setPane('conversation')}>Return to conversation</button>}
+          {(selectedWorkspace || selected) && <div className="navigation-shortcuts">
+            {selectedWorkspace && <button type="button" className="details-toggle nav-row" aria-controls="workspace-details" onClick={() => setPane('details')}><PanelIcon />Workspace details</button>}
+            {selected && <button type="button" className="mobile-only nav-action" onClick={() => setPane('conversation')}>Return to conversation</button>}
+          </div>}
           <div className="shrink-0">
             <ChannelList
               filter={navigationQuery}
@@ -578,26 +598,29 @@ function AuthenticatedApp({ session, onLogout }: {
             />
           </div>
           <div className="workspace-actions">
-            <h2 className="eyebrow">Make room for your people</h2>
-            <CreateWorkspace onCreate={createWorkspace} />
-            <JoinWorkspace onJoin={joinByCode} />
+            <h2 className="label-mono px-2">Make room for your people</h2>
+            <div className="workspace-actions-card">
+              <CreateWorkspace onCreate={createWorkspace} />
+              <JoinWorkspace onJoin={joinByCode} />
+            </div>
           </div>
           <div className="navigation-account">
-            <span className="account-avatar" aria-hidden>{handle.slice(0, 1).toUpperCase()}</span>
-            <span className="min-w-0"><strong className="block truncate">@{handle}</strong><span className="text-xs text-zinc-400">Alpha 0 · It sends bro</span></span>
+            <span className="avatar avatar-32" aria-hidden style={{ background: avatarGradient(handle) }}>{handle.slice(0, 1).toUpperCase()}</span>
+            <span className="min-w-0"><strong className="block truncate">@{handle}</strong><span className="meta-mono">Alpha 0 · It sends bro</span></span>
           </div>
         </aside>
-        <main ref={conversationRef} tabIndex={-1} aria-label="Conversation" className="chat-main min-w-0 flex-1" key={selectedId ?? 'none'}>
+        <main ref={conversationRef} tabIndex={-1} aria-label="Conversation" className="chat-main" key={selectedId ?? 'none'}>
           <ConversationView
             headerActions={<div className="pane-toolbar">
             <button type="button" className="mobile-only nav-action" onClick={() => setPane('navigation')}>← Back to conversations</button>
-            {selectedWorkspace && <button type="button" className="details-toggle nav-action" aria-controls="workspace-details" onClick={() => setPane('details')}>Workspace details</button>}
+            {selectedWorkspace && <button type="button" className="details-toggle btn btn-ghost" aria-controls="workspace-details" aria-expanded={pane === 'details'}
+              onClick={() => setPane(pane === 'details' ? 'conversation' : 'details')}><PanelIcon />Workspace details</button>}
           </div>}
             isActivePane={pane === 'conversation'}
             conversation={selected}
             messages={messages}
             meId={meId}
-            status={status}
+            meHandle={handle}
             loading={loading}
             sending={sending}
             error={error}
@@ -606,12 +629,11 @@ function AuthenticatedApp({ session, onLogout }: {
           />
         </main>
         {selectedWorkspace && (
-          <aside ref={detailsRef} tabIndex={-1} id="workspace-details" aria-label="Workspace details" className="workspace-details shrink-0 overflow-y-auto border-l border-zinc-800">
-            <button type="button" className="details-toggle nav-action m-3" onClick={() => setPane(selected ? 'conversation' : 'navigation')}>← Back</button>
-            <div className="border-b border-zinc-800 p-2">
-              <h2 className="truncate text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-                {selectedWorkspace.name} · {selectedWorkspace.my_role}
-              </h2>
+          <aside ref={detailsRef} tabIndex={-1} id="workspace-details" aria-label="Workspace details" className="workspace-details">
+            <div className="details-header">
+              <button type="button" className="details-toggle nav-action" onClick={() => setPane(selected ? 'conversation' : 'navigation')}>← Back</button>
+              <h2 className="truncate">{selectedWorkspace.name}</h2>
+              <span className="tag tag-line ml-auto">{selectedWorkspace.my_role}</span>
             </div>
             <MemberPanel
               key={`members-${selectedWorkspace.id}`}
@@ -632,6 +654,11 @@ function AuthenticatedApp({ session, onLogout }: {
           </aside>
         )}
       </div>
+      <footer className="system-bar">
+        <ConnectionIndicator status={status} />
+        <span className="system-bar-trust"><OpenLockIcon size={13} /><strong>Not end-to-end encrypted</strong><span className="system-bar-detail"> · demo plaintext</span></span>
+        <span className="system-bar-end">Alpha 0 · It sends bro</span>
+      </footer>
     </div>
   );
 }

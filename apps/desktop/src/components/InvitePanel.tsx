@@ -153,18 +153,18 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
   if (!canUseInvitePanel(actor)) return null;
 
   return (
-    <div className="border-b border-zinc-800 p-2">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+    <section aria-label="Workspace invites" className="panel-section">
+      <div className="panel-section-head">
+        <h2 className="label-mono">
           Invites · {actor}
         </h2>
-        {loading && <span className="text-[11px] text-zinc-500">…</span>}
+        {loading && <span className="meta-mono" aria-hidden>…</span>}
       </div>
-      {error && <p className="mb-1 text-xs text-red-400">{error}</p>}
-      <form onSubmit={create} className="space-y-1">
+      {error && <p className="text-alert">{error}</p>}
+      <form onSubmit={create} className="flex flex-col gap-1">
         <div className="flex gap-1">
           <select
-            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+            className="field field-sm flex-1"
             value={role}
             onChange={(e) => setRole(e.target.value as RoleName)}
             title="Role granted on accept (never owner)"
@@ -176,7 +176,7 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
             ))}
           </select>
           <select
-            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+            className="field field-sm flex-1"
             value={ttl === null ? '' : String(ttl)}
             onChange={(e) =>
               setTtl(e.target.value === '' ? null : Number(e.target.value))
@@ -192,7 +192,7 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
         </div>
         <div className="flex gap-1">
           <input
-            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+            className="field field-sm flex-1"
             placeholder="use cap (blank = ∞)"
             value={maxUses}
             onChange={(e) => setMaxUses(e.target.value)}
@@ -201,27 +201,27 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
           <button
             type="submit"
             disabled={creating}
-            className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs font-semibold disabled:opacity-40"
+            className="btn btn-primary shrink-0"
           >
             {creating ? '…' : 'Create'}
           </button>
         </div>
       </form>
-      <ul className="mt-2 space-y-1.5">
+      <ul className="flex flex-col gap-1.5">
         {invites.map((inv) => (
           <li
             key={inv.id}
-            className={`rounded bg-zinc-900 p-1.5 ${inv.revoked ? 'opacity-50' : ''}`}
+            className={`panel-row ${inv.revoked ? 'opacity-50' : ''}`}
           >
             <div className="flex items-center gap-1">
-              <code className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200">
+              <code className="min-w-0 flex-1 truncate text-xs text-ink-1">
                 {inv.code}
               </code>
               <button
                 type="button"
                 onClick={() => void copy(inv)}
                 disabled={inv.revoked}
-                className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] disabled:opacity-40"
+                className="btn btn-sm btn-secondary shrink-0"
                 title="Copy invite code"
               >
                 {copiedId === inv.id ? 'Copied' : 'Copy'}
@@ -230,7 +230,7 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
                 type="button"
                 onClick={() => void revoke(inv.id)}
                 disabled={inv.revoked || busyId === inv.id}
-                className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-red-300 disabled:opacity-40"
+                className="btn btn-sm btn-danger shrink-0"
                 title="Revoke this invite code"
               >
                 {inv.revoked
@@ -240,7 +240,7 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
                     : 'Revoke'}
               </button>
             </div>
-            <p className="mt-0.5 text-[11px] text-zinc-500">
+            <p className="meta-mono mt-1">
               {inv.initial_role} · {usesLabel(inv)} ·{' '}
               {inv.expires_at
                 ? `expires ${new Date(inv.expires_at).toLocaleString()}`
@@ -250,10 +250,10 @@ export default function InvitePanel({ api, workspaceId, myRole }: Props) {
         ))}
       </ul>
       {!loading && invites.length === 0 && (
-        <p className="px-1 py-1 text-xs text-zinc-500">
+        <p className="text-muted">
           No invites yet — create one above.
         </p>
       )}
-    </div>
+    </section>
   );
 }
