@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { decodeOpaqueText } from '../lib/api';
+import { avatarGradient } from '../lib/avatar';
 import {
   avatarInitial,
   conversationLabel,
@@ -11,6 +12,7 @@ import {
   type ChatConversation,
   type ChatMessage,
 } from '../lib/store';
+import { PeopleIcon } from './icons';
 
 interface Props {
   filter?: string;
@@ -56,10 +58,12 @@ export default function ConversationList({
 
   return (
     <div className="conversation-list flex flex-col">
-      <h2 className="px-3 pb-1 pt-4 text-xs font-semibold uppercase tracking-wide text-zinc-400">Direct messages</h2>
-      <form onSubmit={open} className="space-y-2 p-3">
+      <div className="nav-section-head">
+        <h2 className="label-mono">Direct messages</h2>
+      </div>
+      <form onSubmit={open} className="nav-inline-form">
         <input
-          className="w-full rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          className="field field-sm flex-1"
           aria-label="Peer handle"
           placeholder="peer handle → open DM"
           value={peer}
@@ -68,13 +72,13 @@ export default function ConversationList({
         <button
           type="submit"
           disabled={busy || !peer.trim()}
-          className="w-full rounded bg-zinc-700 py-1 text-xs font-semibold disabled:opacity-40"
+          className="btn btn-secondary shrink-0"
         >
           {busy ? '…' : 'Open DM'}
         </button>
-        {error && <p className="text-xs text-red-400">{error}</p>}
       </form>
-      <ul className="flex-1 overflow-y-auto p-1">
+      {error && <p className="text-alert px-1 pt-1">{error}</p>}
+      <ul className="pt-1">
         {ordered.map((c) => {
           const loaded = messagesByConversation.get(c.id) ?? [];
           const last = loaded.length > 0 ? loaded[loaded.length - 1] : null;
@@ -93,41 +97,29 @@ export default function ConversationList({
                 type="button"
                 onClick={() => onSelect(c.id)}
                 aria-current={c.id === selectedId ? 'page' : undefined}
-                className={`conversation-row flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
-                  c.id === selectedId
-                    ? 'bg-emerald-950 font-semibold'
-                    : 'hover:bg-zinc-800'
-                }`}
+                className="conversation-row"
               >
-                <span
-                  aria-hidden
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold text-zinc-200"
-                >
-                  {avatarInitial(c)}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-baseline justify-between gap-2">
-                    <span className="truncate">{conversationLabel(c)}</span>
-                    {when && (
-                      <span className="shrink-0 text-[10px] font-normal text-zinc-400">
-                        {when}
-                      </span>
-                    )}
+                {c.kind === 'group'
+                  ? <span aria-hidden className="tile h-8 w-8"><PeopleIcon /></span>
+                  : <span aria-hidden className="avatar avatar-32" style={{ background: avatarGradient(c.peer_handle ?? c.id) }}>
+                    {avatarInitial(c)}
+                  </span>}
+                <span className="conversation-row-body">
+                  <span className="conversation-row-top">
+                    <span className="conversation-row-name">{conversationLabel(c)}</span>
+                    {when && <span className="conversation-row-time">{when}</span>}
                   </span>
-                  <span className="block truncate text-xs font-normal text-zinc-400">
-                    {sub ? `${sub} · ` : ''}
+                  <span className="conversation-row-preview">
+                    {sub && <span className="conversation-row-sub">{sub} · </span>}
                     {preview}
                   </span>
-                </span>
-                <span className="shrink-0 rounded bg-zinc-800 px-1 text-[10px] uppercase text-zinc-400">
-                  {c.kind}
                 </span>
               </button>
             </li>
           );
         })}
         {ordered.length === 0 && (
-          <li className="px-2 py-4 text-xs text-zinc-400">
+          <li className="navigation-no-results">
             {filter.trim() ? 'No matching conversations.' : 'No conversations yet — open a DM above.'}
           </li>
         )}

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { decodeOpaqueText } from '../lib/api';
-import type { GatewayStatus } from '../lib/gateway';
+import { avatarGradient } from '../lib/avatar';
 import {
   avatarInitial,
   conversationLabel,
@@ -12,13 +12,13 @@ import {
   type ChatConversation,
   type ChatMessage,
 } from '../lib/store';
-import ConnectionIndicator from './ConnectionIndicator';
+import { BrandMark, OpenLockIcon, SendIcon } from './icons';
 
 interface Props {
   conversation: ChatConversation | null;
   messages: ChatMessage[];
   meId: string;
-  status: GatewayStatus;
+  meHandle?: string;
   loading: boolean;
   sending: boolean;
   error: string | null;
@@ -28,11 +28,20 @@ interface Props {
   headerActions?: ReactNode;
 }
 
+// Same author within five minutes reads as one block: no repeated header.
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+function continuesGroup(prev: ChatMessage | undefined, next: ChatMessage): boolean {
+  if (!prev || prev.sender_id !== next.sender_id || !prev.sent_at || !next.sent_at) return false;
+  if (dayKey(prev.sent_at) !== dayKey(next.sent_at)) return false;
+  const gap = new Date(next.sent_at).getTime() - new Date(prev.sent_at).getTime();
+  return gap >= 0 && gap <= GROUP_WINDOW_MS;
+}
+
 export default function ConversationView({
   conversation,
   messages,
   meId,
-  status,
+  meHandle,
   loading,
   sending,
   error,
@@ -95,11 +104,11 @@ export default function ConversationView({
     return (
       <>
       {headerActions}
-      <div className="conversation-empty flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-zinc-400">
-        <span className="empty-mark" aria-hidden>UC</span>
-        <span className="eyebrow">A little closer, wherever you are</span>
-        <span className="text-lg font-semibold text-zinc-100">Your conversations, in one place</span>
-        <span>Select a conversation or open a DM to start chatting.</span>
+      <div className="conversation-empty">
+        <span className="empty-mark" aria-hidden><BrandMark size={32} /></span>
+        <span className="label-mono">A little closer, wherever you are</span>
+        <h2>Your conversations, in one place</h2>
+        <p>Select a conversation or open a DM to start chatting.</p>
       </div>
       </>
     );
@@ -107,47 +116,56 @@ export default function ConversationView({
 
   const heading = title ?? conversationLabel(conversation);
   const sub = title ? conversation.kind : conversationSublabel(conversation);
+  const isChannel = conversation.kind === 'channel';
+  // One colour per person across the list, header and history.
+  const personKey = (senderId: string) => senderId === meId
+    ? (meHandle ?? meId)
+    : conversation.kind === 'dm' && conversation.peer_handle ? conversation.peer_handle : senderId;
+  const peerKey = conversation.peer_handle ?? conversation.id;
 
   let lastDay = '';
   return (
     <div className="conversation-view flex min-h-0 flex-1 flex-col">
-      <div className="conversation-header flex shrink-0 items-center gap-3 border-b border-zinc-800 px-5 py-4">
-        <span
-          aria-hidden
-          className="conversation-avatar"
-        >
-          {conversation.kind === 'channel' ? '#' : avatarInitial(conversation)}
-        </span>
-        <span className="min-w-0 flex-1">
-          <h2 className="block truncate text-lg font-semibold text-zinc-100">
-            {heading}
-          </h2>
-          {sub && (
-            <span className="block truncate text-[11px] text-zinc-500">
-              {sub}
-            </span>
-          )}
-        </span>
-        <span className="ml-auto shrink-0">
-          <ConnectionIndicator status={status} />
+      <div className="conversation-header">
+        <span className="conversation-title">
+          {!isChannel && <span aria-hidden className="avatar avatar-28" style={{ background: avatarGradient(peerKey) }}>{avatarInitial(conversation)}</span>}
+          <span className="conversation-title-text">
+            <h2>
+              {/* Channel titles keep their literal "#name" text; the hash is styled as the glyph. */}
+              {isChannel && heading.startsWith('#') ? <><span className="channel-glyph">#</span>{heading.slice(1)}</> : heading}
+            </h2>
+            {sub && (
+              <span className="meta-mono truncate">
+                {sub}
+              </span>
+            )}
+          </span>
         </span>
         {headerActions}
       </div>
-      <p className="plaintext-warning shrink-0 border-b border-amber-900/40 bg-amber-950/20 px-5 py-2 text-xs leading-relaxed text-amber-200/90">
-        Alpha demo: envelopes carry demo plaintext — not end-to-end encrypted.
-      </p>
-      <div ref={scrollRef} className="message-history min-h-0 flex-1 space-y-3 overflow-y-auto p-5" aria-label="Message history">
+      <div className="trust-strip">
+        <OpenLockIcon />
+        <p className="plaintext-warning">
+          Alpha demo: envelopes carry demo plaintext — not end-to-end encrypted.
+        </p>
+      </div>
+      <div ref={scrollRef} className="message-history" aria-label="Message history">
         <div className="conversation-intro">
-          <span className="intro-symbol" aria-hidden>{conversation.kind === 'channel' ? '#' : '@'}</span>
-          <h3>{conversation.kind === 'channel' ? `Welcome to ${heading}` : `Your conversation with ${heading}`}</h3>
-          <p>{conversation.kind === 'channel' ? 'A shared space for this workspace.' : 'Your direct messages, together in one place.'}</p>
+          {isChannel
+            ? <span className="tile h-10 w-10 font-display text-xl" aria-hidden>#</span>
+            : <span className="avatar h-10 w-10 text-[15px]" aria-hidden style={{ background: avatarGradient(peerKey) }}>{avatarInitial(conversation)}</span>}
+          <h3>{isChannel ? `Welcome to ${heading}` : `Your conversation with ${heading}`}</h3>
+          <p>{isChannel ? 'A shared space for this workspace.' : 'Your direct messages, together in one place.'}</p>
         </div>
-        {loading && <p className="text-sm text-zinc-400">Loading history…</p>}
-        {messages.map((m) => {
+        {loading && <p className="history-note meta-mono">Loading history…</p>}
+        {messages.map((m, index) => {
           const divider =
             dayKey(m.sent_at) !== lastDay ? dayLabel(m.sent_at) : null;
           lastDay = dayKey(m.sent_at);
           const mine = m.sender_id === meId;
+          const author = senderLabel(meId, m.sender_id, conversation);
+          const follow = !divider && continuesGroup(messages[index - 1], m);
+          const clock = formatClockTime(m.sent_at);
           return (
             <div key={m.id}>
               {divider && (
@@ -155,51 +173,60 @@ export default function ConversationView({
                   <span>{divider}</span>
                 </p>
               )}
-              <div className={`message-row ${mine ? 'message-row-own' : ''}`}>
-                <span className="message-avatar" aria-hidden>{mine ? 'Y' : senderLabel(meId, m.sender_id, conversation).slice(0, 1).toUpperCase()}</span>
+              <div className={`message-row${mine ? ' message-row-own' : ''}${follow ? ' message-row--follow' : ''}`}>
+                <div className="message-gutter">
+                  {follow
+                    ? <span className="message-gutter-time font-mono" aria-hidden>{clock}</span>
+                    : <span className="avatar avatar-32" aria-hidden style={{ background: avatarGradient(personKey(m.sender_id)) }}>
+                      {mine ? (meHandle?.slice(0, 1).toUpperCase() || 'Y') : author.replace(/^@/, '').slice(0, 1).toUpperCase()}
+                    </span>}
+                </div>
                 <div className="message-bubble">
-                <p className="message-meta">
-                  <strong>{senderLabel(meId, m.sender_id, conversation)}</strong>
-                  <time dateTime={m.sent_at ?? undefined}>{formatClockTime(m.sent_at)}</time>
-                  <span className="message-sequence">#{m.seq}</span>
-                </p>
-                <p className="message-text whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                  {decodeOpaqueText(m.ciphertext_b64)}
-                </p>
+                  {/* Follow-ups keep author, time and sequence for assistive tech and tooling. */}
+                  <p className={follow ? 'message-meta sr-only' : 'message-meta'}>
+                    <strong>{author}</strong>
+                    <time dateTime={m.sent_at ?? undefined}>{clock}</time>
+                    <span className="message-sequence">#{m.seq}</span>
+                  </p>
+                  <p className="message-text whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                    {decodeOpaqueText(m.ciphertext_b64)}
+                  </p>
                 </div>
               </div>
             </div>
           );
         })}
         {!loading && messages.length === 0 && (
-          <p className="text-sm text-zinc-400">
+          <p className="history-note">
             No messages yet — say bro.
           </p>
         )}
       </div>
-      {error && <p role="alert" className="px-4 py-1 text-sm text-red-400">{error}</p>}
-      {sendError && <p role="alert" className="px-4 py-1 text-sm text-red-400">{sendError}</p>}
+      {error && <p role="alert" className="stage-alert text-alert">{error}</p>}
+      {sendError && <p role="alert" className="stage-alert text-alert">{sendError}</p>}
       <form onSubmit={submit} className="message-composer">
         <div className="composer-field">
-        <input
-          aria-label="Message"
-          className="min-w-0 flex-1"
-          placeholder="Message (demo plaintext → opaque envelope)"
-          value={draft}
-          onChange={(e) => {
-            draftRevision.current += 1;
-            setDraft(e.target.value);
-          }}
-        />
-        <button
-          type="submit"
-          disabled={sending || !draft.trim()}
-          className="send-button disabled:opacity-40"
-        >
-          {sending ? '…' : 'Send'}
-        </button>
+          <input
+            aria-label="Message"
+            placeholder="Message (demo plaintext → opaque envelope)"
+            value={draft}
+            onChange={(e) => {
+              draftRevision.current += 1;
+              setDraft(e.target.value);
+            }}
+          />
+          <div className="composer-toolbar">
+            <span className="composer-trust"><OpenLockIcon size={13} /><span className="truncate">Alpha demo · plaintext messages</span></span>
+            <span className="composer-hint"><kbd className="kbd">Enter</kbd> to send</span>
+            <button
+              type="submit"
+              disabled={sending || !draft.trim()}
+              className="send-button"
+            >
+              {sending ? '…' : <><SendIcon size={15} /><span className="sr-only">Send</span></>}
+            </button>
+          </div>
         </div>
-        <p className="composer-hint"><span>Enter to send</span><span>Alpha demo · plaintext messages</span></p>
       </form>
     </div>
   );

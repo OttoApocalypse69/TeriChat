@@ -1,10 +1,13 @@
 import type { GatewayStatus } from '../lib/gateway';
 
-const DOT: Record<GatewayStatus, string> = {
-  disconnected: 'bg-zinc-500',
-  connecting: 'bg-amber-400',
-  connected: 'bg-emerald-400',
-  reconnecting: 'bg-amber-400 animate-pulse',
+// Presence shapes from the design language: filled dot when live, pulsing
+// amber while (re)connecting, hollow ring when offline. The word always
+// accompanies the colour.
+const LABEL: Record<GatewayStatus, string> = {
+  connected: 'Online',
+  connecting: 'Connecting…',
+  reconnecting: 'Reconnecting…',
+  disconnected: 'Offline',
 };
 
 export default function ConnectionIndicator({
@@ -13,12 +16,10 @@ export default function ConnectionIndicator({
   status: GatewayStatus;
 }) {
   return (
-    <span
-      className="inline-flex items-center gap-1.5 text-xs text-zinc-300"
-      title={`gateway: ${status}`}
-    >
-      <span className={`inline-block h-2 w-2 rounded-full ${DOT[status]}`} />
-      {status}
+    <span className="status-chip" title={`gateway: ${status}`}>
+      <span aria-hidden className={`status-dot status-dot--${status}`} />
+      {LABEL[status]}
+      <span className="status-chip-scope">gateway</span>
     </span>
   );
 }
