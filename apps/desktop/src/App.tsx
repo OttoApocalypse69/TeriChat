@@ -30,6 +30,7 @@ import {
 } from './lib/notifications';
 import {
   ChatStore,
+  MAX_GROUP_MEMBERS,
   gatewayEventInfo,
   parseMemberHandles,
   sortConversations,
@@ -306,8 +307,15 @@ function AuthenticatedApp({ session, onLogout }: {
       );
       bump();
       if (info) {
+        const conv = storeRef.current.conversations.find(
+          c => c.id === info.conversationId,
+        );
+        // Rows this client cannot classify yet (never listed, or a DM without
+        // its peer) need the list before anything, a toast included, uses them.
+        const unresolved = unknown || (conv?.kind === 'dm' && !conv.peer_handle);
+        const listed = unresolved ? refreshConversations() : Promise.resolve();
         // Events carry ids only; use the same serialized page drain as selection.
-        void refreshHistory(info.conversationId).then(() => {
+        void Promise.all([refreshHistory(info.conversationId), listed]).then(() => {
           // Exactly one toast per incoming message: only first-seen events
           // (`fresh`) notify, never redeliveries, and only the fetched row
           // matching this event (never a neighbor's text).
@@ -315,6 +323,9 @@ function AuthenticatedApp({ session, onLogout }: {
           const arrived = storeRef.current.conversations.find(
             (c) => c.id === info.conversationId,
           ) ?? null;
+          // A placeholder the list never resolved has no real kind (it may be
+          // a group): never toast it as a DM.
+          if (!arrived || arrived.members.length === 0) return;
           const row = (storeRef.current.messages.get(info.conversationId) ?? [])
             .find((m) => m.id === info.messageId);
           if (!row) return;
@@ -327,10 +338,6 @@ function AuthenticatedApp({ session, onLogout }: {
           // refreshHistory handles fetch errors internally; this guards the
           // toast tail against unexpected throws without breaking messaging.
         });
-        const conv = storeRef.current.conversations.find(
-          c => c.id === info.conversationId,
-        );
-        if (unknown || (conv?.kind === 'dm' && !conv.peer_handle)) void refreshConversations();
       }
     };
 
@@ -406,7 +413,8 @@ function AuthenticatedApp({ session, onLogout }: {
   /** Create a group from free-form handles, then land in it with names resolved. */
   async function createGroup(memberInput: string): Promise<void> {
     const handles = parseMemberHandles(memberInput, handle);
-    if (handles.length === 0) throw new Error('Add at least one other person’s handle.');
+    if (handles.length < 2) throw new Error('A group needs at least two other people’s handles. For one person, open a DM.');
+    if (handles.length > MAX_GROUP_MEMBERS) throw new Error(`A group can start with at most ${MAX_GROUP_MEMBERS} other people.`);
     const revision = navigationRevision.current;
     const conv = await api.createGroup(handles);
     if (!live.current) return;

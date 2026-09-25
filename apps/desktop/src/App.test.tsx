@@ -433,7 +433,7 @@ it('creates a group from handles, then names it from the refreshed roster', asyn
   vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), roster]);
   await click('New group');
   // The caller's own handle and duplicates are dropped before the request.
-  await type('handles, comma-separated', '@ana, bo a ana');
+  await type('handles, comma-separated', '@ana, bo, a, ana');
   await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   expect(createGroup).toHaveBeenCalledWith(['ana', 'bo']);
   expect(host.querySelector('main h2')?.textContent).toBe('Ana, @bo');
@@ -441,14 +441,16 @@ it('creates a group from handles, then names it from the refreshed roster', asyn
   expect(host.querySelector('form[aria-label="New group"]')).toBeNull();
 });
 
-it('rejects a group that would contain only the caller without calling the server', async () => {
+it('rejects groups with fewer than two other people without calling the server', async () => {
   const createGroup = vi.spyOn(ApiClient.prototype, 'createGroup');
   await login();
   await click('New group');
-  await type('handles, comma-separated', '@a');
-  await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  for (const members of ['@a', 'ana, a', 'ana, ANA']) {
+    await type('handles, comma-separated', members);
+    await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(host.querySelector('form[aria-label="New group"] [role="alert"]')?.textContent).toContain('at least two other');
+  }
   expect(createGroup).not.toHaveBeenCalled();
-  expect(host.querySelector('form[aria-label="New group"] [role="alert"]')?.textContent).toContain('at least one other');
 });
 
 const fromPeer = (seq: number): MessageBody => ({ ...message(seq), sender_id: 'peer' });
@@ -510,7 +512,7 @@ it('lists a slow-to-create group without pulling the user out of a conversation 
   vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([row(), row('dm2', 'Second')]);
   await login();
   await click('New group');
-  await type('handles, comma-separated', 'ana');
+  await type('handles, comma-separated', 'ana, bo');
   await flush(() => input('handles, comma-separated').form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   await click('Second');
   await type('Message', 'draft typed while the group was pending');

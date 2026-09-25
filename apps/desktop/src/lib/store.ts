@@ -195,16 +195,20 @@ export function memberProfile(conv: ChatConversation | null, userId: string): Me
   return conv?.member_profiles?.find(p => p.user_id === userId) ?? null;
 }
 
+/** Other people a single request may start a group with (server-enforced). */
+export const MAX_GROUP_MEMBERS = 50;
+
 /**
- * Parse free-form group member input ("@ana, bo  cy") into unique handles,
- * dropping the caller's own handle (the server adds the creator anyway).
- * Handles are case-insensitive server-side, so compare them lowercased.
+ * Parse group member input ("@ana, mary jane") into unique handles, dropping
+ * the caller's own handle (the server adds the creator anyway). Handles may
+ * contain spaces, so only commas and new lines separate them; one leading
+ * "@" is the display prefix. Handles are case-insensitive server-side.
  */
 export function parseMemberHandles(input: string, ownHandle?: string): string[] {
   const own = ownHandle?.trim().toLowerCase();
   const seen = new Set<string>();
-  for (const raw of input.split(/[\s,]+/)) {
-    const handle = raw.replace(/^@+/, '').toLowerCase();
+  for (const raw of input.split(/[,\n]+/)) {
+    const handle = raw.trim().replace(/^@/, '').trim().toLowerCase();
     if (handle && handle !== own) seen.add(handle);
   }
   return [...seen];
