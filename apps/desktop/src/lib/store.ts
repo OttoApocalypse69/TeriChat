@@ -111,8 +111,21 @@ export function upsertConversation(
 ): ChatConversation[] {
   // Spread the whole row: summary entries carry peer/last-message fields
   // that must survive reload-driven list merges, not just id/kind/members.
+  // Positions only move forward: a list response captured before a newer
+  // read or event must not rewind them.
   const next = list.some((c) => c.id === conv.id)
-    ? list.map((c) => (c.id === conv.id ? { ...c, ...conv } : c))
+    ? list.map((c) => {
+      if (c.id !== conv.id) return c;
+      const merged: ChatConversation = { ...c, ...conv };
+      const incoming = conv as ChatConversation;
+      if (c.last_read_seq != null && incoming.last_read_seq != null) {
+        merged.last_read_seq = Math.max(c.last_read_seq, incoming.last_read_seq);
+      }
+      if (c.last_seq != null && incoming.last_seq != null) {
+        merged.last_seq = Math.max(c.last_seq, incoming.last_seq);
+      }
+      return merged;
+    })
     : [...list, { ...(conv as ChatConversation) }];
   return [...next].sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -345,10 +358,27 @@ export class ChatStore {
   }
 
   /** Advance the caller's read marker; markers never move backwards. */
-  setReadMarker(conversationId: string, seq: number): void {
+  /**
+   * Advance the caller's read marker; markers never move backwards. An absent
+   * marker is only created when `initialize` says the server supports them
+   * (e.g. a channel added this session, answered by the read endpoint).
+   */
+  setReadMarker(conversationId: string, seq: number, initialize = false): void {
     const conv = this.conversations.find(c => c.id === conversationId);
-    if (!conv || conv.last_read_seq == null || seq <= conv.last_read_seq) return;
+    if (!conv) return;
+    if (conv.last_read_seq == null ? !initialize : seq <= conv.last_read_seq) return;
     this.conversations = upsertConversation(this.conversations, { ...conv, last_read_seq: seq });
+  }
+
+  /** Forget conversations the caller can no longer reach (e.g. a left workspace). */
+  removeConversations(ids: Iterable<string>): void {
+    const gone = new Set(ids);
+    if (gone.size === 0) return;
+    this.conversations = this.conversations.filter(c => !gone.has(c.id));
+    for (const id of gone) {
+      this.messages.delete(id);
+      this.historySeq.delete(id);
+    }
   }
 
   maxSeq(conversationId: string): number {
@@ -368,7 +398,12 @@ export class ChatStore {
     this.lastEventId = event.id;
     const info = gatewayEventInfo(event);
     if (!info) return null;
-    this.ensureConversation(info.conversationId);
+    const conv = this.ensureConversation(info.conversationId);
+    // Record the position now, so unread state survives a failed or slow
+    // history fetch for the message this event announces.
+    if ((conv.last_seq ?? 0) < info.seq) {
+      this.conversations = upsertConversation(this.conversations, { ...conv, last_seq: info.seq });
+    }
     return info;
   }
 }

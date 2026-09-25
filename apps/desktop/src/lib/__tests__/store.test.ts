@@ -283,3 +283,48 @@ describe('private unread state', () => {
     expect(store.conversations.find(c => c.id === 'legacy')?.last_read_seq).toBeUndefined();
   });
 });
+
+describe('unread review regressions', () => {
+  const conv = (over: Partial<ChatConversation> = {}): ChatConversation => ({
+    id: 'c', kind: 'dm', members: ['me', 'peer'], last_seq: 5, last_read_seq: 5, ...over,
+  });
+
+  it('never lets a stale list response rewind a read marker or position', () => {
+    const store = new ChatStore();
+    store.addConversation(conv());
+    store.addConversation(conv({ last_read_seq: 3, last_seq: 4 }));
+    expect(store.conversations[0]).toMatchObject({ last_read_seq: 5, last_seq: 5 });
+    store.addConversation(conv({ last_read_seq: 7, last_seq: 9 }));
+    expect(store.conversations[0]).toMatchObject({ last_read_seq: 7, last_seq: 9 });
+  });
+
+  it('records a live event position before history arrives', () => {
+    const store = new ChatStore();
+    store.addConversation(conv({ last_seq: 2, last_read_seq: 2 }));
+    store.applyGatewayEvent({ id: 'e7', topic: 'message.created', payload: { conversation_id: 'c', data: { message_id: 'm7', seq: 7 } } });
+    const row = store.conversations.find(c => c.id === 'c')!;
+    expect(row.last_seq).toBe(7);
+    expect(unreadCount(row, undefined, 'me')).toBe(5);
+  });
+
+  it('initializes an absent marker only when told the server supports them', () => {
+    const store = new ChatStore();
+    store.addConversation({ id: 'n', kind: 'channel', members: [] });
+    store.setReadMarker('n', 3);
+    expect(store.conversations[0].last_read_seq).toBeUndefined();
+    store.setReadMarker('n', 3, true);
+    expect(store.conversations[0].last_read_seq).toBe(3);
+  });
+
+  it('forgets removed conversations with their history', () => {
+    const store = new ChatStore();
+    store.addConversation(conv());
+    store.addConversation(conv({ id: 'keep' }));
+    store.mergeHistoryPage('c', [{ id: 'm1', conversation_id: 'c', sender_id: 'peer', seq: 1, ciphertext_b64: '', client_msg_id: 'x', sent_at: '' }]);
+    store.removeConversations(['c']);
+    expect(store.conversations.map(c => c.id)).toEqual(['keep']);
+    expect(store.messages.has('c')).toBe(false);
+    expect(store.historyCursor('c')).toBe(0);
+  });
+});
+

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ChatConversation, ChatMessage } from '../lib/store';
 import ConversationView from './ConversationView';
 
@@ -16,10 +16,11 @@ const message = (seq: number, sender: string, sentAt: string): ChatMessage => ({
   client_msg_id: `c${seq}`, ciphertext_b64: btoa(`body-${seq}`),
 });
 
-async function render(messages: ChatMessage[], conversation: ChatConversation = dm, title: string | null = null, unreadAfterSeq: number | null = null) {
+async function render(messages: ChatMessage[], conversation: ChatConversation = dm, title: string | null = null, unreadAfterSeq: number | null = null, onTailVisibleChange?: (visible: boolean) => void) {
   await act(async () => root.render(
     <ConversationView conversation={conversation} messages={messages} meId="me" meHandle="me"
-      loading={false} sending={false} error={null} onSend={async () => {}} title={title} unreadAfterSeq={unreadAfterSeq} />,
+      loading={false} sending={false} error={null} onSend={async () => {}} title={title} unreadAfterSeq={unreadAfterSeq}
+      onTailVisibleChange={onTailVisibleChange} />,
   ));
 }
 
@@ -85,4 +86,59 @@ it('shows no divider without a marker or when only your own messages follow it',
   expect(host.querySelector('.new-divider')).toBeNull();
   await render(history, dm, null, 1);
   expect(host.querySelector('.new-divider')).toBeNull();
+});
+
+/** jsdom has no layout: give `.message-history` a browser-like scroll box. */
+function stubScrollBox(scrollHeight = 1000, clientHeight = 200, dividerOffset = 500): () => void {
+  const tops = new WeakMap<Element, number>();
+  const isBox = (el: Element) => el.classList.contains('message-history');
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get(this: HTMLElement) { return isBox(this) ? scrollHeight : 0; } });
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get(this: HTMLElement) { return isBox(this) ? clientHeight : 0; } });
+  Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+    configurable: true,
+    get(this: HTMLElement) { return tops.get(this) ?? 0; },
+    set(this: HTMLElement, value: number) { tops.set(this, Math.max(0, Math.min(value, isBox(this) ? scrollHeight - clientHeight : 0))); },
+  });
+  // The NEW divider sits `dividerOffset` into the content; its viewport rect
+  // moves with the box's scroll position, as in a real browser.
+  const rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const box = this.closest<HTMLElement>('.message-history');
+    const top = isBox(this) ? 100 : this.classList.contains('new-divider') && box ? 100 + dividerOffset - box.scrollTop : 0;
+    return { top, bottom: top, left: 0, right: 0, height: 0, width: 0, x: 0, y: top, toJSON() {} } as DOMRect;
+  });
+  return () => {
+    rects.mockRestore();
+    for (const key of ['scrollHeight', 'clientHeight', 'scrollTop']) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[key];
+  };
+}
+
+it('opens an unread backlog at the NEW divider and reports the tail only once reached', async () => {
+  const restore = stubScrollBox();
+  try {
+    const tail = vi.fn();
+    const history = Array.from({ length: 6 }, (_, i) => message(i + 1, i < 2 ? 'me' : 'peer', `2026-09-24T14:0${i}:00Z`));
+    await render(history, dm, null, 2, tail);
+    const box = host.querySelector<HTMLElement>('.message-history')!;
+    expect(box.scrollTop).toBe(484);
+    expect(tail).toHaveBeenLastCalledWith(false);
+    // More history arriving must not drag a reader away from the divider.
+    await render([...history, message(7, 'peer', '2026-09-24T14:07:00Z')], dm, null, 2, tail);
+    expect(box.scrollTop).toBe(484);
+    await act(async () => { box.scrollTop = 800; box.dispatchEvent(new Event('scroll')); });
+    expect(tail).toHaveBeenLastCalledWith(true);
+  } finally {
+    restore();
+  }
+});
+
+it('still follows the tail when nothing was unread on open', async () => {
+  const restore = stubScrollBox();
+  try {
+    const tail = vi.fn();
+    await render([message(1, 'peer', '2026-09-24T14:00:00Z')], dm, null, null, tail);
+    expect(host.querySelector<HTMLElement>('.message-history')!.scrollTop).toBe(800);
+    expect(tail).toHaveBeenLastCalledWith(true);
+  } finally {
+    restore();
+  }
 });

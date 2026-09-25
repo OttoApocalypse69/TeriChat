@@ -328,3 +328,80 @@ async fn channel_read_marker_uses_the_history_gate() {
     assert_eq!(body["last_read_seq"], 1);
     f.close().await;
 }
+
+/// Same rules as the endpoint tests, at the domain layer. Lives in an isolated
+/// schema: sends here must never land in the shared outbox other tests drain.
+#[tokio::test]
+async fn read_markers_are_private_monotonic_and_clamped() {
+    let f = Fixture::new().await;
+    MIGRATOR.run(&f.pool).await.unwrap();
+    let (ada, _) = f.user().await;
+    let (bob, _) = f.user().await;
+    let (eve, _) = f.user().await;
+    let dm = messaging::find_or_create_dm(&f.pool, ada, bob)
+        .await
+        .unwrap();
+    let marker = |user: Uuid| {
+        let pool = f.pool.clone();
+        async move {
+            messaging::list_conversations(&pool, user)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == dm.id)
+                .map(|row| (row.last_read_seq, row.last_seq))
+        }
+    };
+    let send =
+        |user: Uuid| messaging::send_message(&f.pool, user, dm.id, Uuid::now_v7(), b"opaque", None);
+
+    for _ in 0..3 {
+        send(bob).await.unwrap();
+    }
+    // Sending marks your own messages read; the recipient starts at 0.
+    assert_eq!(marker(bob).await, Some((3, Some(3))));
+    assert_eq!(marker(ada).await, Some((0, Some(3))));
+
+    assert_eq!(
+        messaging::mark_read(&f.pool, ada, dm.id, 2).await.unwrap(),
+        2
+    );
+    assert_eq!(
+        messaging::mark_read(&f.pool, ada, dm.id, 1).await.unwrap(),
+        2,
+        "never rewinds"
+    );
+    assert_eq!(
+        messaging::mark_read(&f.pool, ada, dm.id, 99).await.unwrap(),
+        3,
+        "clamped to last seq"
+    );
+    assert_eq!(
+        messaging::mark_read(&f.pool, ada, dm.id, -5).await.unwrap(),
+        3
+    );
+
+    // Ada's reads never touch Bob's marker, and Ada's send leaves Bob unread.
+    send(ada).await.unwrap();
+    assert_eq!(marker(ada).await, Some((4, Some(4))));
+    assert_eq!(marker(bob).await, Some((3, Some(4))));
+
+    // Bob replies before reading Ada's seq 4: his send must not step over it,
+    // so it stays unread for him (review: concurrent unseen message).
+    send(bob).await.unwrap();
+    assert_eq!(marker(bob).await, Some((3, Some(5))));
+    assert_eq!(
+        messaging::mark_read(&f.pool, bob, dm.id, 5).await.unwrap(),
+        5
+    );
+
+    assert!(matches!(
+        messaging::mark_read(&f.pool, eve, dm.id, 4).await,
+        Err(messaging::MessagingError::NotMember)
+    ));
+    assert!(matches!(
+        messaging::mark_read(&f.pool, ada, Uuid::now_v7(), 1).await,
+        Err(messaging::MessagingError::NotMember)
+    ));
+    f.close().await;
+}

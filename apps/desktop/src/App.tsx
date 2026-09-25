@@ -471,6 +471,11 @@ function AuthenticatedApp({ session, onLogout }: {
   /** Drop a left workspace from local state and clear its selection. */
   function handleLeftWorkspace(workspaceId: string): void {
     if (!live.current) return;
+    // Its channels are no longer reachable: drop them (and their unread
+    // counts) instead of keeping ghost rows until reload.
+    storeRef.current.removeConversations(
+      wsStoreRef.current.channelsFor(workspaceId).map(channel => channel.conversation_id),
+    );
     workspaceListRevision.current += 1;
     setWsLoading(false);
     wsStoreRef.current.setWorkspaces(
@@ -507,6 +512,8 @@ function AuthenticatedApp({ session, onLogout }: {
       openConversation(channel.conversation_id);
       bump();
       await refreshHistory(channel.conversation_id);
+      // History made us a participant; the summary now carries the marker.
+      await refreshConversations();
     } catch (err) {
       // Let ChannelList render the friendly (403-aware) message; rethrow so
       // its form error path triggers.
@@ -525,8 +532,10 @@ function AuthenticatedApp({ session, onLogout }: {
       });
       if (!live.current) return;
       storeRef.current.mergeOutgoing(toChatMessage(sent));
-      // The server advances the sender's marker with the send.
-      storeRef.current.setReadMarker(sent.conversation_id, sent.seq);
+      // Mirror the server: a caught-up sender's marker steps over their own
+      // message; a sender with unread messages keeps them unread.
+      const sentIn = storeRef.current.conversations.find(c => c.id === sent.conversation_id);
+      if (sentIn?.last_read_seq === sent.seq - 1) storeRef.current.setReadMarker(sent.conversation_id, sent.seq);
       bump();
     } finally {
       if (live.current) setSending(false);
@@ -548,13 +557,24 @@ function AuthenticatedApp({ session, onLogout }: {
 
   // The "new" divider sits where the marker was when the conversation opened,
   // and only when something was unread then; reading must not move it.
-  const [unreadSnapshot, setUnreadSnapshot] = useState<{ id: string; seq: number } | null>(null);
-  useEffect(() => {
+  // Derived during render (not in an effect) so the divider exists in the
+  // very first commit, before the read effect can run.
+  const [unreadSnapshot, setUnreadSnapshot] = useState<{ id: string | null; seq: number | null }>({ id: null, seq: null });
+  if (unreadSnapshot.id !== selectedId) {
     const seq = selected?.last_read_seq;
     const unread = selectedId ? (unreadByConversation.get(selectedId) ?? 0) : 0;
-    setUnreadSnapshot(selectedId && seq != null && unread > 0 ? { id: selectedId, seq } : null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+    setUnreadSnapshot({ id: selectedId, seq: seq != null && unread > 0 ? seq : null });
+  }
+
+  // Whether the history is scrolled to its end. Written synchronously by the
+  // conversation's layout effect so a read never outruns the scroll position.
+  const tailVisible = useRef(true);
+  const [tailTick, setTailTick] = useState(0);
+  const handleTailVisible = useCallback((visible: boolean) => {
+    if (tailVisible.current === visible) return;
+    tailVisible.current = visible;
+    setTailTick(tick => tick + 1);
+  }, []);
 
   // Re-check visibility when the window regains focus or the tab is shown.
   const [attentionTick, setAttentionTick] = useState(0);
@@ -570,26 +590,33 @@ function AuthenticatedApp({ session, onLogout }: {
 
   // A conversation is read only while someone can see it: its pane has
   // layout, the tab is visible, the window has focus and sessions are closed.
+  // Unread messages count as seen only once the history's end is on screen.
   const readInFlight = useRef(new Map<string, number>());
   const selectedLatestSeq = selectedId ? store.maxSeq(selectedId) : 0;
+  // A server that returned any marker supports them, so a conversation added
+  // this session without one (e.g. a new channel) can still be marked read.
+  const markersSupported = store.conversations.some(c => typeof c.last_read_seq === 'number');
   useEffect(() => {
-    if (!selected || selected.last_read_seq == null || selectedLatestSeq <= selected.last_read_seq) return;
+    if (!selected) return;
+    const known = selected.last_read_seq ?? (markersSupported ? 0 : null);
+    if (known == null || selectedLatestSeq <= known) return;
     if (sessionsOpen || document.visibilityState === 'hidden' || !document.hasFocus()) return;
     if ((conversationRef.current?.getClientRects().length ?? 0) === 0) return;
+    if (!tailVisible.current) return;
     const id = selected.id;
     const target = selectedLatestSeq;
     if ((readInFlight.current.get(id) ?? -1) >= target) return;
     readInFlight.current.set(id, target);
     void api.markRead(id, target).then(marker => {
       if (!live.current) return;
-      storeRef.current.setReadMarker(id, marker.last_read_seq);
+      storeRef.current.setReadMarker(id, marker.last_read_seq, true);
       bump();
     }, () => {
       // Unconfirmed: the next message, focus change or selection retries.
     }).finally(() => {
       if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
     });
-  }, [api, bump, selected, selectedLatestSeq, sessionsOpen, pane, attentionTick]);
+  }, [api, bump, selected, selectedLatestSeq, markersSupported, sessionsOpen, pane, attentionTick, tailTick]);
 
   const baseTitle = useRef(document.title);
   const totalUnread = [...unreadByConversation.values()].reduce((sum, n) => sum + n, 0);
@@ -724,7 +751,8 @@ function AuthenticatedApp({ session, onLogout }: {
             error={error}
             onSend={send}
             title={selected?.kind === 'channel' ? channelTitle : null}
-            unreadAfterSeq={unreadSnapshot?.id === selectedId ? unreadSnapshot.seq : null}
+            unreadAfterSeq={unreadSnapshot.id === selectedId ? unreadSnapshot.seq : null}
+            onTailVisibleChange={handleTailVisible}
           />
         </main>
         {selectedWorkspace && (
