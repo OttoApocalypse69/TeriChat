@@ -36,6 +36,7 @@ import {
   gatewayEventInfo,
   latestSeqFrom,
   parseMemberHandles,
+  readableThrough,
   senderLabel,
   sortConversations,
   toChatMessage,
@@ -52,6 +53,11 @@ interface Session {
   token: string;
   meId: string;
   handle: string;
+}
+
+/** Someone is here: the window has focus and the tab is visible. */
+function isPresent(): boolean {
+  return document.visibilityState !== 'hidden' && document.hasFocus();
 }
 
 /** Tracks a CSS media query; environments without matchMedia count as matching. */
@@ -735,16 +741,35 @@ function AuthenticatedApp({ session, onLogout }: {
     setShown({ now: conversationShown, epoch: conversationShown ? shown.epoch + 1 : shown.epoch });
   }
 
+  // Whether someone is actually here: window focused and tab visible. Each
+  // return counts like reopening the conversation (a new NEW snapshot).
+  const [presence, setPresence] = useState(() => ({ here: isPresent(), epoch: 0 }));
+  useEffect(() => {
+    const update = () => setPresence(current => {
+      const here = isPresent();
+      return here === current.here ? current : { here, epoch: here ? current.epoch + 1 : current.epoch };
+    });
+    window.addEventListener('focus', update);
+    window.addEventListener('blur', update);
+    document.addEventListener('visibilitychange', update);
+    return () => {
+      window.removeEventListener('focus', update);
+      window.removeEventListener('blur', update);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, []);
+
   // The "new" divider sits where the marker was when the conversation was
-  // opened or shown again, and only when something was unread then; reading
-  // must not move it. Derived during render (not in an effect) so the divider
-  // exists in the very first commit, before the read effect can run.
-  const viewKey = `${selectedId ?? ''}:${shown.epoch}`;
-  const [unreadSnapshot, setUnreadSnapshot] = useState<{ key: string | null; seq: number | null }>({ key: null, seq: null });
+  // opened, shown again or returned to, and moves only when something new is
+  // unread then; reading does not move it. Derived during render (not in an
+  // effect) so the divider exists in the very first commit, before any read.
+  const viewKey = `${selectedId ?? ''}:${shown.epoch}:${presence.epoch}`;
+  const [unreadSnapshot, setUnreadSnapshot] = useState<{ key: string | null; id: string | null; seq: number | null }>({ key: null, id: null, seq: null });
   if (unreadSnapshot.key !== viewKey) {
     const seq = selected?.last_read_seq;
     const unread = selectedId ? (unreadByConversation.get(selectedId) ?? 0) : 0;
-    setUnreadSnapshot({ key: viewKey, seq: seq != null && unread > 0 ? seq : null });
+    const kept = unreadSnapshot.id === selectedId ? unreadSnapshot.seq : null;
+    setUnreadSnapshot({ key: viewKey, id: selectedId, seq: seq != null && unread > 0 ? seq : kept });
   }
 
   // Whether the history is scrolled to its end. Written synchronously by the
@@ -773,28 +798,36 @@ function AuthenticatedApp({ session, onLogout }: {
   // layout, the tab is visible, the window has focus and sessions are closed.
   // Unread messages count as seen only once the history's end is on screen.
   const readInFlight = useRef(new Map<string, number>());
-  const selectedLatestSeq = selectedId ? store.maxSeq(selectedId) : 0;
   // A server that returned any marker supports them, so a conversation added
   // this session without one (e.g. a new channel) can still be marked read.
   const markersSupported = store.conversations.some(c => typeof c.last_read_seq === 'number');
+  const knownMarker = selected ? (selected.last_read_seq ?? (markersSupported ? 0 : null)) : null;
+  // Only history loaded without holes from the marker counts as seen.
+  const readableSeq = selectedId && knownMarker != null
+    ? readableThrough(store.messages.get(selectedId), knownMarker)
+    : 0;
   useEffect(() => {
     if (!selected) return;
-    const known = selected.last_read_seq ?? (markersSupported ? 0 : null);
-    if (known == null || selectedLatestSeq <= known) return;
+    const known = knownMarker;
+    if (known == null || readableSeq <= known) return;
     if (sessionsOpen || document.visibilityState === 'hidden' || !document.hasFocus()) return;
     if ((conversationRef.current?.getClientRects().length ?? 0) === 0) return;
     if (!tailVisible.current) return;
     const id = selected.id;
-    const target = selectedLatestSeq;
+    const target = readableSeq;
     if ((readInFlight.current.get(id) ?? -1) >= target) return;
     readInFlight.current.set(id, target);
     const release = () => {
       if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
     };
-    // A stalled request must not suppress retries forever; a late answer is
-    // still applied (markers are monotonic), it just no longer blocks.
-    const timeout = setTimeout(release, READ_REQUEST_TIMEOUT_MS);
-    void api.markRead(id, target).then(marker => {
+    // A stalled request is aborted, not abandoned: it cannot pile up behind
+    // retries, and it stops suppressing them.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+      release();
+    }, READ_REQUEST_TIMEOUT_MS);
+    void api.markRead(id, target, controller.signal).then(marker => {
       if (!live.current) return;
       // The server just proved membership; a list issued earlier must not prune it.
       confirmedAt.current.set(id, listRevision.current);
@@ -806,7 +839,7 @@ function AuthenticatedApp({ session, onLogout }: {
       clearTimeout(timeout);
       release();
     });
-  }, [api, bump, selected, selectedLatestSeq, markersSupported, sessionsOpen, pane, attentionTick, tailTick]);
+  }, [api, bump, selected, knownMarker, readableSeq, sessionsOpen, pane, attentionTick, tailTick]);
 
   const baseTitle = useRef(document.title);
   const totalUnread = [...unreadByConversation.values()].reduce((sum, n) => sum + n, 0);

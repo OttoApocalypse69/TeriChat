@@ -478,7 +478,7 @@ it('shows private unread counts and marks read only once the conversation is see
   await flush(() => window.dispatchEvent(new Event('focus')));
   await flush();
   expect(markRead).toHaveBeenCalledTimes(1);
-  expect(markRead).toHaveBeenCalledWith('dm', 2);
+  expect(markRead).toHaveBeenCalledWith('dm', 2, expect.any(AbortSignal));
   expect(host.querySelector('.conversation-row .unread-badge')).toBeNull();
   expect(document.title).not.toMatch(/^\(/);
   // The divider stays where the conversation was opened, even once read.
@@ -575,7 +575,7 @@ it('does not mark read until the end of an unread backlog is on screen', async (
     const box = host.querySelector<HTMLElement>('main .message-history')!;
     await flush(() => { box.scrollTop = 800; box.dispatchEvent(new Event('scroll')); });
     await flush();
-    expect(markRead).toHaveBeenCalledWith('dm', 2);
+    expect(markRead).toHaveBeenCalledWith('dm', 2, expect.any(AbortSignal));
   } finally {
     restore();
   }
@@ -590,7 +590,7 @@ it('marks a conversation that arrived without a marker once markers are known', 
   visibility(true);
   await login(); await click('Second');
   await flush();
-  expect(markRead).toHaveBeenCalledWith('dm2', 2);
+  expect(markRead).toHaveBeenCalledWith('dm2', 2, expect.any(AbortSignal));
 });
 
 it('keeps unseen messages unread when replying before catching up', async () => {
@@ -605,7 +605,7 @@ it('keeps unseen messages unread when replying before catching up', async () => 
   visibility(true);
   await flush(() => window.dispatchEvent(new Event('focus')));
   await flush();
-  expect(markRead).toHaveBeenCalledWith('dm', 3);
+  expect(markRead).toHaveBeenCalledWith('dm', 3, expect.any(AbortSignal));
 });
 
 it('drops the channels of a left workspace from the unread total', async () => {
@@ -630,14 +630,14 @@ it('gives messages that arrived while the pane was hidden a fresh NEW divider', 
   const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
   visibility(true);
   await login(); await click('Peer'); await flush();
-  expect(markRead).toHaveBeenLastCalledWith('dm', 2);
+  expect(markRead).toHaveBeenLastCalledWith('dm', 2, expect.any(AbortSignal));
 
   // The sessions overlay hides the whole layout while a new message lands.
   await click('Sessions');
   vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2), fromPeer(3)]);
   await flush(() => gateways[0].onEvent(event(3)));
   await flush();
-  expect(markRead).not.toHaveBeenCalledWith('dm', 3);
+  expect(markRead).not.toHaveBeenCalledWith('dm', 3, expect.any(AbortSignal));
 
   await click('Close sessions');
   await flush();
@@ -714,6 +714,40 @@ it('shows who is typing in the open conversation until it expires or their messa
   }
 });
 
+it('does not read across a peer message that failed to load before your reply', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_seq: 3 }]);
+  // seq 2 (the peer's) never loaded; seq 3 is the caller's own reply.
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), message(3)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true);
+  await login(); await click('Peer'); await flush();
+  expect(markRead).toHaveBeenCalledWith('dm', 1, expect.any(AbortSignal));
+  expect(markRead).not.toHaveBeenCalledWith('dm', 3, expect.any(AbortSignal));
+  expect(host.querySelector('.conversation-row .unread-badge')?.textContent).toBe('1');
+});
+
+it('aborts a stalled read request when it times out', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([unreadRow]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const signals: AbortSignal[] = [];
+  vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation((_id, _seq, signal) => {
+    if (signal) signals.push(signal);
+    return new Promise(() => {});
+  });
+  visibility(true);
+  await login();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    await click('Peer'); await flush();
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+    await flush(() => { vi.advanceTimersByTime(15_000); });
+    expect(signals[0].aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('drops a typing signal that the typist\u2019s own later message overtook', async () => {
   vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
   await login(); await click('Peer'); await flush();
@@ -783,5 +817,36 @@ it('announces typing at most every few seconds and stops against servers without
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('gives messages that arrived while you were away a NEW divider when you return', async () => {
+  vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_read_seq: 2 }]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  const markRead = vi.spyOn(ApiClient.prototype, 'markRead').mockImplementation(async (id, seq) => ({ conversation_id: id, last_read_seq: seq }));
+  visibility(true);
+  await login(); await click('Peer'); await flush();
+  expect(host.querySelector('main .new-divider')).toBeNull();
+
+  // Switch away; a message lands while nobody is looking.
+  visibility(false);
+  await flush(() => window.dispatchEvent(new Event('blur')));
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2), fromPeer(3)]);
+  await flush(() => gateways[0].onEvent(event(3)));
+  await flush();
+  expect(markRead).not.toHaveBeenCalledWith('dm', 3, expect.any(AbortSignal));
+
+  visibility(true);
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  await flush();
+  const divider = host.querySelector('main .new-divider');
+  expect(divider?.nextElementSibling?.querySelector('.message-sequence')?.textContent).toBe('#3');
+  expect(markRead).toHaveBeenCalledWith('dm', 3, expect.any(AbortSignal));
+
+  // Stepping away and back with nothing new keeps that divider.
+  visibility(false);
+  await flush(() => window.dispatchEvent(new Event('blur')));
+  visibility(true);
+  await flush(() => window.dispatchEvent(new Event('focus')));
+  expect(host.querySelector('main .new-divider')?.nextElementSibling?.querySelector('.message-sequence')?.textContent).toBe('#3');
 });
 
