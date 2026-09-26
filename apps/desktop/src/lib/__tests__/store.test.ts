@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { channelToConversation } from '../workspaces';
 import {
   avatarInitial,
   ChatStore,
@@ -11,6 +12,7 @@ import {
   lastActivityAt,
   mergeMessages,
   parseMemberHandles,
+  readableThrough,
   senderLabel,
   sortConversations,
   truncatePreview,
@@ -335,6 +337,25 @@ describe('unread review regressions', () => {
     expect(store.conversations.map(c => c.id)).toEqual(['keep']);
     expect(store.messages.has('c')).toBe(false);
     expect(store.historyCursor('c')).toBe(0);
+  });
+});
+
+describe('unread review regressions, round 3', () => {
+  const msg = (seq: number, sender = 'peer'): ChatMessage => ({
+    id: `m${seq}`, conversation_id: 'c', sender_id: sender, seq, ciphertext_b64: '', client_msg_id: `c${seq}`, sent_at: '',
+  });
+
+  it('keeps positions when a partial row (e.g. a channel from the channel list) is merged', () => {
+    const store = new ChatStore();
+    store.addConversation({ id: 'ch', kind: 'channel', members: [], last_seq: 5, last_read_seq: 3 });
+    store.addConversation(channelToConversation({ id: 'x', workspace_id: 'w', conversation_id: 'ch', name: 'general', kind: 'text', created_by: 'u', created_at: '' }));
+    expect(store.conversations[0]).toMatchObject({ last_seq: 5, last_read_seq: 3 });
+  });
+
+  it('never reads across an unloaded position', () => {
+    expect(readableThrough([msg(1), msg(3, 'me')], 0)).toBe(1);
+    expect(readableThrough([msg(1), msg(2), msg(3)], 1)).toBe(3);
+    expect(readableThrough(undefined, 4)).toBe(4);
   });
 });
 
