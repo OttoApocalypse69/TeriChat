@@ -37,6 +37,42 @@ function mockSocket(): WsLike & {
   return s;
 }
 
+describe('typing frames', () => {
+  it('parses typing and rejects malformed ones', () => {
+    expect(parseGatewayFrame('{"op":"typing","conversation_id":"c","user_id":"u","last_seq":4}'))
+      .toEqual({ kind: 'typing', conversation_id: 'c', user_id: 'u', last_seq: 4 });
+    expect(parseGatewayFrame('{"op":"typing","conversation_id":"c","last_seq":4}')).toEqual({ kind: 'unknown' });
+    // Without a usable watermark a signal cannot be ordered against messages.
+    for (const lastSeq of ['', ',"last_seq":null', ',"last_seq":-1', ',"last_seq":1.5', ',"last_seq":"4"']) {
+      expect(parseGatewayFrame(`{"op":"typing","conversation_id":"c","user_id":"u"${lastSeq}}`))
+        .toEqual({ kind: 'unknown' });
+    }
+  });
+
+  it('relays typing without touching event dedup or delivery', () => {
+    const socket = mockSocket();
+    const onEvent = vi.fn();
+    const onTyping = vi.fn();
+    const gw = new GatewayClient({
+      httpBase: 'http://127.0.0.1:3001', token: 'synthetic',
+      getResumeAfter: () => null, onStatus: () => {},
+      onEvent, onTyping, wsFactory: () => socket, heartbeatMs: 0,
+    });
+    try {
+      gw.connect();
+      const frame = JSON.stringify({ op: 'typing', conversation_id: 'c', user_id: 'u', last_seq: 3 });
+      socket.peerText(frame);
+      socket.peerText(frame);
+      expect(onTyping).toHaveBeenCalledTimes(2);
+      expect(onTyping).toHaveBeenLastCalledWith({ conversationId: 'c', userId: 'u', lastSeq: 3 });
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(gw.seenEventIds.size).toBe(0);
+    } finally {
+      gw.close();
+    }
+  });
+});
+
 describe('reconnect backoff', () => {
   it('grows exponentially and caps', () => {
     expect(backoffDelay(0)).toBe(500);

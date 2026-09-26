@@ -242,15 +242,26 @@ export function senderLabel(
   meId: string,
   senderId: string,
   conv: ChatConversation | null,
+  directory?: Readonly<Record<string, MemberProfileBody>>,
 ): string {
   if (senderId === meId) return 'you';
   if (conv?.kind === 'dm') {
     if (conv.peer_display_name) return conv.peer_display_name;
     if (conv.peer_handle) return `@${conv.peer_handle}`;
   }
-  const profile = memberProfile(conv, senderId);
+  // Channels carry no roster; their names come from the workspace directory.
+  const profile = memberProfile(conv, senderId) ?? directory?.[senderId];
   if (profile) return profileName(profile);
   return senderId.slice(0, 8);
+}
+
+/** Highest loaded seq sent by `userId` (0 when none has loaded). */
+export function latestSeqFrom(messages: ChatMessage[] | undefined, userId: string): number {
+  let latest = 0;
+  for (const m of messages ?? []) {
+    if (m.sender_id === userId && m.seq > latest) latest = m.seq;
+  }
+  return latest;
 }
 
 /** `YYYY-MM-DD` (UTC) day bucket for divider grouping; '' when invalid. */

@@ -21,6 +21,7 @@ pub mod routes;
 pub mod session_management;
 pub mod state;
 pub mod stats;
+pub mod typing;
 pub mod workspace_stats;
 pub mod workspaces;
 

@@ -3,10 +3,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from './App';
-import { ApiClient, encodeOpaqueText, type MessageBody } from './lib/api';
+import { ApiClient, ApiError, encodeOpaqueText, type MessageBody } from './lib/api';
 import type { GatewayOutboxEvent, GatewayStatus } from './lib/gateway';
 
-const gateways = vi.hoisted(() => [] as { onEvent: (e: GatewayOutboxEvent) => void; onStatus: (s: GatewayStatus) => void }[]);
+const gateways = vi.hoisted(() => [] as { onEvent: (e: GatewayOutboxEvent) => void; onStatus: (s: GatewayStatus) => void; onTyping?: (s: { conversationId: string; userId: string; lastSeq: number }) => void }[]);
 vi.mock('./lib/gateway', () => ({ GatewayClient: class {
   constructor(options: typeof gateways[number]) { gateways.push(options); }
   connect() {}
@@ -688,6 +688,32 @@ it('keeps a channel opened this session that no list has carried yet', async () 
   expect(host.querySelector('main h2')?.textContent).toBe('#general');
 });
 
+it('shows who is typing in the open conversation until it expires or their message lands', async () => {
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1)]);
+  await login(); await click('Peer'); await flush();
+  const typing = () => host.querySelector('main .typing-indicator')?.textContent;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  try {
+    await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer', lastSeq: 1 }));
+    expect(typing()).toBe('Peer is typing…');
+    // Other conversations' typists never show here.
+    await flush(() => gateways[0].onTyping?.({ conversationId: 'elsewhere', userId: 'x', lastSeq: 0 }));
+    expect(typing()).toBe('Peer is typing…');
+    await flush(() => { vi.advanceTimersByTime(6_100); });
+    expect(typing()).toBe('');
+
+    // Typing again, then their message arrives: the indicator clears at once.
+    await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer', lastSeq: 1 }));
+    expect(typing()).toBe('Peer is typing…');
+    vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+    await flush(() => gateways[0].onEvent(event(2)));
+    await flush();
+    expect(typing()).toBe('');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('does not read across a peer message that failed to load before your reply', async () => {
   vi.mocked(ApiClient.prototype.listConversations).mockResolvedValue([{ ...unreadRow, last_seq: 3 }]);
   // seq 2 (the peer's) never loaded; seq 3 is the caller's own reply.
@@ -717,6 +743,77 @@ it('aborts a stalled read request when it times out', async () => {
     expect(signals[0].aborted).toBe(false);
     await flush(() => { vi.advanceTimersByTime(15_000); });
     expect(signals[0].aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('drops a typing signal that the typist\u2019s own later message overtook', async () => {
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  await login(); await click('Peer'); await flush();
+  const typing = () => host.querySelector('main .typing-indicator')?.textContent;
+  // Sent while seq 1 was the latest, delivered after their seq 2 loaded.
+  await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer', lastSeq: 1 }));
+  expect(typing()).toBe('');
+  await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer', lastSeq: 2 }));
+  expect(typing()).toBe('Peer is typing…');
+});
+
+it('keeps a typist whose signal is newer than the message that just loaded', async () => {
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1)]);
+  await login(); await click('Peer'); await flush();
+  const typing = () => host.querySelector('main .typing-indicator')?.textContent;
+  // Sent after their seq 2 (not loaded here yet): they are drafting the next one.
+  await flush(() => gateways[0].onTyping?.({ conversationId: 'dm', userId: 'peer', lastSeq: 2 }));
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([fromPeer(1), fromPeer(2)]);
+  await flush(() => gateways[0].onEvent(event(2)));
+  await flush();
+  expect(host.querySelector('main')?.textContent).toContain('body-2');
+  expect(typing()).toBe('Peer is typing…');
+});
+
+it('names channel authors and typists from the workspace member list', async () => {
+  const kai = { user_id: 'u-kai', handle: 'kai', display_name: 'Kai', role: 'member', joined_at: '' };
+  const bo = { user_id: 'u-bo', handle: 'bo', display_name: '', role: 'member', joined_at: '' };
+  vi.mocked(ApiClient.prototype.listWorkspaces).mockResolvedValue([workspace()]);
+  vi.mocked(ApiClient.prototype.listChannels).mockResolvedValue([channel('general')]);
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([
+    { ...message(1), conversation_id: 'old-channel-conv', sender_id: 'u-kai' },
+  ]);
+  // Paged (the member panel pages the same list): the directory reads it all.
+  const listMembers = vi.mocked(ApiClient.prototype.listMembers).mockImplementation(async (_ws, after) =>
+    after === undefined ? { members: [kai], next_cursor: 'u-kai' } : { members: [bo], next_cursor: null });
+  await login(); await click('general'); await flush();
+  expect(listMembers).toHaveBeenCalledWith('shared-ws', 'u-kai');
+  expect(host.querySelector('main .message-meta strong')?.textContent).toBe('Kai');
+  const requests = listMembers.mock.calls.length;
+  await flush(() => gateways[0].onTyping?.({ conversationId: 'old-channel-conv', userId: 'u-bo', lastSeq: 1 }));
+  expect(host.querySelector('main .typing-indicator')?.textContent).toBe('@bo is typing…');
+  // Everyone named already: no further directory requests.
+  expect(listMembers).toHaveBeenCalledTimes(requests);
+});
+
+it('announces typing at most every few seconds and stops against servers without it', async () => {
+  const sendTyping = vi.spyOn(ApiClient.prototype, 'sendTyping').mockResolvedValue(undefined);
+  await login(); await click('Peer');
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    await type('Message', 'h');
+    await type('Message', 'he');
+    await type('Message', '');
+    expect(sendTyping).toHaveBeenCalledTimes(1);
+    expect(sendTyping).toHaveBeenCalledWith('dm');
+    vi.advanceTimersByTime(3_000);
+    await type('Message', 'hey');
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+
+    sendTyping.mockRejectedValue(new ApiError(404, 'not_found', 'not found'));
+    vi.advanceTimersByTime(3_000);
+    await type('Message', 'hey!');
+    await flush();
+    vi.advanceTimersByTime(3_000);
+    await type('Message', 'hey!!');
+    expect(sendTyping).toHaveBeenCalledTimes(3);
   } finally {
     vi.useRealTimers();
   }

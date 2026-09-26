@@ -142,3 +142,18 @@ it('still follows the tail when nothing was unread on open', async () => {
     restore();
   }
 });
+
+it('says who is typing without naming a crowd', async () => {
+  const typing = async (names: string[]) => {
+    await act(async () => root.render(
+      <ConversationView conversation={dm} messages={[]} meId="me" meHandle="me"
+        loading={false} sending={false} error={null} onSend={async () => {}} typingNames={names} />,
+    ));
+    return host.querySelector('.typing-indicator')?.textContent;
+  };
+  expect(await typing([])).toBe('');
+  expect(await typing(['Ana'])).toBe('Ana is typing…');
+  expect(await typing(['Ana', '@bo'])).toBe('Ana and @bo are typing…');
+  expect(await typing(['Ana', '@bo', 'Kai'])).toBe('Several people are typing…');
+});
+

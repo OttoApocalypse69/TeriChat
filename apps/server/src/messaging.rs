@@ -430,6 +430,52 @@ pub async fn find_or_create_dm(
     Ok(conversation)
 }
 
+/// Authorize a typing signal and capture its audience under the typist's
+/// participant row lock, handing both to `publish` before the lock is
+/// released. A concurrent kick's DELETE waits for this (as it does for a
+/// send), so a signal is either published before a removal or refused after
+/// it: never authorized before a kick and captured after it. `publish` gets
+/// every participant plus the conversation's highest message seq.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::NotMember`] when `user_id` is not a participant
+/// and [`MessagingError::Database`] on database failure.
+pub async fn publish_typing(
+    pool: &sqlx::PgPool,
+    conversation_id: Uuid,
+    user_id: Uuid,
+    publish: impl FnOnce(Vec<Uuid>, i64),
+) -> Result<(), MessagingError> {
+    let mut tx = pool.begin().await.map_err(MessagingError::Database)?;
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM conversation_participants
+         WHERE conversation_id = $1 AND user_id = $2 FOR SHARE",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(MessagingError::Database)?;
+    if member.is_none() {
+        return Err(MessagingError::NotMember);
+    }
+    let recipients: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM conversation_participants WHERE conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(MessagingError::Database)?;
+    let last_seq: i64 = sqlx::query_scalar("SELECT next_seq - 1 FROM conversations WHERE id = $1")
+        .bind(conversation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(MessagingError::Database)?;
+    publish(recipients, last_seq);
+    tx.commit().await.map_err(MessagingError::Database)
+}
+
 /// Membership check. `false` covers both non-members and missing rows.
 ///
 /// # Errors
