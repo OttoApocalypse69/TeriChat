@@ -337,12 +337,20 @@ async fn mark_read(
 /// Relay "I am typing" to the conversation's other live members. Gated
 /// exactly like sending: a channel needs workspace membership and SEND, any
 /// other conversation needs participation. Ephemeral: nothing is stored.
+///
+/// Admission comes first and costs no query: a repeat inside the throttle
+/// interval is answered 204 and dropped without a lookup (so, while an
+/// account's own earlier attempt is still pending, even a refused one). An
+/// attempt that fails authorization releases its slot.
 async fn typing(
     State(state): State<AppState>,
     Extension(bus): Extension<crate::typing::TypingBus>,
     bearer: Bearer,
     Path(conversation_id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
+    let Some(admission) = bus.admit(bearer.user_id(), conversation_id) else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
     if let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id).await? {
         let (_workspace, _role) =
@@ -352,15 +360,16 @@ async fn typing(
         if !workspaces::can_send(pool, channel.id, bearer.user_id()).await? {
             return Err(AppError::Denied("not permitted in this channel".to_owned()));
         }
-    } else if !messaging::is_member(pool, conversation_id, bearer.user_id()).await? {
-        return Err(messaging::MessagingError::NotMember.into());
     }
-    let recipients = messaging::participant_ids(pool, conversation_id).await?;
-    bus.publish(crate::typing::TypingSignal {
+    messaging::publish_typing(
+        pool,
         conversation_id,
-        user_id: bearer.user_id(),
-        recipients: recipients.into(),
-    });
+        bearer.user_id(),
+        |recipients, last_seq| {
+            admission.publish(recipients.into(), last_seq);
+        },
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

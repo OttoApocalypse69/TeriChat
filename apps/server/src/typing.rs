@@ -29,8 +29,13 @@ pub struct TypingSignal {
     pub conversation_id: Uuid,
     /// Account that is typing.
     pub user_id: Uuid,
-    /// Accounts allowed to see the signal. The typist is excluded at delivery.
+    /// Accounts the signal was addressed to when published. A prefilter
+    /// only: the gateway re-checks each recipient's access at delivery.
     pub recipients: Arc<[Uuid]>,
+    /// Highest message seq in the conversation when the signal was
+    /// published. Clients drop a signal older than a message the typist has
+    /// since sent, since the two travel on independent streams.
+    pub last_seq: i64,
 }
 
 /// Per-router fan-out for typing signals, with a publish throttle.
@@ -63,32 +68,74 @@ impl TypingBus {
         self.tx.subscribe()
     }
 
-    /// Relay a signal unless the same account signalled this conversation
-    /// within [`MIN_INTERVAL`]. Returns whether it was relayed.
-    pub fn publish(&self, signal: TypingSignal) -> bool {
+    /// Reserve this account's publish slot for the conversation, before any
+    /// database work, unless it already signalled within [`MIN_INTERVAL`].
+    /// A reservation dropped without publishing is released, so a request
+    /// that fails authorization does not throttle the next attempt.
+    #[must_use]
+    pub fn admit(&self, user_id: Uuid, conversation_id: Uuid) -> Option<Admission> {
         let now = Instant::now();
-        let key = (signal.user_id, signal.conversation_id);
+        let key = (user_id, conversation_id);
+        let mut last = self.slots();
+        if last
+            .get(&key)
+            .is_some_and(|at| now.duration_since(*at) < MIN_INTERVAL)
         {
-            // A poisoned lock only means another publisher panicked mid-insert;
-            // the map is still a valid throttle, so keep using it.
-            let mut last = self
-                .last
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if last
-                .get(&key)
-                .is_some_and(|at| now.duration_since(*at) < MIN_INTERVAL)
-            {
-                return false;
-            }
-            if last.len() >= THROTTLE_ENTRIES {
-                last.retain(|_, at| now.duration_since(*at) < MIN_INTERVAL);
-            }
-            last.insert(key, now);
+            return None;
         }
+        if last.len() >= THROTTLE_ENTRIES {
+            last.retain(|_, at| now.duration_since(*at) < MIN_INTERVAL);
+        }
+        last.insert(key, now);
+        Some(Admission {
+            bus: self.clone(),
+            key,
+            at: now,
+            published: false,
+        })
+    }
+
+    fn slots(&self) -> std::sync::MutexGuard<'_, HashMap<(Uuid, Uuid), Instant>> {
+        // A poisoned lock only means another publisher panicked mid-insert;
+        // the map is still a valid throttle, so keep using it.
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// An admitted typing request, holding its throttle slot until published.
+pub struct Admission {
+    bus: TypingBus,
+    key: (Uuid, Uuid),
+    at: Instant,
+    published: bool,
+}
+
+impl Admission {
+    /// Relay the signal to `recipients`, keeping the slot for the interval.
+    pub fn publish(mut self, recipients: Arc<[Uuid]>, last_seq: i64) {
+        self.published = true;
+        let (user_id, conversation_id) = self.key;
         // No live subscriber is not an error: nobody is watching right now.
-        let _ = self.tx.send(signal);
-        true
+        let _ = self.bus.tx.send(TypingSignal {
+            conversation_id,
+            user_id,
+            recipients,
+            last_seq,
+        });
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        let mut last = self.bus.slots();
+        if last.get(&self.key) == Some(&self.at) {
+            last.remove(&self.key);
+        }
     }
 }
 
@@ -96,12 +143,10 @@ impl TypingBus {
 mod tests {
     use super::*;
 
-    fn signal(user: Uuid, conversation: Uuid) -> TypingSignal {
-        TypingSignal {
-            conversation_id: conversation,
-            user_id: user,
-            recipients: Arc::from(vec![user]),
-        }
+    fn publish(bus: &TypingBus, user: Uuid, conversation: Uuid) -> bool {
+        bus.admit(user, conversation)
+            .map(|admission| admission.publish(Arc::from(vec![user]), 0))
+            .is_some()
     }
 
     #[test]
@@ -109,14 +154,29 @@ mod tests {
         let bus = TypingBus::new();
         let mut rx = bus.subscribe();
         let (ada, bob, room) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        assert!(bus.publish(signal(ada, room)));
-        assert!(!bus.publish(signal(ada, room)), "same typist, same room");
-        assert!(bus.publish(signal(bob, room)), "another typist");
-        assert!(bus.publish(signal(ada, Uuid::now_v7())), "another room");
+        assert!(publish(&bus, ada, room));
+        assert!(!publish(&bus, ada, room), "same typist, same room");
+        assert!(publish(&bus, bob, room), "another typist");
+        assert!(publish(&bus, ada, Uuid::now_v7()), "another room");
         let relayed: Vec<Uuid> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|s| s.user_id)
             .collect();
         assert_eq!(relayed, vec![ada, bob, ada]);
+    }
+
+    #[test]
+    fn unpublished_admissions_release_their_slot() {
+        let bus = TypingBus::new();
+        let mut rx = bus.subscribe();
+        let (ada, room) = (Uuid::now_v7(), Uuid::now_v7());
+        let pending = bus.admit(ada, room).expect("first request is admitted");
+        assert!(
+            bus.admit(ada, room).is_none(),
+            "a concurrent repeat waits for the first"
+        );
+        drop(pending);
+        assert!(rx.try_recv().is_err(), "a dropped admission relays nothing");
+        assert!(publish(&bus, ada, room), "a failed attempt never throttles");
     }
 
     #[test]
@@ -131,7 +191,7 @@ mod tests {
                 last.insert((Uuid::now_v7(), Uuid::now_v7()), stale);
             }
         }
-        assert!(bus.publish(signal(Uuid::now_v7(), Uuid::now_v7())));
+        assert!(publish(&bus, Uuid::now_v7(), Uuid::now_v7()));
         assert_eq!(
             bus.last.lock().unwrap().len(),
             1,

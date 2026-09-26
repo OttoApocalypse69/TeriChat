@@ -39,9 +39,14 @@ function mockSocket(): WsLike & {
 
 describe('typing frames', () => {
   it('parses typing and rejects malformed ones', () => {
-    expect(parseGatewayFrame('{"op":"typing","conversation_id":"c","user_id":"u"}'))
-      .toEqual({ kind: 'typing', conversation_id: 'c', user_id: 'u' });
-    expect(parseGatewayFrame('{"op":"typing","conversation_id":"c"}')).toEqual({ kind: 'unknown' });
+    expect(parseGatewayFrame('{"op":"typing","conversation_id":"c","user_id":"u","last_seq":4}'))
+      .toEqual({ kind: 'typing', conversation_id: 'c', user_id: 'u', last_seq: 4 });
+    expect(parseGatewayFrame('{"op":"typing","conversation_id":"c","last_seq":4}')).toEqual({ kind: 'unknown' });
+    // Without a usable watermark a signal cannot be ordered against messages.
+    for (const lastSeq of ['', ',"last_seq":null', ',"last_seq":-1', ',"last_seq":1.5', ',"last_seq":"4"']) {
+      expect(parseGatewayFrame(`{"op":"typing","conversation_id":"c","user_id":"u"${lastSeq}}`))
+        .toEqual({ kind: 'unknown' });
+    }
   });
 
   it('relays typing without touching event dedup or delivery', () => {
@@ -55,11 +60,11 @@ describe('typing frames', () => {
     });
     try {
       gw.connect();
-      const frame = JSON.stringify({ op: 'typing', conversation_id: 'c', user_id: 'u' });
+      const frame = JSON.stringify({ op: 'typing', conversation_id: 'c', user_id: 'u', last_seq: 3 });
       socket.peerText(frame);
       socket.peerText(frame);
       expect(onTyping).toHaveBeenCalledTimes(2);
-      expect(onTyping).toHaveBeenLastCalledWith({ conversationId: 'c', userId: 'u' });
+      expect(onTyping).toHaveBeenLastCalledWith({ conversationId: 'c', userId: 'u', lastSeq: 3 });
       expect(onEvent).not.toHaveBeenCalled();
       expect(gw.seenEventIds.size).toBe(0);
     } finally {

@@ -89,6 +89,10 @@ enum ServerFrame {
         conversation_id: Uuid,
         /// Account that is typing.
         user_id: Uuid,
+        /// Highest message seq when the signal was published. A client drops
+        /// the signal if it has already loaded a later message from this
+        /// typist (the message and the signal travel independently).
+        last_seq: i64,
     },
 }
 
@@ -324,9 +328,17 @@ async fn next_delivery(
                         && signal.recipients.contains(&session.user_id) => {
                         let operation = async {
                             if !session_live(pool, session).await { return false; }
+                            // Recipients were captured at publish; access is
+                            // rechecked now, like events. Unknown/slow: drop it.
+                            let visible = tokio::time::timeout(
+                                IO_TIMEOUT,
+                                conversation_visible(pool, session.user_id, signal.conversation_id),
+                            ).await;
+                            if !matches!(visible, Ok(true)) { return true; }
                             send_frame(sink, &ServerFrame::Typing {
                                 conversation_id: signal.conversation_id,
                                 user_id: signal.user_id,
+                                last_seq: signal.last_seq,
                             }).await
                         };
                         if !with_delivery_progress(&mut pending, &mut completed, operation).await {
@@ -481,6 +493,11 @@ async fn event_visible(pool: &sqlx::PgPool, user_id: Uuid, entry: &OutboxEntry) 
     else {
         return false;
     };
+    conversation_visible(pool, user_id, conversation).await
+}
+
+/// The live read gate behind [`event_visible`], shared with typing signals.
+async fn conversation_visible(pool: &sqlx::PgPool, user_id: Uuid, conversation: Uuid) -> bool {
     match workspaces::channel_by_conversation(pool, conversation).await {
         Ok(Some(channel)) => workspaces::get_workspace(pool, user_id, channel.workspace_id)
             .await
@@ -1103,7 +1120,9 @@ mod tests {
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&text).unwrap(),
-            serde_json::json!({"op": "typing", "conversation_id": dm.id, "user_id": user})
+            serde_json::json!({
+                "op": "typing", "conversation_id": dm.id, "user_id": user, "last_seq": 0
+            })
         );
 
         // A repeat inside the throttle interval relays nothing; the typist's
@@ -1150,6 +1169,180 @@ mod tests {
             typing_post(&app, &owner_token, channel.conversation_id).await,
             axum::http::StatusCode::NO_CONTENT
         );
+        pool.close().await;
+    }
+
+    /// Serve `app` on a loopback port; returns the address and server task.
+    async fn serve(app: axum::Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, server)
+    }
+
+    async fn connected(pool: &sqlx::PgPool, addr: std::net::SocketAddr, who: Uuid) -> Socket {
+        let (_, token) = session(pool, who).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/gateway?token={token}"))
+            .await
+            .unwrap();
+        identify(&mut socket).await;
+        socket
+    }
+
+    /// The next typing frame, skipping any message events around it.
+    async fn next_typing(socket: &mut Socket) -> serde_json::Value {
+        loop {
+            let Some(Ok(ClientMessage::Text(text))) = next(socket).await else {
+                panic!("expected a typing frame");
+            };
+            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if frame["op"] == "typing" {
+                return frame;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn typing_frames_carry_the_latest_message_seq() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let peer = seed_user(&pool).await;
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (addr, server) = serve(app.clone()).await;
+        let mut watcher = connected(&pool, addr, user).await;
+        let (_, peer_token) = session(&pool, peer).await;
+        messaging::send_message(&pool, peer, dm.id, Uuid::now_v7(), b"sealed", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            typing_post(&app, &peer_token, dm.id).await,
+            axum::http::StatusCode::NO_CONTENT
+        );
+        // A client that already loaded seq 1 from this typist keeps the
+        // signal; one sent before that message would carry 0 and be dropped.
+        assert_eq!(next_typing(&mut watcher).await["last_seq"], 1);
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn typing_authorization_waits_for_a_concurrent_removal() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let peer = seed_user(&pool).await;
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (addr, server) = serve(app.clone()).await;
+        let mut watcher = connected(&pool, addr, peer).await;
+        let (_, token) = session(&pool, user).await;
+        // A removal in flight: the typist's seat is deleted but not committed.
+        let mut removal = pool.begin().await.unwrap();
+        sqlx::query(
+            "DELETE FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2",
+        )
+        .bind(dm.id)
+        .bind(user)
+        .execute(&mut *removal)
+        .await
+        .unwrap();
+        let request = tokio::spawn({
+            let app = app.clone();
+            async move { typing_post(&app, &token, dm.id).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !request.is_finished(),
+            "authorization must wait for the removal instead of reading around it"
+        );
+        removal.commit().await.unwrap();
+        assert_eq!(
+            request.await.unwrap(),
+            axum::http::StatusCode::FORBIDDEN,
+            "the committed removal wins"
+        );
+        nothing_before_heartbeat(&mut watcher, 1).await;
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn throttled_typing_repeats_skip_every_lookup() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let peer = seed_user(&pool).await;
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (addr, server) = serve(app.clone()).await;
+        let mut watcher = connected(&pool, addr, peer).await;
+        let (_, token) = session(&pool, user).await;
+        assert_eq!(
+            typing_post(&app, &token, dm.id).await,
+            axum::http::StatusCode::NO_CONTENT
+        );
+        assert_eq!(next_typing(&mut watcher).await["user_id"], user.to_string());
+        // Observable proof that a repeat inside the interval runs no query:
+        // with the seat gone, any lookup would refuse it (403).
+        sqlx::query(
+            "DELETE FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2",
+        )
+        .bind(dm.id)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            typing_post(&app, &token, dm.id).await,
+            axum::http::StatusCode::NO_CONTENT,
+            "admitted from memory, before any lookup"
+        );
+        nothing_before_heartbeat(&mut watcher, 1).await;
+        server.abort();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn typing_recipients_are_rechecked_at_delivery() {
+        let Some((pool, state, user)) = fixture().await else {
+            return;
+        };
+        let peer = seed_user(&pool).await;
+        let former = seed_user(&pool).await;
+        let dm = messaging::find_or_create_dm(&pool, user, peer)
+            .await
+            .unwrap();
+        let still = messaging::find_or_create_dm(&pool, user, former)
+            .await
+            .unwrap();
+        let bus = TypingBus::new();
+        let app = crate::routes::build_router_with_typing(state, bus.clone());
+        let (addr, server) = serve(app).await;
+        let mut removed = connected(&pool, addr, former).await;
+        // Captured while `former` was still addressed (say, just before a
+        // kick) and delivered after: the captured set alone is not trusted.
+        bus.admit(user, dm.id)
+            .expect("fresh slot")
+            .publish(std::sync::Arc::from(vec![user, peer, former]), 0);
+        bus.admit(user, still.id)
+            .expect("fresh slot")
+            .publish(std::sync::Arc::from(vec![user, former]), 0);
+        assert_eq!(
+            next_typing(&mut removed).await["conversation_id"],
+            still.id.to_string(),
+            "only the conversation it can still read arrives"
+        );
+        server.abort();
         pool.close().await;
     }
 }

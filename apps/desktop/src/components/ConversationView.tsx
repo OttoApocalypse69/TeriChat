@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { decodeOpaqueText } from '../lib/api';
+import { decodeOpaqueText, type MemberProfileBody } from '../lib/api';
 import { avatarGradient } from '../lib/avatar';
 import {
   avatarInitial,
@@ -35,6 +35,8 @@ interface Props {
   typingNames?: string[];
   /** The draft changed and is not empty (drives "is typing" for others). */
   onDraftActivity?: () => void;
+  /** Workspace member names for channel authors (channels carry no roster). */
+  directory?: Readonly<Record<string, MemberProfileBody>>;
 }
 
 function typingText(names: string[]): ReactNode {
@@ -74,6 +76,7 @@ export default function ConversationView({
   onTailVisibleChange,
   typingNames = [],
   onDraftActivity,
+  directory,
 }: Props) {
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
@@ -227,7 +230,7 @@ export default function ConversationView({
             dayKey(m.sent_at) !== lastDay ? dayLabel(m.sent_at) : null;
           lastDay = dayKey(m.sent_at);
           const mine = m.sender_id === meId;
-          const author = senderLabel(meId, m.sender_id, conversation);
+          const author = senderLabel(meId, m.sender_id, conversation, directory);
           const isFirstNew = m.id === firstNewId;
           const follow = !divider && !isFirstNew && continuesGroup(messages[index - 1], m);
           const clock = formatClockTime(m.sent_at);

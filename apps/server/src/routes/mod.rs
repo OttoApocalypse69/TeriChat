@@ -20,6 +20,14 @@ pub mod workspaces;
 /// Paths, status codes, and JSON shapes are unchanged from the former
 /// monolithic `routes.rs`; this function only composes sub-routers.
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_typing(state, crate::typing::TypingBus::new())
+}
+
+/// [`build_router`] around a given typing fan-out (tests publish onto it).
+pub(crate) fn build_router_with_typing(
+    state: AppState,
+    typing: crate::typing::TypingBus,
+) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -34,5 +42,5 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::ledger::router())
         .with_state(state)
         // One typing fan-out per router: HTTP publishes, gateway sockets relay.
-        .layer(Extension(crate::typing::TypingBus::new()))
+        .layer(Extension(typing))
 }

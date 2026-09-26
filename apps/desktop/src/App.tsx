@@ -21,6 +21,7 @@ import {
   apiBaseUrl,
   encodeOpaqueText,
   newClientMsgId,
+  type MemberProfileBody,
 } from './lib/api';
 import { GatewayClient, type GatewayOutboxEvent, type GatewayStatus } from './lib/gateway';
 import {
@@ -33,6 +34,7 @@ import {
   ChatStore,
   MAX_GROUP_MEMBERS,
   gatewayEventInfo,
+  latestSeqFrom,
   parseMemberHandles,
   senderLabel,
   sortConversations,
@@ -75,14 +77,21 @@ const READ_REQUEST_TIMEOUT_MS = 15_000;
 const TYPING_TTL_MS = 6_000;
 const TYPING_RESEND_MS = 3_000;
 
-type Typers = Record<string, Record<string, number>>;
+// Channel authors and typists are named from the workspace member list,
+// fetched when a name is missing: at most this often, and this many pages.
+const DIRECTORY_RETRY_MS = 30_000;
+const DIRECTORY_MAX_PAGES = 20;
+
+/** A typist: shown until `until`, as of message seq `after`. */
+interface Typist { until: number; after: number }
+type Typers = Record<string, Record<string, Typist>>;
 
 /** Drop expired typists (and empty rooms); unchanged state stays identical. */
 function pruneTypers(current: Typers, now: number): Typers {
   let changed = false;
   const next: Typers = {};
   for (const [conversation, room] of Object.entries(current)) {
-    const live = Object.entries(room).filter(([, until]) => until > now);
+    const live = Object.entries(room).filter(([, typist]) => typist.until > now);
     if (live.length !== Object.keys(room).length) changed = true;
     if (live.length > 0) next[conversation] = Object.fromEntries(live);
   }
@@ -124,23 +133,31 @@ function AuthenticatedApp({ session, onLogout }: {
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
-  // Who is typing where: conversation -> account -> expiry (epoch ms).
+  // Who is typing where: conversation -> account -> expiry and watermark.
   const [typers, setTypers] = useState<Typers>({});
-  const noteTyping = useCallback((conversationId: string, userId: string, until: number | null) => {
+  // Signals and messages travel independently: a signal sent before a message
+  // this typist has since sent (it may arrive after it) is stale.
+  const noteTyping = useCallback((conversationId: string, userId: string, after: number) => {
+    if (latestSeqFrom(storeRef.current.messages.get(conversationId), userId) > after) return;
+    setTypers(current => pruneTypers({
+      ...current,
+      [conversationId]: { ...current[conversationId], [userId]: { until: Date.now() + TYPING_TTL_MS, after } },
+    }, Date.now()));
+  }, []);
+  // Their message landed: they are no longer typing it. A signal sent after
+  // that message (a replayed older row, a new draft) stays.
+  const noteSent = useCallback((conversationId: string, userId: string, seq: number) => {
     setTypers(current => {
-      const room = { ...(current[conversationId] ?? {}) };
-      if (until === null) {
-        if (!(userId in room)) return current;
-        delete room[userId];
-      } else {
-        room[userId] = until;
-      }
+      const typist = current[conversationId]?.[userId];
+      if (!typist || typist.after >= seq) return current;
+      const room = { ...current[conversationId] };
+      delete room[userId];
       return pruneTypers({ ...current, [conversationId]: room }, Date.now());
     });
   }, []);
   // One timer for the soonest expiry keeps the indicator honest without polling.
   useEffect(() => {
-    const soonest = Math.min(...Object.values(typers).flatMap(room => Object.values(room)));
+    const soonest = Math.min(...Object.values(typers).flatMap(room => Object.values(room).map(t => t.until)));
     if (!Number.isFinite(soonest)) return;
     const timer = setTimeout(() => setTypers(current => pruneTypers(current, Date.now())), Math.max(0, soonest - Date.now()) + 50);
     return () => clearTimeout(timer);
@@ -398,8 +415,7 @@ function AuthenticatedApp({ session, onLogout }: {
           if (!live.current) return;
           const row = (storeRef.current.messages.get(info.conversationId) ?? [])
             .find((m) => m.id === info.messageId);
-          // Their message landed: they are no longer typing it.
-          if (row) noteTyping(info.conversationId, row.sender_id, null);
+          if (row) noteSent(info.conversationId, row.sender_id, row.seq);
           // Exactly one toast per incoming message: only first-seen events
           // (`fresh`) notify, never redeliveries, and only the fetched row
           // matching this event (never a neighbor's text).
@@ -444,8 +460,8 @@ function AuthenticatedApp({ session, onLogout }: {
       },
       onEvent,
       onDuplicateEvent: onEvent,
-      onTyping: ({ conversationId, userId }) => {
-        if (live.current) noteTyping(conversationId, userId, Date.now() + TYPING_TTL_MS);
+      onTyping: ({ conversationId, userId, lastSeq }) => {
+        if (live.current) noteTyping(conversationId, userId, lastSeq);
       },
     });
     gatewayRef.current = gw;
@@ -454,7 +470,7 @@ function AuthenticatedApp({ session, onLogout }: {
       gw.close();
       gatewayRef.current = null;
     };
-  }, [api, bump, token, refreshHistory, refreshConversations, noteTyping]);
+  }, [api, bump, token, refreshHistory, refreshConversations, noteTyping, noteSent]);
 
   // Load conversations + workspaces once per login so DMs survive reload
   // with peer names (not UUIDs).
@@ -628,11 +644,47 @@ function AuthenticatedApp({ session, onLogout }: {
       if (err instanceof ApiError && err.status === 404) typingSupported.current = false;
     });
   }
-  const typingNames = selected
+  // Channels list no roster, so their authors and typists are named from the
+  // workspace member list, fetched (paged, bounded) when a name is missing.
+  const [directory, setDirectory] = useState<Record<string, MemberProfileBody>>({});
+  const directoryFetchedAt = useRef(new Map<string, number>());
+  const typistIds = selected
     ? Object.entries(typers[selected.id] ?? {})
-      .filter(([, until]) => until > Date.now())
-      .map(([userId]) => senderLabel(meId, userId, selected))
+      .filter(([, typist]) => typist.until > Date.now())
+      .map(([userId]) => userId)
     : [];
+  const typingNames = typistIds.map(userId => senderLabel(meId, userId, selected, directory));
+  const channelWorkspaceId = selected?.kind === 'channel'
+    && wsStore.selectedChannelConversationId() === selected.id
+    ? wsStore.selectedWorkspaceId
+    : null;
+  const unnamed = channelWorkspaceId
+    ? [...new Set([...typistIds, ...messages.map(m => m.sender_id)])]
+      .filter(id => id !== meId && !directory[id])
+      .sort()
+      .join(',')
+    : '';
+  useEffect(() => {
+    if (!channelWorkspaceId || !unnamed) return;
+    const fetchedAt = directoryFetchedAt.current.get(channelWorkspaceId) ?? -Infinity;
+    if (Date.now() - fetchedAt < DIRECTORY_RETRY_MS) return;
+    directoryFetchedAt.current.set(channelWorkspaceId, Date.now());
+    void (async () => {
+      const found: Record<string, MemberProfileBody> = {};
+      let after: string | undefined;
+      for (let page = 0; page < DIRECTORY_MAX_PAGES; page += 1) {
+        const { members, next_cursor } = await api.listMembers(channelWorkspaceId, after);
+        for (const { user_id, handle, display_name } of members) {
+          found[user_id] = { user_id, handle, display_name };
+        }
+        if (!next_cursor) break;
+        after = next_cursor;
+      }
+      if (live.current) setDirectory(current => ({ ...current, ...found }));
+    })().catch(() => {
+      // Names fall back to short ids; a later unknown name retries.
+    });
+  }, [api, channelWorkspaceId, unnamed]);
 
   async function send(text: string): Promise<void> {
     if (!selected) return;
@@ -893,6 +945,7 @@ function AuthenticatedApp({ session, onLogout }: {
             onTailVisibleChange={handleTailVisible}
             typingNames={typingNames}
             onDraftActivity={announceTyping}
+            directory={directory}
           />
         </main>
         {selectedWorkspace && (
