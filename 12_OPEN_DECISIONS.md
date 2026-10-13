@@ -284,6 +284,14 @@ This leaves room for future key transparency without making MLS credentials them
 
 Exact serialized credential format and database schema remain implementation details, but the account → many independent device members model is resolved.
 
+### MLS implementation decisions (issue #6) — OWNER-APPROVED 2026-10-13
+
+- **Credential serialization:** BasicCredential carrying a random 24-byte scope-local label plus a version byte. The server table maps label → account, device, revocation status. No global account UUID inside groups.
+- **Local persistence:** encrypted SQLite next to the Tauri local store, via the OpenMLS storage trait. The database key is login-derived (Argon2id).
+- **Audit findings:** `proc-macro-error2` (RUSTSEC-2026-0173, build-time only) accepted and documented; `rsa` (RUSTSEC-2023-0071) non-applicable because it is outside the resolve graph. Revisit on upstream changes.
+- **Landing:** MLS code lands on `main` behind the `mls-foundation` / `mls-persist` features, off by default, with no production path.
+- **Gate:** an independent specialist review is still required before any production E2EE claim.
+
 ## E. Authentication, MFA, and session architecture — LOCKED CONCEPTUALLY
 
 Authentication methods:

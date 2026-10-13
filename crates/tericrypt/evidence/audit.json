@@ -1,0 +1,9 @@
+{
+  "command": [
+    "cargo",
+    "audit",
+    "--file",
+    "Cargo.lock"
+  ],
+  "exit_code": 1
+}

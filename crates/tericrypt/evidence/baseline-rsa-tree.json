@@ -1,0 +1,12 @@
+{
+  "command": [
+    "cargo",
+    "tree",
+    "--locked",
+    "--workspace",
+    "--all-features",
+    "-i",
+    "rsa"
+  ],
+  "exit_code": 0
+}
