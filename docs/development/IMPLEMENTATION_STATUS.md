@@ -65,11 +65,17 @@ baseline failure/candidate regressions; current-main tests also pass. Wallet
 paging and client activity/session controls are now integrated. Do not assign
 those completed slices again from older checkboxes.
 
-The next bounded backend slice is owned, bounded server/worker shutdown: current
-bootstrap listens only for Ctrl-C and discards outbox/Stats worker handles.
-SIGTERM handling, drain order, cancellation and replay need implementation and
-real evidence. A separate writer owns SQLx feature hygiene; it must preserve
-PostgreSQL, migration, macro and JSON behavior without unrelated upgrades.
+Owned, bounded server/worker shutdown is implemented on
+`claude/project-thread-qvqsxx`: SIGTERM or Ctrl-C stops accepting, drains HTTP
+(20 s), then stops the outbox/Stats workers between batches (10 s, then abort),
+then closes the pool (5 s). Unmarked outbox rows are re-claimed on the next boot.
+`apps/server/tests/shutdown.rs` covers the drain, both deadlines, worker
+stop/abort, and the real binary exiting 0 on SIGTERM; it passed locally against
+PostgreSQL 16, not yet in hosted CI. Upgraded gateway sockets are not drained:
+they drop at exit and clients resume from their cursor; a close frame on
+shutdown is not implemented. A separate writer owns SQLx feature hygiene; it
+must preserve PostgreSQL, migration, macro and JSON behavior without unrelated
+upgrades.
 
 Existing dependency evidence remains limited: the 2026-09-13 audit at
 `1ef7821b65a8462e53ba90a89538d38e27b7fe3f` (unchanged root manifest/lock

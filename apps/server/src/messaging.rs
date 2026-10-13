@@ -808,9 +808,14 @@ pub async fn events_after(
 }
 
 /// Background outbox worker: claim → broadcast → mark, every 500 ms.
-/// At-least-once by design; `main` aborts it on shutdown and the next boot
-/// re-claims anything unmarked.
-pub async fn outbox_worker(pool: sqlx::PgPool, hub: broadcast::Sender<OutboxEntry>) {
+/// At-least-once by design. Returns between batches once `stop` reads true;
+/// if shutdown has to abort it mid-batch, the next boot re-claims anything
+/// unmarked.
+pub async fn outbox_worker(
+    pool: sqlx::PgPool,
+    hub: broadcast::Sender<OutboxEntry>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         match claim_outbox(&pool, OUTBOX_BATCH).await {
             Err(err) => {
@@ -828,7 +833,12 @@ pub async fn outbox_worker(pool: sqlx::PgPool, hub: broadcast::Sender<OutboxEntr
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Stop only between batches: a claimed batch is always sent and
+        // marked. Err means every stop sender is gone, which is also a stop.
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = stop.wait_for(|stopped| *stopped) => return,
+        }
     }
 }
 
@@ -953,8 +963,10 @@ mod tests {
         assert!(claimed.iter().any(|entry| entry.topic == "message.created"));
         let ids: Vec<Uuid> = claimed.iter().map(|entry| entry.id).collect();
         mark_published(&pool, &ids).await.expect("mark");
+        // Other tests share this outbox and may insert rows between the two
+        // claims; only the rows marked above must never come back.
         let drained = claim_outbox(&pool, 10).await.expect("reclaim");
-        assert!(drained.is_empty());
+        assert!(drained.iter().all(|entry| !ids.contains(&entry.id)));
         pool.close().await;
     }
 

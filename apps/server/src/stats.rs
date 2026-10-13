@@ -285,8 +285,9 @@ pub async fn conversation_stats(
 
 /// Background stats consumer: fold new outbox rows, then sleep. Restart-safe
 /// by construction — a crash replays rows the next boot, and replays dedupe
-/// on `event_id`, so every message counts exactly once.
-pub async fn stats_worker(pool: sqlx::PgPool) {
+/// on `event_id`, so every message counts exactly once. Returns between
+/// batches once `stop` reads true.
+pub async fn stats_worker(pool: sqlx::PgPool, mut stop: tokio::sync::watch::Receiver<bool>) {
     let mut last_seen: Option<Uuid> = None;
     loop {
         match fold_new_events(&pool, &mut last_seen).await {
@@ -294,7 +295,11 @@ pub async fn stats_worker(pool: sqlx::PgPool) {
             Ok(0) => {}
             Ok(folded) => tracing::debug!("stats folded {folded} events"),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Stop only between batches; Err means every stop sender is gone.
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            _ = stop.wait_for(|stopped| *stopped) => return,
+        }
     }
 }
 
