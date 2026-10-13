@@ -173,6 +173,20 @@ async fn channel_send_gate(
     Ok(())
 }
 
+/// Longest an upload may spend transferring its body while holding a slot.
+/// 10 MiB in 120 s needs about 85 KiB/s, well under any usable link.
+const UPLOAD_TRANSFER_DEADLINE: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// Collect an upload body under the 10 MiB cap and `deadline`.
+async fn collect_upload(body: Body, deadline: std::time::Duration) -> Result<Bytes, AppError> {
+    let capped = Limited::new(body, MAX_ATTACHMENT_BYTES + 1);
+    let collected = tokio::time::timeout(deadline, capped.collect())
+        .await
+        .map_err(|_| AppError::RequestTimeout("attachment upload timed out".to_owned()))?
+        .map_err(|_| AppError::PayloadTooLarge("attachment exceeds 10 MiB".to_owned()))?;
+    Ok(collected.to_bytes())
+}
+
 /// Download chunk size. Small chunks keep hyper polling the body (and so
 /// keep the slot held) until the blob is nearly flushed to the socket.
 const DOWNLOAD_CHUNK: usize = 64 * 1024;
@@ -213,12 +227,9 @@ async fn upload_attachment(
     // Streaming cap: `Limited` rejects during transfer once the body
     // exceeds 10 MiB + 1 byte, so a multi-GB payload never buffers into
     // RAM. Client pre-checks are bypassable; this is the real gate.
-    let capped = Limited::new(body, MAX_ATTACHMENT_BYTES + 1);
-    let collected = capped
-        .collect()
-        .await
-        .map_err(|_| AppError::PayloadTooLarge("attachment exceeds 10 MiB".to_owned()))?;
-    let bytes = collected.to_bytes();
+    // Transfer deadline while the slot is held: a trickled body without EOF
+    // would otherwise keep its slot forever and starve every other upload.
+    let bytes = collect_upload(body, UPLOAD_TRANSFER_DEADLINE).await?;
     if bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(AppError::PayloadTooLarge(
             "attachment exceeds 10 MiB".to_owned(),
@@ -328,7 +339,10 @@ async fn download_attachment(
             return Err(AppError::Internal);
         }
     }
-    let is_svg = attachment.mime.eq_ignore_ascii_case("image/svg+xml");
+    // Compare the essence: rows stored before upload normalization may still
+    // carry parameters (`image/svg+xml;charset=utf-8`).
+    let essence = attachment.mime.split(';').next().unwrap_or_default().trim();
+    let is_svg = essence.eq_ignore_ascii_case("image/svg+xml");
     let disposition = content_disposition(
         if is_svg { "attachment" } else { "inline" },
         &attachment.filename,
@@ -351,6 +365,13 @@ async fn download_attachment(
             // Stored upload bytes are user-supplied; never let a browser
             // sniff them into an executable context.
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap()),
+            // Opened directly on the API origin, user bytes never run script.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+                    .parse()
+                    .unwrap(),
+            ),
         ],
         slotted_body(bytes, slot),
     )
@@ -380,6 +401,24 @@ pub fn router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trickled_upload_body_times_out() {
+        let stalled = futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"first"))
+        })
+        .chain(futures_util::stream::pending());
+        let outcome = collect_upload(
+            Body::from_stream(stalled),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert!(matches!(outcome, Err(AppError::RequestTimeout(_))));
+        let whole = collect_upload(Body::from("done"), std::time::Duration::from_millis(50))
+            .await
+            .expect("complete body");
+        assert_eq!(whole.as_ref(), b"done");
+    }
 
     #[test]
     fn percent_filenames_decode_and_malformed_ones_are_refused() {

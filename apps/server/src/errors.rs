@@ -43,6 +43,8 @@ pub enum AppError {
     NotFound(String),
     /// Body exceeds the accepted limit (attachments: 10 MiB).
     PayloadTooLarge(String),
+    /// Body transfer exceeded its deadline (attachment uploads).
+    RequestTimeout(String),
     /// MIME type outside the accepted allowlist.
     UnsupportedMediaType(String),
     /// A database-backed route called without a configured database.
@@ -71,6 +73,9 @@ impl IntoResponse for AppError {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
             Self::PayloadTooLarge(message) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
+            }
+            Self::RequestTimeout(message) => {
+                (StatusCode::REQUEST_TIMEOUT, "request_timeout", message)
             }
             Self::UnsupportedMediaType(message) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,

@@ -80,7 +80,12 @@ async fn get_bytes(app: Router, uri: &str, token: &str) -> (StatusCode, Vec<u8>,
 }
 
 fn urlencoding(raw: &str) -> String {
-    raw.replace(' ', "%20").replace('/', "%2F")
+    raw.replace('%', "%25")
+        .replace('+', "%2B")
+        .replace(';', "%3B")
+        .replace('=', "%3D")
+        .replace(' ', "%20")
+        .replace('/', "%2F")
 }
 
 /// Alice uploads, Bob downloads byte-identical, stranger sees 404.
@@ -756,5 +761,159 @@ async fn attachment_download_holds_a_slot_until_the_body_drops() {
     assert_eq!(state.download_slots.available_permits(), full);
 
     let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// MIME parameters cannot disguise an SVG: the stored type is the essence,
+/// so the download is still forced to `attachment` and sandboxed.
+#[tokio::test]
+async fn svg_with_parameters_still_downloads_as_attachment() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!(
+            "SKIPPED: svg_with_parameters_still_downloads_as_attachment (DATABASE_URL unset)"
+        );
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let dir = test_dir("svgparam");
+    let state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        dir.clone(),
+    );
+    let stamp = Uuid::now_v7().simple().to_string()[24..].to_owned();
+    let mut users = Vec::new();
+    for who in ["a", "b"] {
+        let handle = format!("svg{who}{stamp}");
+        users.push(
+            auth::create_user(
+                &pool,
+                &handle,
+                &format!("{handle}@example.com"),
+                "Synthetic",
+                "pw-synthetic-att",
+            )
+            .await
+            .expect("register synthetic user"),
+        );
+    }
+    let token = auth::login(&pool, &users[0].handle, "pw-synthetic-att")
+        .await
+        .expect("login")
+        .token;
+    let dm = messaging::find_or_create_dm(&pool, users[0].id, users[1].id)
+        .await
+        .expect("open dm");
+    let (status, body) = post_bytes(
+        build_router(state.clone()),
+        &format!("/v1/conversations/{}/attachments", dm.id),
+        &token,
+        "x.svg",
+        "image/svg+xml; charset=utf-8",
+        b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["mime"], "image/svg+xml");
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/attachments/{}",
+                    created["id"].as_str().unwrap()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let disposition = response.headers()["content-disposition"].to_str().unwrap();
+    assert!(disposition.starts_with("attachment;"), "{disposition}");
+    let csp = response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("sandbox"), "{csp}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// Storage that deletes only `ok` and fails every other id.
+#[derive(Debug)]
+struct OnlyDeletes {
+    ok: Uuid,
+}
+
+impl attachments::AttachmentStorage for OnlyDeletes {
+    async fn put(&self, _id: Uuid, _bytes: &[u8]) -> Result<(), String> {
+        Err("read-only".to_owned())
+    }
+    async fn get(&self, _id: Uuid) -> Result<Vec<u8>, String> {
+        Err("empty".to_owned())
+    }
+    async fn delete(&self, id: Uuid) -> Result<(), String> {
+        if id == self.ok {
+            Ok(())
+        } else {
+            Err("poisoned".to_owned())
+        }
+    }
+}
+
+/// A tombstone whose delete keeps failing rotates behind untried work
+/// instead of being re-picked by every pass.
+#[tokio::test]
+async fn failing_tombstones_do_not_starve_the_gc_queue() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("SKIPPED: failing_tombstones_do_not_starve_the_gc_queue (DATABASE_URL unset)");
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let (poisoned, good) = (Uuid::now_v7(), Uuid::now_v7());
+    // The poisoned tombstone is the oldest in the queue.
+    sqlx::query(
+        "INSERT INTO attachment_blob_gc (attachment_id, enqueued_at)
+         VALUES ($1, '2000-01-01'), ($2, now())",
+    )
+    .bind(poisoned)
+    .bind(good)
+    .execute(&pool)
+    .await
+    .expect("queue tombstones");
+    let storage = OnlyDeletes { ok: good };
+    let queued = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM attachment_blob_gc WHERE attachment_id = $1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read tombstone")
+        }
+    };
+    // One tombstone per pass; other tests' rows may share the queue.
+    for _ in 0..200 {
+        attachments::sweep_deleted_blobs(&pool, &storage, 1)
+            .await
+            .expect("sweep");
+        if !queued(good).await {
+            break;
+        }
+    }
+    assert!(!queued(good).await, "the deletable tombstone is reached");
+
+    sqlx::query("DELETE FROM attachment_blob_gc WHERE attachment_id = $1")
+        .bind(poisoned)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
     pool.close().await;
 }

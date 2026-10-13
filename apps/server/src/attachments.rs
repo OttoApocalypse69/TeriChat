@@ -236,7 +236,15 @@ pub async fn upload_attachment<S: AttachmentStorage>(
     if bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(AttachmentError::TooLarge);
     }
-    let mime = mime.trim().to_ascii_lowercase();
+    // Store the essence only (`image/svg+xml;charset=utf-8` becomes
+    // `image/svg+xml`): parameters must never disguise a type that the
+    // download path treats specially.
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     if mime.is_empty() || mime.len() > 127 {
         return Err(AttachmentError::InvalidInput(
             "mime must not be empty".to_owned(),
@@ -420,7 +428,9 @@ pub async fn download_attachment<S: AttachmentStorage>(
     Ok((attachment, bytes))
 }
 
-/// Delete the bytes of up to `limit` deleted attachments, oldest first.
+/// Delete the bytes of up to `limit` deleted attachments, fewest failed
+/// attempts first, then oldest: a batch of persistently failing deletes
+/// rotates behind untried work instead of starving it.
 ///
 /// Every deleted `attachments` row leaves a tombstone in
 /// `attachment_blob_gc` (a trigger, so cascades from conversation, channel
@@ -441,7 +451,7 @@ pub async fn sweep_deleted_blobs<S: AttachmentStorage>(
     let mut tx = pool.begin().await.map_err(AttachmentError::Database)?;
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT attachment_id FROM attachment_blob_gc
-         ORDER BY enqueued_at, attachment_id LIMIT $1 FOR UPDATE SKIP LOCKED",
+         ORDER BY attempts, enqueued_at, attachment_id LIMIT $1 FOR UPDATE SKIP LOCKED",
     )
     .bind(limit)
     .fetch_all(&mut *tx)
