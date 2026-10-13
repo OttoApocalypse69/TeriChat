@@ -10,7 +10,10 @@ export default defineConfig({
     strictPort: true,
   },
   build: {
-    target: 'safari13',
+    // Tailwind CSS 4 output needs native cascade layers, @property and
+    // color-mix(): Safari/WKWebView 16.4+ (macOS 11+ with current Safari),
+    // WebView2/Chromium 111+, WebKitGTK with matching support.
+    target: 'safari16.4',
   },
   test: {
     environment: 'node',
