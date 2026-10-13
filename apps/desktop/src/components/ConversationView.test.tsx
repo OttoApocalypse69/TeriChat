@@ -191,6 +191,19 @@ it('renders attachment rows and downloads the clicked file', async () => {
   expect(onDownload).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1', filename: 'report.pdf' }));
 });
 
+it('shows a failed download on the row instead of rejecting unhandled', async () => {
+  const onDownload = vi.fn(async () => { throw new Error('attachment not found'); });
+  await act(async () => root.render(
+    <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+      onSend={async () => {}} {...noAttachments} onDownload={onDownload}
+      messages={[attachmentMessage(1, [{ id: 'a1', filename: 'report.pdf', mime: 'application/pdf' }])]} />,
+  ));
+  await act(async () => host.querySelector<HTMLButtonElement>('.attachment-row')!.click());
+  expect(onDownload).toHaveBeenCalledTimes(1);
+  expect(host.querySelector('.attachment-error')?.textContent)
+    .toBe('Could not download report.pdf: attachment not found');
+});
+
 it('revokes a preview that arrives after its row unmounted', async () => {
   let resolveBytes!: (blob: Blob) => void;
   const fetchAttachmentBytes = vi.fn(() => new Promise<Blob>(resolve => { resolveBytes = resolve; }));

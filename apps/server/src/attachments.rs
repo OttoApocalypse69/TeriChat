@@ -154,6 +154,22 @@ impl FilesystemAttachmentStorage {
         Self { dir }
     }
 
+    /// Create the storage directory and prove it accepts a write, so a
+    /// missing, read-only, or full volume fails at boot instead of on the
+    /// first upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error text when the directory cannot be created or
+    /// a probe file cannot be written and removed.
+    pub fn ensure_writable(&self) -> Result<(), String> {
+        let describe = |err: std::io::Error| format!("{}: {err}", self.dir.display());
+        std::fs::create_dir_all(&self.dir).map_err(describe)?;
+        let probe = self.dir.join(".write-probe");
+        std::fs::write(&probe, b"ok").map_err(describe)?;
+        std::fs::remove_file(&probe).map_err(describe)
+    }
+
     fn path_for(&self, id: Uuid) -> PathBuf {
         self.dir.join(id.simple().to_string())
     }
@@ -479,6 +495,25 @@ pub async fn blob_gc_worker<S: AttachmentStorage>(pool: sqlx::PgPool, storage: s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_writable_creates_the_dir_and_rejects_unusable_paths() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("terichat-probe-{}-{nanos}", std::process::id()));
+        let storage = FilesystemAttachmentStorage::new(root.join("nested"));
+        storage.ensure_writable().expect("fresh dir is writable");
+        assert!(root.join("nested").is_dir());
+        assert!(!root.join("nested/.write-probe").exists());
+        // A regular file where the directory should be cannot hold blobs.
+        std::fs::write(root.join("blocker"), b"x").expect("write blocker");
+        let blocked = FilesystemAttachmentStorage::new(root.join("blocker/attachments"));
+        assert!(blocked.ensure_writable().is_err());
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
 
     #[test]
     fn mime_allowlist_covers_images_pdf_zip_audio_video() {

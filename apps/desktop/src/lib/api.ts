@@ -229,6 +229,17 @@ export function guessUploadMime(file: Pick<File, 'name' | 'type'>): string {
 }
 
 /**
+ * Whether the server's v1 allowlist (images, audio, video, PDF, ZIP) takes
+ * this file. Checked at staging so one unsupported file cannot fail a send
+ * after its siblings already uploaded.
+ */
+export function isAllowedAttachment(file: Pick<File, 'name' | 'type'>): boolean {
+  const mime = guessUploadMime(file).trim().toLowerCase();
+  return mime.startsWith('image/') || mime.startsWith('audio/') || mime.startsWith('video/')
+    || mime === 'application/pdf' || mime === 'application/zip';
+}
+
+/**
  * Parse a received message payload into chat content.
  * Legacy messages carry a bare string; attachment messages carry the
  * versioned envelope `{v:1, kind:"attachments", text, attachments}`.

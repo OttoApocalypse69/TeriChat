@@ -9,7 +9,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 use terichat_server::{
-    attachments, auth, build_router, db_pool, messaging, AppState, HUB_CAPACITY, MIGRATOR,
+    attachments, auth, build_router, db_pool, messaging, workspaces, AppState, HUB_CAPACITY,
+    MIGRATOR,
 };
 use tokio::sync::broadcast;
 use tower::ServiceExt;
@@ -576,6 +577,105 @@ async fn attachment_blobs_are_collected_after_cascade() {
     .await
     .expect("read tombstone");
     assert!(!queued, "a collected tombstone is removed");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// A `send_messages` denial committed while the body is still transferring
+/// refuses the upload: the channel gate runs again after the transfer.
+#[tokio::test]
+async fn attachment_upload_rechecks_channel_send_after_transfer() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!(
+            "SKIPPED: attachment_upload_rechecks_channel_send_after_transfer (DATABASE_URL unset)"
+        );
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let dir = test_dir("chanrecheck");
+    let state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        dir.clone(),
+    );
+    let stamp = Uuid::now_v7().simple().to_string()[24..].to_owned();
+    let mut users = Vec::new();
+    for who in ["own", "mem"] {
+        let handle = format!("crk{who}{stamp}");
+        let user = auth::create_user(
+            &pool,
+            &handle,
+            &format!("{handle}@example.com"),
+            "Synthetic",
+            "pw-synthetic-att",
+        )
+        .await
+        .expect("register synthetic user");
+        users.push(user);
+    }
+    let (owner, member) = (users[0].id, users[1].id);
+    let token = auth::login(&pool, &users[1].handle, "pw-synthetic-att")
+        .await
+        .expect("login member")
+        .token;
+    let workspace = workspaces::create_workspace(&pool, owner, "recheck")
+        .await
+        .expect("create workspace");
+    workspaces::add_member(&pool, owner, workspace.id, member, workspaces::Role::Member)
+        .await
+        .expect("add member");
+    let channel = workspaces::create_channel(&pool, owner, workspace.id, "general")
+        .await
+        .expect("create channel");
+
+    // Stream the body in two parts so the denial lands mid-transfer.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|chunk| (Ok::<_, std::io::Error>(chunk), rx))
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/v1/conversations/{}/attachments?filename=late.png&mime=image%2Fpng",
+            channel.conversation_id
+        ))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/octet-stream")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap();
+    let app = build_router(state);
+    let upload = tokio::spawn(async move { app.oneshot(request).await.unwrap().status() });
+    tx.send(b"first half".to_vec())
+        .await
+        .expect("send first chunk");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    workspaces::set_override(
+        &pool,
+        owner,
+        channel.id,
+        "member",
+        &member.to_string(),
+        workspaces::Permission::SendMessages,
+        false,
+    )
+    .await
+    .expect("deny member");
+    tx.send(b"second half".to_vec())
+        .await
+        .expect("send second chunk");
+    drop(tx);
+    assert_eq!(upload.await.expect("upload task"), StatusCode::NOT_FOUND);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM attachments WHERE conversation_id = $1")
+            .bind(channel.conversation_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+    assert_eq!(rows, 0, "a revoked sender stores nothing");
 
     let _ = std::fs::remove_dir_all(&dir);
     pool.close().await;

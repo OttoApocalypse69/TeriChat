@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS_PER_MESSAGE,
+  isAllowedAttachment,
   parseChatContent,
   type AttachmentRef,
   type MemberProfileBody,
@@ -215,13 +216,17 @@ export default function ConversationView({
     setSendError(null);
     const picked = Array.from(list).slice(0, MAX_ATTACHMENTS_PER_MESSAGE - staged.length);
     const oversize = picked.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+    const unsupported = picked.filter((f) => !isAllowedAttachment(f));
     if (oversize.length > 0) {
       setSendError(
         `${oversize[0].name} exceeds 10 MiB and was not staged`,
       );
+    } else if (unsupported.length > 0) {
+      setSendError(`${unsupported[0].name} is not a supported file type and was not staged`);
     }
     setStaged((prev) =>
-      [...prev, ...picked.filter((f) => f.size <= MAX_ATTACHMENT_BYTES)].slice(0, MAX_ATTACHMENTS_PER_MESSAGE),
+      [...prev, ...picked.filter((f) => f.size <= MAX_ATTACHMENT_BYTES && isAllowedAttachment(f))]
+        .slice(0, MAX_ATTACHMENTS_PER_MESSAGE),
     );
     if (fileInput.current) fileInput.current.value = '';
   }
@@ -335,7 +340,7 @@ export default function ConversationView({
                     <AttachmentRow
                       key={attachment.id}
                       attachment={attachment}
-                      onDownload={() => void onDownload(attachment)}
+                      onDownload={() => onDownload(attachment)}
                       fetchBytes={() => fetchAttachmentBytes(attachment)}
                     />
                   ))}
@@ -454,11 +459,12 @@ function AttachmentRow({
   fetchBytes,
 }: {
   attachment: AttachmentRef;
-  onDownload: () => void;
+  onDownload: () => Promise<void>;
   fetchBytes: () => Promise<Blob>;
 }) {
   const [thumb, setThumb] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const mounted = useRef(true);
   const isImage = attachment.mime.toLowerCase().startsWith('image/');
@@ -494,49 +500,76 @@ function AttachmentRow({
     }
   }
 
-  const size = <span className="meta-mono">{formatBytes(attachment.size_bytes)}</span>;
-  if (!isImage) {
-    return (
-      <button type="button" onClick={onDownload} className="attachment-row">
-        <PaperclipIcon size={14} />
-        <span className="truncate">{attachment.filename}</span>
-        {size}
-      </button>
-    );
+  // A rejected download (access revoked, blob missing, network) surfaces
+  // on the row instead of becoming an unhandled rejection.
+  async function download(): Promise<void> {
+    setDownloadError(null);
+    try {
+      await onDownload();
+    } catch (err) {
+      if (mounted.current) {
+        setDownloadError(err instanceof Error ? err.message : 'download failed');
+      }
+    }
   }
-  if (thumb && !failed) {
-    return (
-      <button type="button" onClick={onDownload} className="attachment-preview" title={`Download ${attachment.filename}`}>
-        <img src={thumb} alt={attachment.filename} onError={() => setFailed(true)} />
-      </button>
-    );
-  }
-  // A failed preview keeps the row actionable: the label promises a
-  // download, so a click downloads instead of dead-ending on a disabled
-  // control after a transient failure.
-  if (failed) {
-    return (
-      <button type="button" onClick={onDownload} className="attachment-row">
-        <PaperclipIcon size={14} />
-        <span className="truncate">{`${attachment.filename} (preview failed, click to download)`}</span>
-        {size}
-      </button>
-    );
-  }
+
+  const control = renderControl();
   return (
-    <button
-      type="button"
-      disabled={loadingPreview}
-      onClick={() => void showPreview()}
-      className="attachment-row"
-    >
-      <PaperclipIcon size={14} />
-      <span className="truncate">
-        {loadingPreview
-          ? `${attachment.filename}: loading preview…`
-          : `${attachment.filename}: show preview`}
-      </span>
-      {size}
-    </button>
+    <>
+      {control}
+      {downloadError && (
+        <p role="alert" className="attachment-error">
+          {`Could not download ${attachment.filename}: ${downloadError}`}
+        </p>
+      )}
+    </>
   );
+
+  function renderControl() {
+    const size = <span className="meta-mono">{formatBytes(attachment.size_bytes)}</span>;
+    if (!isImage) {
+      return (
+        <button type="button" onClick={() => void download()} className="attachment-row">
+          <PaperclipIcon size={14} />
+          <span className="truncate">{attachment.filename}</span>
+          {size}
+        </button>
+      );
+    }
+    if (thumb && !failed) {
+      return (
+        <button type="button" onClick={() => void download()} className="attachment-preview" title={`Download ${attachment.filename}`}>
+          <img src={thumb} alt={attachment.filename} onError={() => setFailed(true)} />
+        </button>
+      );
+    }
+    // A failed preview keeps the row actionable: the label promises a
+    // download, so a click downloads instead of dead-ending on a disabled
+    // control after a transient failure.
+    if (failed) {
+      return (
+        <button type="button" onClick={() => void download()} className="attachment-row">
+          <PaperclipIcon size={14} />
+          <span className="truncate">{`${attachment.filename} (preview failed, click to download)`}</span>
+          {size}
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        disabled={loadingPreview}
+        onClick={() => void showPreview()}
+        className="attachment-row"
+      >
+        <PaperclipIcon size={14} />
+        <span className="truncate">
+          {loadingPreview
+            ? `${attachment.filename}: loading preview…`
+            : `${attachment.filename}: show preview`}
+        </span>
+        {size}
+      </button>
+    );
+  }
 }

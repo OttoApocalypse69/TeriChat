@@ -9,6 +9,7 @@ import {
   encodeChatContent,
   encodeOpaqueText,
   guessUploadMime,
+  isAllowedAttachment,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
   parseChatContent,
@@ -121,6 +122,16 @@ describe('guessUploadMime', () => {
     expect(guessUploadMime({ name: 'run.sh', type: '' })).toBe(
       'application/octet-stream',
     );
+  });
+});
+
+describe('isAllowedAttachment', () => {
+  it('mirrors the server allowlist, falling back to the extension', () => {
+    expect(isAllowedAttachment({ name: 'cat.gif', type: 'image/gif' })).toBe(true);
+    expect(isAllowedAttachment({ name: 'notes.pdf', type: '' })).toBe(true);
+    expect(isAllowedAttachment({ name: 'clip.webm', type: 'video/webm' })).toBe(true);
+    expect(isAllowedAttachment({ name: 'run.exe', type: 'application/x-msdownload' })).toBe(false);
+    expect(isAllowedAttachment({ name: 'README', type: '' })).toBe(false);
   });
 });
 

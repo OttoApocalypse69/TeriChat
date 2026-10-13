@@ -29,6 +29,13 @@ async fn main() {
 
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
     let state = AppState::new(pool, hub, config.attachments_dir.clone());
+    // Attachments are served only with a database; a bare boot skips this.
+    if state.pool.is_some() {
+        if let Err(err) = state.storage.ensure_writable() {
+            eprintln!("attachment storage unusable: {err}");
+            std::process::exit(1);
+        }
+    }
     bootstrap::spawn_workers(state.pool.as_ref(), &state.hub, &state.storage);
 
     let addr = SocketAddr::from((config.bind_addr, config.port));

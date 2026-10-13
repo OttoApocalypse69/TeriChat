@@ -132,6 +132,43 @@ fn first_header(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Channel gates for an upload into `conversation_id`: workspace
+/// membership, channel participation, and `send_messages`. A no-op for
+/// DMs (the participant check runs in the storage transaction). Every
+/// failure collapses to 404 so strangers cannot probe for channels.
+async fn channel_send_gate(
+    pool: &sqlx::PgPool,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id)
+        .await
+        .map_err(|err| {
+            tracing::error!("attachment channel lookup failed: {err}");
+            AppError::Internal
+        })?
+    else {
+        return Ok(());
+    };
+    let gate = async {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, user_id, channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, user_id).await?;
+        if !workspaces::can_send(pool, channel.id, user_id).await? {
+            return Err(workspaces::WorkspacesError::Forbidden);
+        }
+        Ok::<(), workspaces::WorkspacesError>(())
+    }
+    .await;
+    if let Err(err) = gate {
+        // No-oracle collapse is deliberate (strangers see 404 either
+        // way), but backend failures must stay visible in logs.
+        tracing::error!("attachment upload gate failed: {err}");
+        return Err(AppError::NotFound("attachment not found".to_owned()));
+    }
+    Ok(())
+}
+
 async fn upload_attachment(
     State(state): State<AppState>,
     bearer: Bearer,
@@ -141,33 +178,16 @@ async fn upload_attachment(
     body: Body,
 ) -> Result<(StatusCode, Json<AttachmentBody>), AppError> {
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
-    // Membership first (no oracle): channel gates and the conversation wall
-    // both collapse to 404 so strangers cannot probe for channel existence.
-    if let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id)
+    // Membership first (no oracle), before any body bytes are read.
+    channel_send_gate(pool, conversation_id, bearer.user_id()).await?;
+    // Aggregate bound: each in-flight upload may buffer up to 10 MiB, so a
+    // fixed number of slots caps total upload memory however many parallel
+    // requests a member opens. Waiters hold no body bytes.
+    let _slot = state
+        .upload_slots
+        .acquire()
         .await
-        .map_err(|err| {
-            tracing::error!("attachment channel lookup failed: {err}");
-            AppError::Internal
-        })?
-    {
-        let gate = async {
-            let (_workspace, _role) =
-                workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
-            workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
-                .await?;
-            if !workspaces::can_send(pool, channel.id, bearer.user_id()).await? {
-                return Err(workspaces::WorkspacesError::Forbidden);
-            }
-            Ok::<(), workspaces::WorkspacesError>(())
-        }
-        .await;
-        if let Err(err) = gate {
-            // No-oracle collapse is deliberate (strangers see 404 either
-            // way), but backend failures must stay visible in logs.
-            tracing::error!("attachment upload gate failed: {err}");
-            return Err(AppError::NotFound("attachment not found".to_owned()));
-        }
-    }
+        .map_err(|_| AppError::Internal)?;
     // Streaming cap: `Limited` rejects during transfer once the body
     // exceeds 10 MiB + 1 byte, so a multi-GB payload never buffers into
     // RAM. Client pre-checks are bypassable; this is the real gate.
@@ -182,6 +202,10 @@ async fn upload_attachment(
             "attachment exceeds 10 MiB".to_owned(),
         ));
     }
+    // Re-check after the (possibly slow) transfer: a role demotion or
+    // `send_messages` denial committed mid-upload must not still store the
+    // file. This leaves the same check-then-insert window as message send.
+    channel_send_gate(pool, conversation_id, bearer.user_id()).await?;
     let filename = query
         .filename
         .filter(|value| !value.trim().is_empty())

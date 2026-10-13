@@ -10,7 +10,7 @@ use axum::{
     http::{header, request::Parts},
 };
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use uuid::Uuid;
 
 use crate::attachments::FilesystemAttachmentStorage;
@@ -28,7 +28,14 @@ pub struct AppState {
     /// Attachment bytes. Filesystem-backed by default (`ATTACHMENTS_DIR`);
     /// the trait keeps a later S3 move handler-local.
     pub storage: Arc<FilesystemAttachmentStorage>,
+    /// Upload slots ([`MAX_CONCURRENT_UPLOADS`]): bounds how many 10 MiB
+    /// bodies are buffered at once across all requests.
+    pub upload_slots: Arc<Semaphore>,
 }
+
+/// Uploads buffered concurrently. Each holds at most 10 MiB plus the
+/// storage copy, so the aggregate stays near 160 MiB under any load.
+pub const MAX_CONCURRENT_UPLOADS: usize = 8;
 
 impl AppState {
     /// Production constructor: filesystem storage rooted at `attachments_dir`.
@@ -42,6 +49,7 @@ impl AppState {
             pool,
             hub,
             storage: Arc::new(FilesystemAttachmentStorage::new(attachments_dir)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
         }
     }
 
@@ -56,6 +64,7 @@ impl AppState {
             pool: Some(pool),
             hub,
             storage: Arc::new(FilesystemAttachmentStorage::new(dir)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
         }
     }
 }
