@@ -1,6 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+@config '../tailwind.config.js';
+
+/* Tailwind 3 sizes carried absolute line heights; v4's unitless ratios would
+   be inherited by children and shift layout. */
+@theme {
+  --text-xs--line-height: 1rem;
+  --text-xl--line-height: 1.75rem;
+}
 
 /* UnknownChat design language v0.1 (dark, primary). Token names follow the
    Foundations board; build new UI from these, never from raw hex values. */
