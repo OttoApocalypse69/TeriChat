@@ -1,0 +1,15 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "tericrypt",
+    "--features",
+    "mls-foundation",
+    "--test",
+    "mls_foundation",
+    "adding_installation"
+  ],
+  "exit_code": 101
+}

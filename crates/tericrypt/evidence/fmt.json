@@ -1,0 +1,11 @@
+{
+  "command": [
+    "cargo",
+    "fmt",
+    "-p",
+    "tericrypt",
+    "--",
+    "--check"
+  ],
+  "exit_code": 0
+}

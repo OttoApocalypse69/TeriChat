@@ -1,0 +1,14 @@
+{
+  "command": [
+    "cargo",
+    "tree",
+    "--locked",
+    "-p",
+    "tericrypt",
+    "--features",
+    "mls-foundation",
+    "-e",
+    "normal,build"
+  ],
+  "exit_code": 0
+}

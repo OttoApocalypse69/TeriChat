@@ -1,0 +1,11 @@
+{
+  "command": [
+    "cargo",
+    "check",
+    "--locked",
+    "--workspace",
+    "--all-targets",
+    "--all-features"
+  ],
+  "exit_code": 0
+}

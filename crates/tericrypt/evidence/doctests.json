@@ -1,0 +1,12 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "tericrypt",
+    "--all-features",
+    "--doc"
+  ],
+  "exit_code": 0
+}
