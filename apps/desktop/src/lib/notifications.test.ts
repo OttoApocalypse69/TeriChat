@@ -21,7 +21,9 @@ import {
   buildDmNotification,
   ensureNotificationPermission,
   isWindowUnfocused,
+  loadMutedConversations,
   notifyDm,
+  setConversationMuted,
   watchNotificationClick,
 } from './notifications';
 import { encodeOpaqueText } from './api';
@@ -218,5 +220,41 @@ describe('watchNotificationClick', () => {
   it('never throws when the listener cannot register', async () => {
     plugin.onAction.mockRejectedValue(new Error('bridge down'));
     await expect(watchNotificationClick()).resolves.toBeUndefined();
+  });
+});
+
+describe('per-conversation mute storage', () => {
+  beforeEach(() => window.localStorage.clear());
+
+  it('starts empty and round-trips per account', () => {
+    expect(loadMutedConversations('me')).toEqual(new Set());
+    const next = setConversationMuted('me', new Set(), 'dm-1', true);
+    expect(next).toEqual(new Set(['dm-1']));
+    expect(loadMutedConversations('me')).toEqual(new Set(['dm-1']));
+    // Another account on the same device keeps its own list.
+    expect(loadMutedConversations('other')).toEqual(new Set());
+  });
+
+  it('unmuting the last conversation clears the stored key', () => {
+    const muted = setConversationMuted('me', new Set(), 'dm-1', true);
+    expect(setConversationMuted('me', muted, 'dm-1', false)).toEqual(new Set());
+    expect(window.localStorage.length).toBe(0);
+  });
+
+  it('junk in storage reads as nothing muted, never a throw', () => {
+    window.localStorage.setItem('terichat.notifications.muted.v1:me', '{not json');
+    expect(loadMutedConversations('me')).toEqual(new Set());
+    window.localStorage.setItem('terichat.notifications.muted.v1:me', JSON.stringify({ a: 1 }));
+    expect(loadMutedConversations('me')).toEqual(new Set());
+    window.localStorage.setItem('terichat.notifications.muted.v1:me', JSON.stringify(['dm-1', 7]));
+    expect(loadMutedConversations('me')).toEqual(new Set(['dm-1']));
+  });
+
+  it('a refused write keeps the mute for this session', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota');
+    });
+    expect(setConversationMuted('me', new Set(['dm-0']), 'dm-1', true)).toEqual(new Set(['dm-0', 'dm-1']));
+    setItem.mockRestore();
   });
 });

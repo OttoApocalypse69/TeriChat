@@ -14,6 +14,9 @@
 //   outside the shell, so the web build cannot break.
 // - No secrets here: only the peer display name plus the demo plaintext the
 //   UI already renders. No tokens, keys, or extra logging.
+// - Per-conversation mute is private to this device: a set of conversation
+//   ids in localStorage, scoped per account, never sent to the server. Mute
+//   silences toasts only; unread badges and the message itself still arrive.
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
@@ -174,4 +177,50 @@ export async function watchNotificationClick(): Promise<void> {
   } catch {
     // The click listener is best-effort; toasts still deliver.
   }
+}
+
+const MUTE_KEY_PREFIX = 'terichat.notifications.muted.v1:';
+
+function muteKey(meId: string): string {
+  return `${MUTE_KEY_PREFIX}${meId}`;
+}
+
+/**
+ * Conversation ids this account muted on this device. Storage that is
+ * missing, blocked, or holds junk reads as "nothing muted", never a throw.
+ */
+export function loadMutedConversations(meId: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(muteKey(meId));
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Mute or unmute one conversation starting from `current` (the session's
+ * set) and return the new set. It stays authoritative for this session even
+ * if storage refuses the write.
+ */
+export function setConversationMuted(
+  meId: string,
+  current: ReadonlySet<string>,
+  conversationId: string,
+  muted: boolean,
+): Set<string> {
+  const next = new Set(current);
+  if (muted) next.add(conversationId);
+  else next.delete(conversationId);
+  try {
+    const key = muteKey(meId);
+    if (next.size === 0) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify([...next].sort()));
+  } catch {
+    // Unpersisted mute still holds in memory for this session.
+  }
+  return next;
 }
