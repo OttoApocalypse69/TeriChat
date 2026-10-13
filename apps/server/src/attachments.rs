@@ -230,6 +230,8 @@ pub async fn upload_attachment<S: AttachmentStorage>(
         return Err(AttachmentError::UnsupportedMime);
     }
     let filename = sanitize_filename(filename)?;
+    // Cheap unlocked pre-check so strangers never get bytes written; the
+    // authoritative check is the locked one around the insert below.
     if !crate::messaging::is_member(pool, conversation_id, uploader_id).await? {
         return Err(AttachmentError::NotFound);
     }
@@ -246,28 +248,27 @@ pub async fn upload_attachment<S: AttachmentStorage>(
         .put(id, bytes)
         .await
         .map_err(AttachmentError::Storage)?;
-    let insert: Result<(DateTime<Utc>,), sqlx::Error> = sqlx::query_as(
-        r"INSERT INTO attachments (id, conversation_id, uploader_id, filename, mime, size_bytes, sha256)
-          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING created_at",
+    let created_at = match insert_locked(
+        pool,
+        id,
+        conversation_id,
+        uploader_id,
+        &filename,
+        &mime,
+        size_bytes,
+        &sha256,
     )
-    .bind(id)
-    .bind(conversation_id)
-    .bind(uploader_id)
-    .bind(&filename)
-    .bind(&mime)
-    .bind(size_bytes)
-    .bind(&sha256)
-    .fetch_one(pool)
-    .await;
-    let row = match insert {
-        Ok(row) => row,
+    .await
+    {
+        Ok(created_at) => created_at,
         Err(err) => {
             // Best-effort orphan cleanup through the configured store (never
-            // a hardcoded path): DB failures must not leak stored bytes.
+            // a hardcoded path): a refused or failed insert must not leak
+            // stored bytes.
             if let Err(cleanup) = storage.delete(id).await {
                 tracing::warn!("attachment orphan cleanup failed for {id}: {cleanup}");
             }
-            return Err(AttachmentError::Database(err));
+            return Err(err);
         }
     };
 
@@ -279,8 +280,67 @@ pub async fn upload_attachment<S: AttachmentStorage>(
         mime,
         size_bytes,
         sha256,
-        created_at: row.0,
+        created_at,
     })
+}
+
+/// Insert the metadata row under the uploader's participant row lock.
+///
+/// `FOR SHARE` makes a concurrent kick's `DELETE` of that row wait for this
+/// transaction, exactly as it waits for `messaging::send_message` (which
+/// takes `FOR UPDATE`) and typing: an upload is stored before a removal or
+/// refused after it, never authorized before a kick and committed after it.
+#[allow(clippy::too_many_arguments)]
+async fn insert_locked(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    conversation_id: Uuid,
+    uploader_id: Uuid,
+    filename: &str,
+    mime: &str,
+    size_bytes: i64,
+    sha256: &[u8],
+) -> Result<DateTime<Utc>, AttachmentError> {
+    let mut tx = pool.begin().await.map_err(AttachmentError::Database)?;
+    lock_participant(&mut tx, conversation_id, uploader_id).await?;
+    let (created_at,): (DateTime<Utc>,) = sqlx::query_as(
+        r"INSERT INTO attachments (id, conversation_id, uploader_id, filename, mime, size_bytes, sha256)
+          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING created_at",
+    )
+    .bind(id)
+    .bind(conversation_id)
+    .bind(uploader_id)
+    .bind(filename)
+    .bind(mime)
+    .bind(size_bytes)
+    .bind(sha256)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AttachmentError::Database)?;
+    tx.commit().await.map_err(AttachmentError::Database)?;
+    Ok(created_at)
+}
+
+/// Lock `user_id`'s participant row in `conversation_id` (`FOR SHARE`) for
+/// the rest of `tx`; [`AttachmentError::NotFound`] when there is none.
+async fn lock_participant(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AttachmentError> {
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM conversation_participants
+         WHERE conversation_id = $1 AND user_id = $2 FOR SHARE",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AttachmentError::Database)?;
+    if member.is_none() {
+        return Err(AttachmentError::NotFound);
+    }
+    Ok(())
 }
 
 /// Full attachment row as returned by the lookup query.
@@ -297,7 +357,10 @@ type AttachmentRow = (
 
 /// Load an attachment's row plus its original bytes. Membership is checked
 /// via the parent conversation: non-members get [`AttachmentError::NotFound`],
-/// the same signal as a missing id (no oracle).
+/// the same signal as a missing id (no oracle). The caller's participant row
+/// stays locked (`FOR SHARE`) until the bytes are read, so a concurrent kick
+/// either lands after the read or the read is refused: an in-flight download
+/// never crosses a completed revocation.
 ///
 /// # Errors
 ///
@@ -310,12 +373,13 @@ pub async fn download_attachment<S: AttachmentStorage>(
     user_id: Uuid,
     attachment_id: Uuid,
 ) -> Result<(Attachment, Vec<u8>), AttachmentError> {
+    let mut tx = pool.begin().await.map_err(AttachmentError::Database)?;
     let row: Option<AttachmentRow> = sqlx::query_as(
         r"SELECT id, conversation_id, uploader_id, filename, mime, size_bytes, sha256, created_at
            FROM attachments WHERE id = $1",
     )
     .bind(attachment_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(AttachmentError::Database)?;
     let Some(row) = row else {
@@ -331,14 +395,85 @@ pub async fn download_attachment<S: AttachmentStorage>(
         sha256: row.6,
         created_at: row.7,
     };
-    if !crate::messaging::is_member(pool, attachment.conversation_id, user_id).await? {
-        return Err(AttachmentError::NotFound);
-    }
+    lock_participant(&mut tx, attachment.conversation_id, user_id).await?;
     let bytes = storage
         .get(attachment.id)
         .await
         .map_err(AttachmentError::Storage)?;
+    tx.commit().await.map_err(AttachmentError::Database)?;
     Ok((attachment, bytes))
+}
+
+/// Delete the bytes of up to `limit` deleted attachments, oldest first.
+///
+/// Every deleted `attachments` row leaves a tombstone in
+/// `attachment_blob_gc` (a trigger, so cascades from conversation, channel
+/// and account deletion are covered too). Claimed tombstones are locked
+/// `SKIP LOCKED`, so concurrent sweepers never double-claim. A tombstone is
+/// removed only after its bytes are gone; a failed delete stays queued with
+/// its attempt count raised. Returns how many tombstones were cleared.
+///
+/// # Errors
+///
+/// Returns [`AttachmentError::Database`] when the queue cannot be read or
+/// updated. Storage failures are logged and retried on a later pass.
+pub async fn sweep_deleted_blobs<S: AttachmentStorage>(
+    pool: &sqlx::PgPool,
+    storage: &S,
+    limit: i64,
+) -> Result<usize, AttachmentError> {
+    let mut tx = pool.begin().await.map_err(AttachmentError::Database)?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT attachment_id FROM attachment_blob_gc
+         ORDER BY enqueued_at, attachment_id LIMIT $1 FOR UPDATE SKIP LOCKED",
+    )
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AttachmentError::Database)?;
+    let mut cleared = 0;
+    for id in ids {
+        match storage.delete(id).await {
+            Ok(()) => {
+                sqlx::query("DELETE FROM attachment_blob_gc WHERE attachment_id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(AttachmentError::Database)?;
+                cleared += 1;
+            }
+            Err(err) => {
+                tracing::warn!("attachment blob delete failed for {id}: {err}");
+                sqlx::query(
+                    "UPDATE attachment_blob_gc SET attempts = attempts + 1 WHERE attachment_id = $1",
+                )
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(AttachmentError::Database)?;
+            }
+        }
+    }
+    tx.commit().await.map_err(AttachmentError::Database)?;
+    Ok(cleared)
+}
+
+/// Batch size and idle interval of [`blob_gc_worker`].
+const GC_BATCH: i64 = 100;
+const GC_IDLE: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// Background sweeper for deleted attachments' bytes: drains the tombstone
+/// queue in batches, then idles. Runs for the life of the process.
+pub async fn blob_gc_worker<S: AttachmentStorage>(pool: sqlx::PgPool, storage: std::sync::Arc<S>) {
+    loop {
+        match sweep_deleted_blobs(&pool, storage.as_ref(), GC_BATCH).await {
+            // A full batch may mean more is queued: go again at once.
+            Ok(cleared) if i64::try_from(cleared).unwrap_or(0) == GC_BATCH => continue,
+            Ok(_) => {}
+            Err(err) => tracing::error!("attachment blob gc pass failed: {err:?}"),
+        }
+        tokio::time::sleep(GC_IDLE).await;
+    }
 }
 
 #[cfg(test)]

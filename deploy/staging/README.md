@@ -60,6 +60,9 @@ Upgrade/restart runbook (owner executes on the box, in order):
    layer explicitly as below and confirm status **and body**.
 4. For a restart persistence check, use `docker compose restart api` and
    re-probe; the PostgreSQL named `pgdata` volume persists across restarts.
+   Attachment bytes persist the same way on the named `attachments` volume
+   (`ATTACHMENTS_DIR=/var/lib/terichat/attachments` in the api service).
+   `backup.sh` dumps the database only; it does not copy attachment bytes.
    Never use `down -v` as an upgrade/rollback step.
 
 Probe each layer explicitly (replace placeholders; these are operator

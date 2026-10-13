@@ -8,7 +8,7 @@
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -57,6 +57,70 @@ impl From<&attachments::Attachment> for AttachmentBody {
             created_at: row.created_at,
         }
     }
+}
+
+/// Decode a percent-encoded UTF-8 value (`encodeURIComponent` output).
+/// `None` for a truncated or non-hex escape or for bytes that are not UTF-8.
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = raw.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Filename from the `X-Filename` header. Header values are bytes, and
+/// browsers refuse to set anything above U+00FF, so clients send Unicode
+/// names percent-encoded with `X-Filename-Encoding: percent`. Without that
+/// marker the value is taken literally (older clients, plain ASCII names).
+fn header_filename(headers: &HeaderMap) -> Result<Option<String>, AppError> {
+    let Some(raw) = first_header(headers, "x-filename") else {
+        return Ok(None);
+    };
+    match first_header(headers, "x-filename-encoding").as_deref() {
+        None => Ok(Some(raw)),
+        Some(encoding) if encoding.eq_ignore_ascii_case("percent") => percent_decode(&raw)
+            .map(Some)
+            .ok_or_else(|| AppError::BadRequest("filename encoding is invalid".to_owned())),
+        Some(_) => Err(AppError::BadRequest(
+            "unsupported filename encoding".to_owned(),
+        )),
+    }
+}
+
+/// `Content-Disposition` for a stored filename (RFC 6266): an ASCII
+/// `filename` fallback plus the exact UTF-8 name in `filename*`, so names
+/// outside visible ASCII never make the header unbuildable.
+fn content_disposition(disposition: &str, filename: &str) -> String {
+    use std::fmt::Write as _;
+    let fallback: String = filename
+        .chars()
+        .map(|c| {
+            if c == ' ' || (c.is_ascii_graphic() && c != '"' && c != '\\') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::with_capacity(filename.len() * 3);
+    for byte in filename.bytes() {
+        if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    format!("{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
 }
 
 fn first_header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -121,7 +185,7 @@ async fn upload_attachment(
     let filename = query
         .filename
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| first_header(&headers, "x-filename"))
+        .or(header_filename(&headers)?)
         .ok_or_else(|| AppError::BadRequest("filename is required".to_owned()))?;
     let mime = query
         .mime
@@ -213,10 +277,9 @@ async fn download_attachment(
         }
     }
     let is_svg = attachment.mime.eq_ignore_ascii_case("image/svg+xml");
-    let disposition = format!(
-        "{}; filename=\"{}\"",
+    let disposition = content_disposition(
         if is_svg { "attachment" } else { "inline" },
-        attachment.filename.replace('"', "_")
+        &attachment.filename,
     );
     let response = (
         StatusCode::OK,
@@ -227,7 +290,11 @@ async fn download_attachment(
             ),
             (
                 header::CONTENT_DISPOSITION,
-                disposition.parse().unwrap_or("inline".parse().unwrap()),
+                // Always visible ASCII (see `content_disposition`); the
+                // fallback still never downgrades an SVG to `inline`.
+                disposition
+                    .parse()
+                    .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
             ),
             // Stored upload bytes are user-supplied; never let a browser
             // sniff them into an executable context.
@@ -256,4 +323,49 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(upload_attachment),
         )
         .route("/v1/attachments/{id}", get(download_attachment))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_filenames_decode_and_malformed_ones_are_refused() {
+        assert_eq!(
+            percent_decode("%E5%A0%B1%E5%91%8A.pdf").as_deref(),
+            Some("報告.pdf")
+        );
+        assert_eq!(percent_decode("plain.png").as_deref(), Some("plain.png"));
+        assert_eq!(percent_decode("100%25.png").as_deref(), Some("100%.png"));
+        assert_eq!(percent_decode("bad%2"), None);
+        assert_eq!(percent_decode("bad%zz.png"), None);
+        assert_eq!(percent_decode("%FF.png"), None);
+    }
+
+    #[test]
+    fn header_filename_honours_the_encoding_marker() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-filename", HeaderValue::from_static("100%25.png"));
+        assert_eq!(
+            header_filename(&headers).expect("literal").as_deref(),
+            Some("100%25.png")
+        );
+        headers.insert("x-filename-encoding", HeaderValue::from_static("percent"));
+        assert_eq!(
+            header_filename(&headers).expect("decoded").as_deref(),
+            Some("100%.png")
+        );
+        headers.insert("x-filename-encoding", HeaderValue::from_static("base64"));
+        assert!(header_filename(&headers).is_err());
+    }
+
+    #[test]
+    fn disposition_is_ascii_with_an_exact_utf8_name() {
+        let value = content_disposition("attachment", "報告 \"q\".svg");
+        assert!(HeaderValue::from_str(&value).is_ok(), "{value}");
+        assert_eq!(
+            value,
+            "attachment; filename=\"__ _q_.svg\"; filename*=UTF-8''%E5%A0%B1%E5%91%8A%20%22q%22.svg"
+        );
+    }
 }

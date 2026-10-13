@@ -8,7 +8,9 @@ use axum::Router;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
-use terichat_server::{auth, build_router, db_pool, messaging, AppState, HUB_CAPACITY, MIGRATOR};
+use terichat_server::{
+    attachments, auth, build_router, db_pool, messaging, AppState, HUB_CAPACITY, MIGRATOR,
+};
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -364,6 +366,216 @@ async fn attachment_concurrent_uploads_unique() {
         assert!(ids.insert(view["id"].as_str().expect("id").to_owned()));
     }
     assert_eq!(ids.len(), 8, "every concurrent upload gets a unique id");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// Two synthetic members of a fresh DM plus attachment storage in `dir`.
+async fn dm_fixture(
+    pool: &sqlx::PgPool,
+    tag: &str,
+) -> (
+    Uuid,
+    Uuid,
+    Uuid,
+    attachments::FilesystemAttachmentStorage,
+    std::path::PathBuf,
+) {
+    // The random tail, not the timestamp prefix: reruns must not collide.
+    let stamp = Uuid::now_v7().simple().to_string()[24..].to_owned();
+    let mut ids = Vec::new();
+    for who in ["a", "b"] {
+        let handle = format!("{tag}{who}{stamp}");
+        let user = auth::create_user(
+            pool,
+            &handle,
+            &format!("{handle}@example.com"),
+            "Synthetic",
+            "pw-synthetic-att",
+        )
+        .await
+        .expect("register synthetic user");
+        ids.push(user.id);
+    }
+    let dm = messaging::find_or_create_dm(pool, ids[0], ids[1])
+        .await
+        .expect("open dm");
+    let dir = test_dir(tag);
+    let storage = attachments::FilesystemAttachmentStorage::new(dir.clone());
+    (ids[0], ids[1], dm.id, storage, dir)
+}
+
+/// Begin a kick of `user_id` from `conversation_id` without committing it.
+async fn pending_kick(
+    pool: &sqlx::PgPool,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut kick = pool.begin().await.expect("begin kick");
+    sqlx::query(
+        "DELETE FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .execute(&mut *kick)
+    .await
+    .expect("delete participant");
+    kick
+}
+
+/// An upload racing a kick waits for it and is refused once it commits:
+/// no row and no stored bytes survive (issue #54 item 1).
+#[tokio::test]
+async fn attachment_upload_serializes_with_kick() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("SKIPPED: attachment_upload_serializes_with_kick (DATABASE_URL unset)");
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let (_alice, bob, dm, storage, dir) = dm_fixture(&pool, "upk").await;
+
+    let kick = pending_kick(&pool, dm, bob).await;
+    let upload = {
+        let (pool, storage) = (pool.clone(), storage.clone());
+        tokio::spawn(async move {
+            attachments::upload_attachment(
+                &pool,
+                &storage,
+                bob,
+                dm,
+                "late.png",
+                "image/png",
+                b"late",
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !upload.is_finished(),
+        "the upload must wait for the in-flight kick, not slip past it"
+    );
+    kick.commit().await.expect("commit kick");
+    let outcome = upload.await.expect("upload task");
+    assert!(
+        matches!(outcome, Err(attachments::AttachmentError::NotFound)),
+        "upload after the kick is refused: {outcome:?}"
+    );
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM attachments WHERE conversation_id = $1")
+            .bind(dm)
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+    assert_eq!(rows, 0);
+    let files = std::fs::read_dir(&dir).map_or(0, Iterator::count);
+    assert_eq!(files, 0, "refused upload leaves no bytes behind");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// A download racing a kick waits for it and never returns the bytes after
+/// the revocation commits.
+#[tokio::test]
+async fn attachment_download_serializes_with_kick() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("SKIPPED: attachment_download_serializes_with_kick (DATABASE_URL unset)");
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let (alice, bob, dm, storage, dir) = dm_fixture(&pool, "dnk").await;
+    let stored =
+        attachments::upload_attachment(&pool, &storage, alice, dm, "a.png", "image/png", b"png")
+            .await
+            .expect("alice uploads");
+
+    let kick = pending_kick(&pool, dm, bob).await;
+    let download = {
+        let (pool, storage) = (pool.clone(), storage.clone());
+        tokio::spawn(async move {
+            attachments::download_attachment(&pool, &storage, bob, stored.id)
+                .await
+                .map(|(_, bytes)| bytes)
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !download.is_finished(),
+        "the download must wait for the in-flight kick, not slip past it"
+    );
+    kick.commit().await.expect("commit kick");
+    let outcome = download.await.expect("download task");
+    assert!(
+        matches!(outcome, Err(attachments::AttachmentError::NotFound)),
+        "download after the kick is refused: {outcome:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// Deleting a conversation cascades its attachment rows; the trigger queues
+/// their bytes and the sweeper deletes them (issue #54 item 3).
+#[tokio::test]
+async fn attachment_blobs_are_collected_after_cascade() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("SKIPPED: attachment_blobs_are_collected_after_cascade (DATABASE_URL unset)");
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let (alice, _bob, dm, storage, dir) = dm_fixture(&pool, "gcc").await;
+    let stored = attachments::upload_attachment(
+        &pool,
+        &storage,
+        alice,
+        dm,
+        "gone.zip",
+        "application/zip",
+        b"zip",
+    )
+    .await
+    .expect("alice uploads");
+    let path = dir.join(stored.id.simple().to_string());
+    assert!(path.exists(), "bytes stored on upload");
+
+    sqlx::query("DELETE FROM conversations WHERE id = $1")
+        .bind(dm)
+        .execute(&pool)
+        .await
+        .expect("delete conversation");
+    let queued: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM attachment_blob_gc WHERE attachment_id = $1)",
+    )
+    .bind(stored.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read tombstone");
+    assert!(queued, "the cascade queues the bytes for collection");
+    assert!(path.exists(), "bytes stay until the sweeper runs");
+
+    // Other tests may queue tombstones too; sweep until ours is cleared.
+    for _ in 0..10 {
+        attachments::sweep_deleted_blobs(&pool, &storage, 1000)
+            .await
+            .expect("sweep");
+        if !path.exists() {
+            break;
+        }
+    }
+    assert!(!path.exists(), "the sweeper deletes the orphaned bytes");
+    let queued: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM attachment_blob_gc WHERE attachment_id = $1)",
+    )
+    .bind(stored.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read tombstone");
+    assert!(!queued, "a collected tombstone is removed");
 
     let _ = std::fs::remove_dir_all(&dir);
     pool.close().await;

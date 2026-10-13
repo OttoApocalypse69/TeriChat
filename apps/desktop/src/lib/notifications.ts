@@ -22,7 +22,7 @@ import {
   requestPermission,
   sendNotification,
 } from '@tauri-apps/plugin-notification';
-import { decodeOpaqueText, isTauriShell } from './api';
+import { chatPreviewText, isTauriShell } from './api';
 import {
   conversationLabel,
   truncatePreview,
@@ -60,7 +60,7 @@ export function buildDmNotification(
   if (message.sender_id === meId) return null;
   return {
     title: conversationLabel(conv),
-    body: truncatePreview(decodeOpaqueText(message.ciphertext_b64), 120),
+    body: truncatePreview(chatPreviewText(message.ciphertext_b64), 120),
   };
 }
 

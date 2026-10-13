@@ -284,6 +284,34 @@ export function parseChatContent(payload: string): ChatContent {
 }
 
 /**
+ * One-line summary of a message payload for the conversation list and
+ * notifications: the text when there is any, otherwise the attachment
+ * (by name when there is one, by count otherwise). Never the raw envelope.
+ */
+export function chatPreviewText(payload: string): string {
+  const content = parseChatContent(payload);
+  if (content.text.trim() !== '' || content.attachments.length === 0) return content.text;
+  if (content.attachments.length === 1) return `Attachment: ${content.attachments[0].filename}`;
+  return `${content.attachments.length} attachments`;
+}
+
+/**
+ * Filename from a `Content-Disposition` header: the exact UTF-8
+ * `filename*` (RFC 6266) when present, else the ASCII `filename` fallback.
+ */
+export function dispositionFilename(disposition: string): string | null {
+  const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  if (extended) {
+    try {
+      return decodeURIComponent(extended.trim());
+    } catch {
+      // Malformed escape: fall through to the ASCII fallback.
+    }
+  }
+  return /filename="([^"]*)"/i.exec(disposition)?.[1] ?? null;
+}
+
+/**
  * Encode chat content for the envelope. Plain-text messages stay bare
  * strings; messages with attachments become the versioned envelope
  * `{v:1, kind:"attachments", text, attachments}` — the discriminator keeps
@@ -498,6 +526,9 @@ export class ApiClient {
    * the query string. Staging enables Caddy access logging, which records
    * full request URIs; user-supplied filenames in the URL would land
    * sensitive names in centralized logs. The body is the file bytes.
+   * Header values are bytes and browsers refuse anything above U+00FF
+   * (`報告.pdf`, emoji), so the name is percent-encoded and flagged with
+   * `X-Filename-Encoding: percent`; the server decodes it.
    *
    * Transport split: the Tauri shell MUST use the Rust-proxied plugin
    * fetch (WebView2 enforces CORS on XHR and the API serves no CORS
@@ -519,7 +550,8 @@ export class ApiClient {
     }
     const headers: Record<string, string> = {
       'content-type': 'application/octet-stream',
-      'x-filename': file.name,
+      'x-filename': encodeURIComponent(file.name),
+      'x-filename-encoding': 'percent',
       'x-mime-type': guessUploadMime(file),
     };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
@@ -594,8 +626,7 @@ export class ApiClient {
     );
     if (!res.ok) throw await parseError(res);
     const blob = await res.blob();
-    const disposition = res.headers.get('content-disposition') ?? '';
-    const filename = /filename="([^"]*)"/.exec(disposition)?.[1] ?? 'download';
+    const filename = dispositionFilename(res.headers.get('content-disposition') ?? '') ?? 'download';
     return {
       blob,
       filename,

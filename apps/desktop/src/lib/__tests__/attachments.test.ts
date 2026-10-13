@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 // Attachments v1: chat-content encode/parse round-trips plus client guards.
 // Refs travel inside the existing envelope JSON; the server stores bytes.
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ApiClient,
+  chatPreviewText,
+  dispositionFilename,
   encodeChatContent,
   encodeOpaqueText,
   guessUploadMime,
@@ -118,5 +121,60 @@ describe('guessUploadMime', () => {
     expect(guessUploadMime({ name: 'run.sh', type: '' })).toBe(
       'application/octet-stream',
     );
+  });
+});
+
+describe('chatPreviewText', () => {
+  const envelope = (text: string, refs: AttachmentRef[]) =>
+    encodeOpaqueText(encodeChatContent(text, refs));
+
+  it('summarizes attachment-only messages instead of showing the envelope', () => {
+    expect(chatPreviewText(envelope('', [ref('a1')]))).toBe('Attachment: photo.png');
+    expect(chatPreviewText(envelope('', [ref('a1'), ref('a2')]))).toBe('2 attachments');
+  });
+
+  it('prefers the text and leaves plain messages unchanged', () => {
+    expect(chatPreviewText(envelope('look', [ref('a1')]))).toBe('look');
+    expect(chatPreviewText(encodeOpaqueText('bro'))).toBe('bro');
+  });
+});
+
+describe('dispositionFilename', () => {
+  it('prefers the exact UTF-8 name over the ASCII fallback', () => {
+    expect(dispositionFilename(
+      "inline; filename=\"__.pdf\"; filename*=UTF-8''%E5%A0%B1%E5%91%8A.pdf",
+    )).toBe('報告.pdf');
+  });
+
+  it('falls back to the plain filename', () => {
+    expect(dispositionFilename('inline; filename="cat.gif"')).toBe('cat.gif');
+    expect(dispositionFilename("inline; filename=\"x.png\"; filename*=UTF-8''%E5")).toBe('x.png');
+    expect(dispositionFilename('inline')).toBeNull();
+  });
+});
+
+describe('uploadAttachment headers', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('sends Unicode filenames as percent-encoded ByteStrings', async () => {
+    const sent: Record<string, string> = {};
+    class FakeXhr {
+      status = 201;
+      responseText = '{}';
+      upload = {};
+      onload: (() => void) | null = null;
+      open() {}
+      setRequestHeader(name: string, value: string) {
+        // Browsers reject header values outside Latin-1 before sending.
+        if ([...value].some((c) => c.codePointAt(0)! > 0xff)) throw new TypeError('not a ByteString');
+        sent[name] = value;
+      }
+      send() { this.onload?.(); }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXhr);
+    const file = new File(['pdf'], '報告 🎉.pdf', { type: 'application/pdf' });
+    await new ApiClient('http://api.invalid', 'synthetic-token').uploadAttachment('c1', file);
+    expect(sent['x-filename-encoding']).toBe('percent');
+    expect(decodeURIComponent(sent['x-filename'])).toBe('報告 🎉.pdf');
   });
 });
