@@ -1,18 +1,18 @@
-//! Encrypted SQLite persistence for the synthetic MLS experiment (issue #6 S1).
+//! Encrypted `SQLite` persistence for the synthetic MLS experiment (issue #6 S1).
 //!
 //! **Not production-ready.** This keeps the [`crate::mls`] trust model
 //! (fresh random scope-local labels, no account binding, no audits) and only
 //! swaps where bytes rest: the volatile `MemoryStorage` inside
-//! `OpenMlsRustCrypto` is replaced by [`EncryptedStore`], an OpenMLS
+//! `OpenMlsRustCrypto` is replaced by [`EncryptedStore`], an `OpenMLS`
 //! [`StorageProvider`](openmls_traits::storage::StorageProvider) backed by a
-//! file SQLite database whose values are encrypted at rest.
+//! file `SQLite` database whose values are encrypted at rest.
 //!
 //! ## Volatility contrast
 //!
 //! `MemoryStorage` (see [`crate::mls`] docs) holds group state in a process
 //! `HashMap`: dropping the provider loses membership and message secrets, so
 //! a restarted client cannot continue any group. [`PersistSession`] instead
-//! records every OpenMLS write plus the installation's signer, scoped
+//! records every `OpenMLS` write plus the installation's signer, scoped
 //! identity, and group id into the encrypted database; dropping the whole
 //! provider and reopening the same file with the same login password restores
 //! the session at the same epoch and delivery continues in both directions.
@@ -36,17 +36,17 @@
 //! * Key layout mirrors `MemoryStorage` (`label || serde_json(key) ||
 //!   big-endian version`) with JSON-serialized entities; list-shaped entries
 //!   (own leaf nodes, proposal queues, epoch key pairs) keep the same
-//!   read-modify-write list semantics, executed here inside a SQLite
+//!   read-modify-write list semantics, executed here inside a `SQLite`
 //!   transaction on a single-connection pool.
 //!
 //! ## Limits (explicit non-goals for S1)
 //!
-//! * Sync only: OpenMLS calls storage synchronously, so an internal Tokio
+//! * Sync only: `OpenMLS` calls storage synchronously, so an internal Tokio
 //!   runtime drives `sqlx`. Calling from inside an async runtime fails closed
 //!   ([`StoreError::SyncContext`]) instead of deadlocking.
 //! * One active group per database file (the last created/joined group id is
 //!   remembered for [`PersistSession::reopen`]); multi-group files, schema
-//!   migrations, rollback protection, crash atomicity beyond SQLite's own
+//!   migrations, rollback protection, crash atomicity beyond `SQLite`'s own
 //!   guarantees, and secure erasure are all future work.
 //! * Test passwords are synthetic fixtures. Real login integration, account
 //!   binding, audits, and any production claim are out of scope.
@@ -197,6 +197,11 @@ impl EncryptedStore {
     /// be prepared, `Sealed` on wrong password/tamper/RNG failure, and
     /// `Serialization` when app-state bytes do not encode.
     pub fn open(path: impl AsRef<Path>, password: &[u8]) -> Result<Self, StoreError> {
+        // Check before building the internal runtime: entering `block_on`
+        // from inside another runtime panics instead of returning an error.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(StoreError::SyncContext);
+        }
         let runtime = tokio::runtime::Runtime::new().map_err(|_| StoreError::Database)?;
         let path = path.as_ref().to_path_buf();
         let options = SqliteConnectOptions::new()
@@ -230,32 +235,33 @@ impl EncryptedStore {
         })?;
         // Load the file salt, or mint a fresh one exactly once per file.
         // Reopening never regenerates it: salt reuse across files is rejected
-        // by construction (fresh `OsRng` bytes per new file).
-        let salt: [u8; SALT_LEN] = if let Some(raw) = store.meta_get(META_SALT)? {
-            raw.try_into().map_err(|_| StoreError::Serialization)?
-        } else {
+        // by construction (fresh `OsRng` bytes per new file). Concurrent first
+        // opens race on insert-if-absent and all reread the winning row.
+        if store.meta_get(META_SALT)?.is_none() {
             let mut fresh = [0u8; SALT_LEN];
             OsRng
                 .try_fill_bytes(&mut fresh)
                 .map_err(|_| StoreError::Sealed)?;
-            store.meta_put(META_SALT, &fresh)?;
-            fresh
-        };
+            store.meta_insert_absent(META_SALT, &fresh)?;
+        }
+        let salt: [u8; SALT_LEN] = store
+            .meta_get(META_SALT)?
+            .ok_or(StoreError::Database)?
+            .try_into()
+            .map_err(|_| StoreError::Serialization)?;
         let key = derive_key(password, &salt)?;
         let store = Self { key, salt, ..store };
         // Password check: fresh files seal the sentinel, existing files must
         // open it. Wrong passwords and tampered bytes both fail here.
-        match store.meta_get(META_VERIFY)? {
-            None => {
-                let sealed = store.seal(META_VERIFY.as_bytes(), VERIFY_PLAINTEXT)?;
-                store.meta_put(META_VERIFY, &sealed)?;
-            }
-            Some(sealed) => {
-                let plain = store.unseal(META_VERIFY.as_bytes(), &sealed)?;
-                if plain.as_slice() != VERIFY_PLAINTEXT {
-                    return Err(StoreError::Sealed);
-                }
-            }
+        // The sentinel is likewise insert-if-absent, then always checked.
+        if store.meta_get(META_VERIFY)?.is_none() {
+            let sealed = store.seal(META_VERIFY.as_bytes(), VERIFY_PLAINTEXT)?;
+            store.meta_insert_absent(META_VERIFY, &sealed)?;
+        }
+        let sealed = store.meta_get(META_VERIFY)?.ok_or(StoreError::Database)?;
+        let plain = store.unseal(META_VERIFY.as_bytes(), &sealed)?;
+        if plain.as_slice() != VERIFY_PLAINTEXT {
+            return Err(StoreError::Sealed);
         }
         Ok(store)
     }
@@ -389,6 +395,19 @@ impl EncryptedStore {
         })
     }
 
+    /// Insert a meta row only if none exists; an existing row always wins.
+    fn meta_insert_absent(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        self.block(async {
+            sqlx::query("INSERT INTO mls_meta(key, val) VALUES (?, ?) ON CONFLICT(key) DO NOTHING")
+                .bind(key)
+                .bind(value)
+                .execute(&self.pool)
+                .await
+                .map(|_| ())
+                .map_err(|_| StoreError::Database)
+        })
+    }
+
     fn meta_put_sealed(&self, key: &str, plaintext: &[u8]) -> Result<(), StoreError> {
         let sealed = self.seal(key.as_bytes(), plaintext)?;
         self.meta_put(key, &sealed)
@@ -460,7 +479,13 @@ impl EncryptedStore {
                     let cipher = XChaCha20Poly1305::new_from_slice(&key[..])
                         .map_err(|_| StoreError::Sealed)?;
                     let plain = cipher
-                        .decrypt(XNonce::from_slice(nonce), ciphertext)
+                        .decrypt(
+                            XNonce::from_slice(nonce),
+                            Payload {
+                                msg: ciphertext,
+                                aad: storage_key.as_slice(),
+                            },
+                        )
                         .map_err(|_| StoreError::Sealed)?;
                     serde_json::from_slice(&plain).map_err(|_| StoreError::Serialization)?
                 }
@@ -478,7 +503,13 @@ impl EncryptedStore {
             let cipher =
                 XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| StoreError::Sealed)?;
             let ciphertext = cipher
-                .encrypt(XNonce::from_slice(&nonce), plain.as_slice())
+                .encrypt(
+                    XNonce::from_slice(&nonce),
+                    Payload {
+                        msg: plain.as_slice(),
+                        aad: storage_key.as_slice(),
+                    },
+                )
                 .map_err(|_| StoreError::Sealed)?;
             let mut sealed = Vec::with_capacity(NONCE_LEN + ciphertext.len());
             sealed.extend_from_slice(&nonce);
@@ -554,10 +585,15 @@ impl EncryptedStore {
     }
 }
 
+/// Length-prefix each component so distinct `(group, epoch, leaf)` tuples
+/// never share a row (epoch 1 / leaf 23 vs epoch 12 / leaf 3).
 fn epoch_pairs_id(group_id_json: &[u8], epoch_json: &[u8], leaf_index_json: &[u8]) -> Vec<u8> {
-    let mut key = group_id_json.to_vec();
-    key.extend_from_slice(epoch_json);
-    key.extend_from_slice(leaf_index_json);
+    let mut key = Vec::new();
+    for part in [group_id_json, epoch_json, leaf_index_json] {
+        let len = u32::try_from(part.len()).unwrap_or(u32::MAX);
+        key.extend_from_slice(&len.to_be_bytes());
+        key.extend_from_slice(part);
+    }
     key
 }
 
@@ -1544,5 +1580,46 @@ impl PersistSession {
     #[must_use]
     pub fn ciphersuite(&self) -> Ciphersuite {
         self.group.ciphersuite()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{epoch_pairs_id, storage_key, EncryptedStore, OWN_LEAF_NODES_LABEL};
+
+    #[test]
+    fn list_rows_read_back_through_the_bound_unseal_path() {
+        let path = std::env::temp_dir().join(format!(
+            "tericrypt-list-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = EncryptedStore::open(&path, b"synthetic-test-password").unwrap();
+        store
+            .list_update(OWN_LEAF_NODES_LABEL, b"group", b"[1]", true)
+            .unwrap();
+        store
+            .list_update(OWN_LEAF_NODES_LABEL, b"group", b"[2]", true)
+            .unwrap();
+        let raw = store
+            .raw_get(&storage_key(OWN_LEAF_NODES_LABEL, b"group"))
+            .expect("list row authenticates under its storage key")
+            .unwrap();
+        let items: Vec<Vec<u8>> = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(items, vec![b"[1]".to_vec(), b"[2]".to_vec()]);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn epoch_pair_ids_do_not_collide_across_component_boundaries() {
+        // epoch 1 / leaf 23 and epoch 12 / leaf 3 concatenate to the same digits.
+        assert_ne!(
+            epoch_pairs_id(b"{\"g\":1}", b"1", b"23"),
+            epoch_pairs_id(b"{\"g\":1}", b"12", b"3")
+        );
     }
 }
