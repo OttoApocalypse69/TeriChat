@@ -963,8 +963,10 @@ mod tests {
         assert!(claimed.iter().any(|entry| entry.topic == "message.created"));
         let ids: Vec<Uuid> = claimed.iter().map(|entry| entry.id).collect();
         mark_published(&pool, &ids).await.expect("mark");
+        // Other tests share this outbox and may insert rows between the two
+        // claims; only the rows marked above must never come back.
         let drained = claim_outbox(&pool, 10).await.expect("reclaim");
-        assert!(drained.is_empty());
+        assert!(drained.iter().all(|entry| !ids.contains(&entry.id)));
         pool.close().await;
     }
 
