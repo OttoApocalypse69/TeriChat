@@ -5,8 +5,10 @@
 //! envelope fields. Both routes are membership-checked with no oracle:
 //! non-members see the same 404 as missing ids.
 
+use std::sync::Arc;
+
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -15,8 +17,10 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt as _;
 use http_body_util::{BodyExt, Limited};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
 use crate::attachments::{self, MAX_ATTACHMENT_BYTES};
@@ -169,6 +173,24 @@ async fn channel_send_gate(
     Ok(())
 }
 
+/// Download chunk size. Small chunks keep hyper polling the body (and so
+/// keep the slot held) until the blob is nearly flushed to the socket.
+const DOWNLOAD_CHUNK: usize = 64 * 1024;
+
+/// Response body for `bytes` that holds `slot` until it is dropped.
+fn slotted_body(bytes: Vec<u8>, slot: OwnedSemaphorePermit) -> Body {
+    let bytes = Bytes::from(bytes);
+    let chunks: Vec<Bytes> = (0..bytes.len())
+        .step_by(DOWNLOAD_CHUNK)
+        .map(|start| bytes.slice(start..bytes.len().min(start + DOWNLOAD_CHUNK)))
+        .collect();
+    let stream = futures_util::stream::iter(chunks).map(move |chunk| {
+        let _held = &slot;
+        Ok::<_, std::convert::Infallible>(chunk)
+    });
+    Body::from_stream(stream)
+}
+
 async fn upload_attachment(
     State(state): State<AppState>,
     bearer: Bearer,
@@ -279,6 +301,12 @@ async fn download_attachment(
             return Err(AppError::NotFound("attachment not found".to_owned()));
         }
     }
+    // Aggregate bound: the permit moves into the response body below and
+    // is released only when the body finishes or the client goes away.
+    let slot = Arc::clone(&state.download_slots)
+        .acquire_owned()
+        .await
+        .map_err(|_| AppError::Internal)?;
     let (attachment, bytes) = attachments::download_attachment(
         pool,
         state.storage.as_ref(),
@@ -324,7 +352,7 @@ async fn download_attachment(
             // sniff them into an executable context.
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap()),
         ],
-        bytes,
+        slotted_body(bytes, slot),
     )
         .into_response();
     Ok(response)

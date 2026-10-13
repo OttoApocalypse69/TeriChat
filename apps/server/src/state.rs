@@ -31,11 +31,18 @@ pub struct AppState {
     /// Upload slots ([`MAX_CONCURRENT_UPLOADS`]): bounds how many 10 MiB
     /// bodies are buffered at once across all requests.
     pub upload_slots: Arc<Semaphore>,
+    /// Download slots ([`MAX_CONCURRENT_DOWNLOADS`]): each permit lives
+    /// with its response body, so slow readers cannot pile up blobs.
+    pub download_slots: Arc<Semaphore>,
 }
 
 /// Uploads buffered concurrently. Each holds at most 10 MiB plus the
 /// storage copy, so the aggregate stays near 160 MiB under any load.
 pub const MAX_CONCURRENT_UPLOADS: usize = 8;
+
+/// Downloads in flight. Each holds at most one 10 MiB blob until its
+/// response is sent or dropped, so the aggregate stays near 160 MiB.
+pub const MAX_CONCURRENT_DOWNLOADS: usize = 16;
 
 impl AppState {
     /// Production constructor: filesystem storage rooted at `attachments_dir`.
@@ -50,6 +57,7 @@ impl AppState {
             hub,
             storage: Arc::new(FilesystemAttachmentStorage::new(attachments_dir)),
             upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            download_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 
@@ -65,6 +73,7 @@ impl AppState {
             hub,
             storage: Arc::new(FilesystemAttachmentStorage::new(dir)),
             upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            download_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 }

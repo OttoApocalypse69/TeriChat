@@ -680,3 +680,81 @@ async fn attachment_upload_rechecks_channel_send_after_transfer() {
     let _ = std::fs::remove_dir_all(&dir);
     pool.close().await;
 }
+
+/// A download holds a slot for as long as its response body is alive, so
+/// unread responses cannot accumulate blobs past the slot count.
+#[tokio::test]
+async fn attachment_download_holds_a_slot_until_the_body_drops() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!(
+            "SKIPPED: attachment_download_holds_a_slot_until_the_body_drops (DATABASE_URL unset)"
+        );
+        return;
+    };
+    let pool = db_pool(&url).await.expect("connect test database");
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let dir = test_dir("dlslot");
+    let state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        dir.clone(),
+    );
+    let stamp = Uuid::now_v7().simple().to_string()[24..].to_owned();
+    let mut users = Vec::new();
+    for who in ["a", "b"] {
+        let handle = format!("dls{who}{stamp}");
+        users.push(
+            auth::create_user(
+                &pool,
+                &handle,
+                &format!("{handle}@example.com"),
+                "Synthetic",
+                "pw-synthetic-att",
+            )
+            .await
+            .expect("register synthetic user"),
+        );
+    }
+    let token = auth::login(&pool, &users[0].handle, "pw-synthetic-att")
+        .await
+        .expect("login")
+        .token;
+    let dm = messaging::find_or_create_dm(&pool, users[0].id, users[1].id)
+        .await
+        .expect("open dm");
+    let payload = vec![7u8; 200 * 1024];
+    let (status, body) = post_bytes(
+        build_router(state.clone()),
+        &format!("/v1/conversations/{}/attachments", dm.id),
+        &token,
+        "big.png",
+        "image/png",
+        &payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let full = terichat_server::state::MAX_CONCURRENT_DOWNLOADS;
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/attachments/{id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.download_slots.available_permits(), full - 1);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(bytes.as_ref(), payload.as_slice());
+    assert_eq!(state.download_slots.available_permits(), full);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}

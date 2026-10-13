@@ -267,27 +267,30 @@ export function parseChatContent(payload: string): ChatContent {
       return { text: decoded, attachments: [] };
     }
     if (typeof parsed.text !== 'string') return { text: decoded, attachments: [] };
-    const attachments = Array.isArray(parsed.attachments)
-      ? (parsed.attachments as Record<string, unknown>[])
-          .flatMap((entry) =>
-            typeof entry.id === 'string' &&
-            typeof entry.filename === 'string' &&
-            typeof entry.mime === 'string' &&
-            typeof entry.size_bytes === 'number' &&
-            typeof entry.sha256 === 'string'
-              ? [
-                  {
-                    id: entry.id,
-                    filename: entry.filename,
-                    mime: entry.mime,
-                    size_bytes: entry.size_bytes,
-                    sha256: entry.sha256,
-                  },
-                ]
-              : [],
-          )
-          .slice(0, MAX_ATTACHMENTS_PER_MESSAGE)
-      : [];
+    // Stop at the cap: a near-1 MiB envelope can hold thousands of refs,
+    // and this runs on every history render and preview.
+    const attachments: AttachmentRef[] = [];
+    const entries: unknown[] = Array.isArray(parsed.attachments) ? parsed.attachments : [];
+    for (const raw of entries) {
+      if (attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) break;
+      if (typeof raw !== 'object' || raw === null) continue;
+      const entry = raw as Record<string, unknown>;
+      if (
+        typeof entry.id === 'string' &&
+        typeof entry.filename === 'string' &&
+        typeof entry.mime === 'string' &&
+        typeof entry.size_bytes === 'number' &&
+        typeof entry.sha256 === 'string'
+      ) {
+        attachments.push({
+          id: entry.id,
+          filename: entry.filename,
+          mime: entry.mime,
+          size_bytes: entry.size_bytes,
+          sha256: entry.sha256,
+        });
+      }
+    }
     return { text: parsed.text, attachments };
   } catch {
     return { text: decoded, attachments: [] };

@@ -232,3 +232,27 @@ it('revokes a preview that arrives after its row unmounted', async () => {
     Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
   }
 });
+
+it('revokes an undecodable preview right away, not at unmount', async () => {
+  const create = vi.fn(() => 'blob:broken');
+  const revoke = vi.fn();
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+  try {
+    await act(async () => root.render(
+      <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+        onSend={async () => {}} {...noAttachments} fetchAttachmentBytes={async () => new Blob(['not a gif'])}
+        messages={[attachmentMessage(1, [{ id: 'a2', filename: 'cat.gif', mime: 'image/gif' }])]} />,
+    ));
+    await act(async () => host.querySelector<HTMLButtonElement>('.attachment-row')!.click());
+    const img = host.querySelector('img');
+    expect(img?.getAttribute('src')).toBe('blob:broken');
+    await act(async () => img!.dispatchEvent(new Event('error')));
+    expect(revoke).toHaveBeenCalledWith('blob:broken');
+    expect(host.querySelector('img')).toBeNull();
+    expect(host.querySelector('.attachment-row')?.textContent).toContain('preview failed');
+  } finally {
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+  }
+});

@@ -595,15 +595,35 @@ where
 /// paths call it before enforcing participation, so a stranded member is
 /// re-seated instead of locked out.
 ///
+/// The membership row is locked (`FOR SHARE`) for the re-seat, so a kick,
+/// ban, or leave committing after the caller's own membership check can
+/// never be undone by a resurrected seat: the removal either commits first
+/// (and this returns `NotMember`) or waits and deletes the healed seats.
+///
 /// # Errors
 ///
-/// Returns [`WorkspacesError::Database`] on database failure.
+/// Returns [`WorkspacesError::NotMember`] if `user_id` is no longer a
+/// member, or [`WorkspacesError::Database`] on database failure.
 pub async fn ensure_channel_participation(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), WorkspacesError> {
-    sync_add_to_channels(pool, workspace_id, user_id).await
+    let mut tx = pool.begin().await.map_err(WorkspacesError::Database)?;
+    let member: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM workspace_members
+         WHERE workspace_id = $1 AND user_id = $2 FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(WorkspacesError::Database)?;
+    if member.is_none() {
+        return Err(WorkspacesError::NotMember);
+    }
+    sync_add_to_channels(&mut *tx, workspace_id, user_id).await?;
+    tx.commit().await.map_err(WorkspacesError::Database)
 }
 
 /// Heal every channel seat of every workspace `user_id` belongs to. Called
@@ -618,7 +638,11 @@ pub async fn ensure_all_participation(
     user_id: Uuid,
 ) -> Result<(), WorkspacesError> {
     for (workspace, _) in list_workspaces(pool, user_id).await? {
-        ensure_channel_participation(pool, workspace.id, user_id).await?;
+        // A leave or kick landing after the listing is not an error.
+        match ensure_channel_participation(pool, workspace.id, user_id).await {
+            Ok(()) | Err(WorkspacesError::NotMember) => {}
+            Err(err) => return Err(err),
+        }
     }
     Ok(())
 }
@@ -3915,6 +3939,20 @@ mod tests {
             .expect("heal");
         assert!(
             crate::messaging::is_member(&pool, channel.conversation_id, member)
+                .await
+                .expect("probe")
+        );
+
+        // A removal that commits before the heal is never undone by it.
+        remove_member(&pool, owner, workspace.id, member)
+            .await
+            .expect("kick");
+        assert!(matches!(
+            ensure_channel_participation(&pool, workspace.id, member).await,
+            Err(WorkspacesError::NotMember)
+        ));
+        assert!(
+            !crate::messaging::is_member(&pool, channel.conversation_id, member)
                 .await
                 .expect("probe")
         );

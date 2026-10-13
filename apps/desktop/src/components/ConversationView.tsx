@@ -539,7 +539,16 @@ function AttachmentRow({
     if (thumb && !failed) {
       return (
         <button type="button" onClick={() => void download()} className="attachment-preview" title={`Download ${attachment.filename}`}>
-          <img src={thumb} alt={attachment.filename} onError={() => setFailed(true)} />
+          <img
+            src={thumb}
+            alt={attachment.filename}
+            onError={() => {
+              // Undecodable bytes: clearing `thumb` runs the revoke effect
+              // now instead of holding the blob until the row unmounts.
+              setThumb(null);
+              setFailed(true);
+            }}
+          />
         </button>
       );
     }

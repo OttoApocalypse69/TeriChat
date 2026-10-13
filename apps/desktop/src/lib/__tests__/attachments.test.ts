@@ -39,6 +39,14 @@ describe('encodeChatContent', () => {
 });
 
 describe('parseChatContent', () => {
+  it('stops at the cap and skips malformed entries without throwing', () => {
+    const many = [null, 7, { id: 'bad' }, ...Array.from({ length: 5000 }, (_, i) => ref(`r${i}`))];
+    const payload = encodeOpaqueText(JSON.stringify({ v: 1, kind: 'attachments', text: 'hi', attachments: many }));
+    const parsed = parseChatContent(payload);
+    expect(parsed.text).toBe('hi');
+    expect(parsed.attachments.map(a => a.id)).toEqual(['r0', 'r1', 'r2', 'r3', 'r4']);
+  });
+
   it('parses legacy bare-text envelopes', () => {
     const payload = encodeOpaqueText('bro');
     expect(parseChatContent(payload)).toEqual({ text: 'bro', attachments: [] });
