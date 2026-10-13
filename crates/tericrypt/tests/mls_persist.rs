@@ -122,3 +122,35 @@ fn concurrent_first_opens_agree_on_one_salt_and_verifier() {
         assert_eq!(reopened.salt(), salts[0]);
     }
 }
+
+#[test]
+fn installation_survives_restart_between_key_package_and_welcome() {
+    let db = TempDb::new();
+    let joiner =
+        PersistInstallation::generate(PersistProvider::open(&db.0, PASSWORD).unwrap()).unwrap();
+    let package = joiner.key_package().unwrap();
+    drop(joiner);
+
+    let mut creator = MemoryInstallation::generate()
+        .unwrap()
+        .create_group()
+        .unwrap();
+    let addition = creator.add(&[package]).unwrap();
+
+    let joiner =
+        PersistInstallation::reopen(PersistProvider::open(&db.0, PASSWORD).unwrap()).unwrap();
+    let mut joiner = joiner.join(&addition.welcome).unwrap();
+    let to_creator = joiner.encrypt(b"signed by the original leaf").unwrap();
+    assert_eq!(
+        creator.receive(&to_creator).unwrap(),
+        Received::Application(b"signed by the original leaf".to_vec())
+    );
+}
+
+#[test]
+fn provider_opened_on_a_thread_can_be_dropped_inside_an_async_task() {
+    let db = TempDb::new();
+    let provider = PersistProvider::open(&db.0, PASSWORD).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move { drop(provider) });
+}

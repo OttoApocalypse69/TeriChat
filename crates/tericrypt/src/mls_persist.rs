@@ -145,11 +145,21 @@ const META_GROUP: &str = "app/group";
 /// `Debug` output redacts key material.
 pub struct EncryptedStore {
     pool: SqlitePool,
-    runtime: tokio::runtime::Runtime,
+    // Always `Some` until `Drop`, which takes it to shut down without
+    // blocking: dropping a runtime inside another runtime panics.
+    runtime: Option<tokio::runtime::Runtime>,
     key: Zeroizing<[u8; 32]>,
     salt: [u8; SALT_LEN],
     #[allow(dead_code)]
     path: PathBuf,
+}
+
+impl Drop for EncryptedStore {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 impl std::fmt::Debug for EncryptedStore {
@@ -214,9 +224,9 @@ impl EncryptedStore {
                     .connect_with(options),
             )
             .map_err(|_| StoreError::Database)?;
-        let store = Self {
+        let mut store = Self {
             pool,
-            runtime,
+            runtime: Some(runtime),
             key: Zeroizing::new([0u8; 32]),
             salt: [0u8; SALT_LEN],
             path,
@@ -250,7 +260,8 @@ impl EncryptedStore {
             .try_into()
             .map_err(|_| StoreError::Serialization)?;
         let key = derive_key(password, &salt)?;
-        let store = Self { key, salt, ..store };
+        store.key = key;
+        store.salt = salt;
         // Password check: fresh files seal the sentinel, existing files must
         // open it. Wrong passwords and tampered bytes both fail here.
         // The sentinel is likewise insert-if-absent, then always checked.
@@ -282,7 +293,10 @@ impl EncryptedStore {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(StoreError::SyncContext);
         }
-        self.runtime.block_on(future)
+        self.runtime
+            .as_ref()
+            .ok_or(StoreError::Database)?
+            .block_on(future)
     }
 
     /// Seal plaintext as `nonce || ciphertext` under the database key, bound
@@ -490,10 +504,14 @@ impl EncryptedStore {
                     serde_json::from_slice(&plain).map_err(|_| StoreError::Serialization)?
                 }
             };
+            // Idempotent: a redelivered proposal must not leave a second
+            // reference that outlives the payload `remove_proposal` deletes.
             if append {
-                list.push(item.to_vec());
-            } else if let Some(pos) = list.iter().position(|stored| stored.as_slice() == item) {
-                list.remove(pos);
+                if !list.iter().any(|stored| stored.as_slice() == item) {
+                    list.push(item.to_vec());
+                }
+            } else {
+                list.retain(|stored| stored.as_slice() != item);
             }
             let plain = serde_json::to_vec(&list).map_err(|_| StoreError::Serialization)?;
             let mut nonce = [0u8; NONCE_LEN];
@@ -544,25 +562,29 @@ impl EncryptedStore {
             .collect()
     }
 
-    /// Persist the installation identity (signer, scoped label, group id)
-    /// alongside the MLS state so [`PersistSession::reopen`] can restore it.
+    /// Persist the installation identity (signer, scoped label) as soon as it
+    /// exists, so a key package published before a restart can still be
+    /// joined with the same leaf ([`PersistInstallation::reopen`]).
     /// Everything here is sealed; the salt row stays the only raw meta row.
-    fn save_app_state(
+    fn save_identity(
         &self,
         signer: &SignatureKeyPair,
         identity: &[u8],
         signature_public: &[u8],
-        group_id: &[u8],
     ) -> Result<(), StoreError> {
         let signer_json = serde_json::to_vec(signer).map_err(|_| StoreError::Serialization)?;
         self.meta_put_sealed(META_SIGNER, &signer_json)?;
         self.meta_put_sealed(META_IDENTITY, identity)?;
         self.meta_put_sealed(META_SIG_PUB, signature_public)?;
-        self.meta_put_sealed(META_GROUP, group_id)?;
         Ok(())
     }
 
-    fn load_app_state(&self) -> Result<(SignatureKeyPair, CredentialWithKey, Vec<u8>), StoreError> {
+    /// Remember the active group so [`PersistSession::reopen`] can restore it.
+    fn save_group(&self, group_id: &[u8]) -> Result<(), StoreError> {
+        self.meta_put_sealed(META_GROUP, group_id)
+    }
+
+    fn load_identity(&self) -> Result<(SignatureKeyPair, CredentialWithKey), StoreError> {
         let signer_json = self
             .meta_get_sealed(META_SIGNER)?
             .ok_or(StoreError::Sealed)?;
@@ -574,13 +596,18 @@ impl EncryptedStore {
         let signature_public = self
             .meta_get_sealed(META_SIG_PUB)?
             .ok_or(StoreError::Sealed)?;
-        let group_id = self
-            .meta_get_sealed(META_GROUP)?
-            .ok_or(StoreError::Sealed)?;
         let credential = CredentialWithKey {
             credential: BasicCredential::new(identity).into(),
             signature_key: signature_public.into(),
         };
+        Ok((signer, credential))
+    }
+
+    fn load_app_state(&self) -> Result<(SignatureKeyPair, CredentialWithKey, Vec<u8>), StoreError> {
+        let (signer, credential) = self.load_identity()?;
+        let group_id = self
+            .meta_get_sealed(META_GROUP)?
+            .ok_or(StoreError::Sealed)?;
         Ok((signer, credential, group_id))
     }
 }
@@ -1297,6 +1324,28 @@ impl PersistInstallation {
             credential: BasicCredential::new(identity.to_vec()).into(),
             signature_key: signer.to_public_vec().into(),
         };
+        provider
+            .store
+            .save_identity(&signer, &identity, &signer.to_public_vec())
+            .map_err(|_| MlsError::Operation)?;
+        Ok(Self {
+            provider,
+            signer,
+            credential,
+        })
+    }
+
+    /// Reload the installation identity saved by [`Self::generate`] after a
+    /// restart, e.g. to join a Welcome for a key package published earlier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Operation` when no identity was saved or it cannot be unsealed.
+    pub fn reopen(provider: PersistProvider) -> Result<Self, MlsError> {
+        let (signer, credential) = provider
+            .store
+            .load_identity()
+            .map_err(|_| MlsError::Operation)?;
         Ok(Self {
             provider,
             signer,
@@ -1322,12 +1371,7 @@ impl PersistInstallation {
     fn persist_state(&self, group: &MlsGroup) -> Result<(), MlsError> {
         self.provider
             .store
-            .save_app_state(
-                &self.signer,
-                self.credential.credential.serialized_content(),
-                &self.signer.to_public_vec(),
-                group.group_id().as_slice(),
-            )
+            .save_group(group.group_id().as_slice())
             .map_err(|_| MlsError::Operation)
     }
 
@@ -1610,6 +1654,37 @@ mod tests {
             .unwrap();
         let items: Vec<Vec<u8>> = serde_json::from_slice(&raw).unwrap();
         assert_eq!(items, vec![b"[1]".to_vec(), b"[2]".to_vec()]);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn duplicate_list_appends_are_idempotent_and_removal_clears_them() {
+        let path = std::env::temp_dir().join(format!(
+            "tericrypt-list-dup-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = EncryptedStore::open(&path, b"synthetic-test-password").unwrap();
+        // A redelivered proposal stores its reference a second time.
+        store
+            .list_update(OWN_LEAF_NODES_LABEL, b"group", b"[7]", true)
+            .unwrap();
+        store
+            .list_update(OWN_LEAF_NODES_LABEL, b"group", b"[7]", true)
+            .unwrap();
+        store
+            .list_update(OWN_LEAF_NODES_LABEL, b"group", b"[7]", false)
+            .unwrap();
+        let raw = store
+            .raw_get(&storage_key(OWN_LEAF_NODES_LABEL, b"group"))
+            .unwrap()
+            .unwrap();
+        let items: Vec<Vec<u8>> = serde_json::from_slice(&raw).unwrap();
+        assert!(items.is_empty(), "no dangling reference survives removal");
         drop(store);
         let _ = std::fs::remove_file(path);
     }
