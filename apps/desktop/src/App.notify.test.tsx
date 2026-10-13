@@ -225,3 +225,23 @@ it('a mute saved earlier on this device applies right after login', async () => 
   expect(host.querySelector('button[aria-pressed="true"]')?.textContent).toBe('Unmute notifications');
   window.localStorage.clear();
 });
+
+it('a message that arrived muted never toasts, even if unmuted while its text loads', async () => {
+  window.localStorage.clear();
+  await login();
+  const socket = await readySocket();
+  await click('@Peer');
+  await click('Mute notifications');
+  const history = vi.mocked(ApiClient.prototype.history);
+  history.mockClear();
+  const pending = deferred<MessageBody[]>();
+  history.mockReturnValueOnce(pending.promise).mockResolvedValue([peerMessage(1)]);
+  unfocused(false);
+  await flush(() => socket.event(1));
+  await click('Unmute notifications');
+  await flush(() => pending.resolve([peerMessage(1)]));
+  await flush();
+  expect(plugin.sendNotification).not.toHaveBeenCalled();
+  expect([...host.querySelectorAll('main p.whitespace-pre-wrap')].map(p => p.textContent)).toEqual(['body-1']);
+  window.localStorage.clear();
+});

@@ -409,6 +409,9 @@ function AuthenticatedApp({ session, onLogout }: {
       const eventConversation = gatewayEventInfo(event)?.conversationId;
       const unknown = eventConversation !== undefined
         && !storeRef.current.conversations.some(c => c.id === eventConversation);
+      // Like focus, mute is judged at arrival: unmuting while the text loads
+      // must not toast a message that arrived muted.
+      const mutedAtArrival = eventConversation !== undefined && mutedRef.current.has(eventConversation);
       const fresh = storeRef.current.applyGatewayEvent(event);
       const replay = fresh ? null : gatewayEventInfo(event);
       // Deduplicate event effects, not an unfinished history fetch.
@@ -443,7 +446,7 @@ function AuthenticatedApp({ session, onLogout }: {
           // a group): never toast it as a DM.
           if (!arrived || arrived.members.length === 0) return;
           if (!row) return;
-          if (mutedRef.current.has(arrived.id)) return;
+          if (mutedAtArrival || mutedRef.current.has(arrived.id)) return;
           const content = buildDmNotification(meId, arrived, row);
           if (!content) return;
           void notifyDm(content, { unfocused: wasUnfocused }).catch(() => {
