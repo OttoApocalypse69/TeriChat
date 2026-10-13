@@ -26,6 +26,9 @@ sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
 futures-util = "0.3"
+# Streaming upload cap: `http-body-util` is a main dep (not dev) because the
+# attachment upload handler streams the request body with a hard byte cap.
+http-body-util = "0.1"
 # Explicit so `OsRng` in password.rs never depends on transitive feature
 # unification (password-hash/rand_core `getrandom`); see review on wt/password.
 rand_core = { version = "0.6", features = ["getrandom"] }

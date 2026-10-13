@@ -12,7 +12,11 @@ use tower::ServiceExt;
 
 fn bare_state() -> AppState {
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    AppState { pool: None, hub }
+    AppState::new(
+        None,
+        hub,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    )
 }
 
 async fn body_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -82,10 +86,11 @@ async fn ready_with_unreachable_database_is_down() {
 
 fn pooled_app(pool: sqlx::PgPool) -> Router {
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    build_router(AppState {
-        pool: Some(pool),
+    build_router(AppState::new(
+        Some(pool),
         hub,
-    })
+        std::env::temp_dir().join("terichat-test-attachments"),
+    ))
 }
 
 fn assert_unavailable(status: StatusCode, json: &serde_json::Value) {

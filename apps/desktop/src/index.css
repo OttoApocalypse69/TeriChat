@@ -1,6 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+@config '../tailwind.config.js';
+
+/* Tailwind 3 sizes carried absolute line heights; v4's unitless ratios would
+   be inherited by children and shift layout. */
+@theme {
+  --text-xs--line-height: 1rem;
+  --text-xl--line-height: 1.75rem;
+}
 
 /* UnknownChat design language v0.1 (dark, primary). Token names follow the
    Foundations board; build new UI from these, never from raw hex values. */
@@ -295,6 +301,21 @@
 .send-button:active:not(:disabled) { background: var(--uv-700); }
 .send-button:disabled { background: #1f1f2a; color: var(--ink-3); box-shadow: none; }
 .stage-alert { padding: 6px 20px; }
+.attach-button { margin-left: -6px; }
+.staged-files { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 0; }
+.staged-file { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
+.staged-file > .truncate { flex: 1; min-width: 0; }
+.staged-file svg { flex-shrink: 0; color: var(--ink-3); }
+.upload-progress { height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--bg-overlay); }
+.upload-progress > div { height: 100%; background: var(--uv-500); transition: width var(--t-instant) var(--ease); }
+.upload-progress-indeterminate { animation: typing-dot 1.2s var(--ease) infinite; }
+.attachment-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 420px; min-width: 0; margin-top: 6px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--bg-card); box-shadow: inset 0 0 0 1px var(--line-subtle); font-size: 12.5px; color: var(--ink-body); text-align: left; transition: background-color var(--t-instant) var(--ease); }
+.attachment-row:hover:not(:disabled) { background: var(--bg-overlay); }
+.attachment-row > .truncate { flex: 1; min-width: 0; }
+.attachment-row svg { flex-shrink: 0; color: var(--ink-3); }
+.attachment-preview { display: block; max-width: 100%; margin-top: 6px; }
+.attachment-preview img { max-width: min(100%, 420px); max-height: 320px; border-radius: var(--r-sm); object-fit: contain; }
+.attachment-error { margin-top: 4px; font-size: 12px; color: var(--rose-text); }
 .conversation-empty { display: flex; flex: 1; min-height: 0; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; }
 .empty-mark { display: grid; place-items: center; width: 64px; height: 64px; margin-bottom: 8px; clip-path: var(--chamfer-8); background: linear-gradient(145deg, #221944, #0d0a1a); }
 .conversation-empty h2 { font-family: var(--font-display); font-size: 28px; line-height: 32px; font-weight: 600; }

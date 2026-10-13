@@ -62,10 +62,11 @@ async fn fixture() -> Option<Fixture> {
         .expect("workspace")
         .id;
     let (hub, _) = tokio::sync::broadcast::channel(HUB_CAPACITY);
-    let app = build_router(AppState {
-        pool: Some(pool.clone()),
+    let app = build_router(AppState::new(
+        Some(pool.clone()),
         hub,
-    });
+        std::env::temp_dir().join("terichat-test-attachments"),
+    ));
     Some(Fixture {
         pool,
         app,

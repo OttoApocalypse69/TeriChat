@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attachments;
 pub mod auth;
 pub mod bootstrap;
 pub mod config;

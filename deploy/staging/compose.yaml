@@ -27,6 +27,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Attachment bytes live on a named volume: without it every container
+      # recreation drops the bytes while their rows persist in pgdata.
+      ATTACHMENTS_DIR: /var/lib/terichat/attachments
+    volumes:
+      - attachments:/var/lib/terichat/attachments
     depends_on:
       db:
         condition: service_healthy
@@ -64,6 +70,7 @@ services:
 
 volumes:
   pgdata:
+  attachments:
   caddy_data:
   caddy_config:
 

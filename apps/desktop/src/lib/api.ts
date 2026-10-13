@@ -152,6 +152,205 @@ export interface ChannelStatsPage {
   next_cursor: string | null;
 }
 
+/** Attachment row returned by the upload route (bytes fetched separately). */
+export interface AttachmentBody {
+  id: string;
+  conversation_id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+}
+
+/** Client-side attachment ref embedded in the message JSON payload. */
+export interface AttachmentRef {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+/** Client message content: text plus optional attachment refs. */
+export interface ChatContent {
+  text: string;
+  attachments: AttachmentRef[];
+}
+
+/** Max attachment bytes the client will upload (mirrors the server 10 MiB cap). */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/** Max attachment refs embedded in one message (client-enforced). */
+export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
+
+/**
+ * Resolve the MIME to advertise for an upload. The browser File API may
+ * return an empty `file.type` when the OS cannot determine it; sending
+ * `application/octet-stream` would then fail the server allowlist even for
+ * a perfectly valid file. Fall back to the extension map (which only
+ * yields allowlisted types); unknown extensions stay octet-stream and the
+ * server rejects them honestly with 415.
+ */
+export function guessUploadMime(file: Pick<File, 'name' | 'type'>): string {
+  if (file.type && file.type.trim() !== '') return file.type;
+  const dot = file.name.lastIndexOf('.');
+  const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : '';
+  switch (ext) {
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'pdf':
+      return 'application/pdf';
+    case 'zip':
+      return 'application/zip';
+    case 'mp3':
+    case 'm4a':
+      return 'audio/mpeg';
+    case 'ogg':
+    case 'oga':
+      return 'audio/ogg';
+    case 'wav':
+      return 'audio/wav';
+    case 'mp4':
+    case 'm4v':
+      return 'video/mp4';
+    case 'webm':
+      return 'video/webm';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+/**
+ * Whether the server's v1 allowlist (images, audio, video, PDF, ZIP) takes
+ * this file. Checked at staging so one unsupported file cannot fail a send
+ * after its siblings already uploaded.
+ */
+export function isAllowedAttachment(file: Pick<File, 'name' | 'type'>): boolean {
+  const mime = guessUploadMime(file).trim().toLowerCase();
+  return mime.startsWith('image/') || mime.startsWith('audio/') || mime.startsWith('video/')
+    || mime === 'application/pdf' || mime === 'application/zip';
+}
+
+/**
+ * Parse a received message payload into chat content.
+ * Legacy messages carry a bare string; attachment messages carry the
+ * versioned envelope `{v:1, kind:"attachments", text, attachments}`.
+ * Anything else — including JSON-looking plain text WITHOUT the
+ * discriminator — displays verbatim as text, so a literal
+ * `{"text":"hello"}` code snippet never becomes structured UI.
+ * Parsed refs are truncated to [`MAX_ATTACHMENTS_PER_MESSAGE`]: the send
+ * path caps refs, but any client can stuff thousands into the opaque 1 MiB
+ * envelope and stall every recipient's renderer without this bound.
+ */
+export function parseChatContent(payload: string): ChatContent {
+  const decoded = decodeOpaqueText(payload);
+  if (decoded === payload && !isBase64Envelope(payload)) {
+    return { text: payload, attachments: [] };
+  }
+  if (!decoded.startsWith('{')) return { text: decoded, attachments: [] };
+  try {
+    const parsed = JSON.parse(decoded) as {
+      v?: unknown;
+      kind?: unknown;
+      text?: unknown;
+      attachments?: unknown;
+    };
+    if (parsed.v !== 1 || parsed.kind !== 'attachments') {
+      return { text: decoded, attachments: [] };
+    }
+    if (typeof parsed.text !== 'string') return { text: decoded, attachments: [] };
+    // Stop at the cap: a near-1 MiB envelope can hold thousands of refs,
+    // and this runs on every history render and preview.
+    const attachments: AttachmentRef[] = [];
+    const entries: unknown[] = Array.isArray(parsed.attachments) ? parsed.attachments : [];
+    for (const raw of entries) {
+      if (attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) break;
+      if (typeof raw !== 'object' || raw === null) continue;
+      const entry = raw as Record<string, unknown>;
+      if (
+        typeof entry.id === 'string' &&
+        typeof entry.filename === 'string' &&
+        typeof entry.mime === 'string' &&
+        typeof entry.size_bytes === 'number' &&
+        typeof entry.sha256 === 'string'
+      ) {
+        attachments.push({
+          id: entry.id,
+          filename: entry.filename,
+          mime: entry.mime,
+          size_bytes: entry.size_bytes,
+          sha256: entry.sha256,
+        });
+      }
+    }
+    return { text: parsed.text, attachments };
+  } catch {
+    return { text: decoded, attachments: [] };
+  }
+}
+
+/**
+ * One-line summary of a message payload for the conversation list and
+ * notifications: the text when there is any, otherwise the attachment
+ * (by name when there is one, by count otherwise). Never the raw envelope.
+ */
+export function chatPreviewText(payload: string): string {
+  const content = parseChatContent(payload);
+  if (content.text.trim() !== '' || content.attachments.length === 0) return content.text;
+  if (content.attachments.length === 1) return `Attachment: ${content.attachments[0].filename}`;
+  return `${content.attachments.length} attachments`;
+}
+
+/**
+ * Filename from a `Content-Disposition` header: the exact UTF-8
+ * `filename*` (RFC 6266) when present, else the ASCII `filename` fallback.
+ */
+export function dispositionFilename(disposition: string): string | null {
+  const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  if (extended) {
+    try {
+      return decodeURIComponent(extended.trim());
+    } catch {
+      // Malformed escape: fall through to the ASCII fallback.
+    }
+  }
+  return /filename="([^"]*)"/i.exec(disposition)?.[1] ?? null;
+}
+
+/**
+ * Encode chat content for the envelope. Plain-text messages stay bare
+ * strings; messages with attachments become the versioned envelope
+ * `{v:1, kind:"attachments", text, attachments}` — the discriminator keeps
+ * ordinary JSON-looking text from ever parsing as structured content.
+ */
+export function encodeChatContent(text: string, attachments: AttachmentRef[]): string {
+  if (attachments.length === 0) return text;
+  return JSON.stringify({
+    v: 1,
+    kind: 'attachments',
+    text,
+    attachments: attachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE),
+  });
+}
+
+/** True when the payload looks like a STANDARD-base64 envelope. */
+function isBase64Envelope(payload: string): boolean {
+  const trimmed = payload.trim();
+  return (
+    trimmed.length > 0 &&
+    trimmed.length % 4 === 0 &&
+    /^[A-Za-z0-9+/]*={0,2}$/.test(trimmed)
+  );
+}
+
 export interface InviteBody {
   id: string;
   workspace_id: string;
@@ -332,6 +531,121 @@ export class ApiClient {
     if (since_seq !== undefined) q.set('since_seq', String(since_seq));
     if (limit !== undefined) q.set('limit', String(limit));
     return this.req<MessageBody[]>('GET', `/v1/messages?${q.toString()}`);
+  }
+
+  /**
+   * Upload raw attachment bytes under a conversation.
+   *
+   * Filename and mime travel as `X-Filename` / `X-Mime-Type` headers — NOT
+   * the query string. Staging enables Caddy access logging, which records
+   * full request URIs; user-supplied filenames in the URL would land
+   * sensitive names in centralized logs. The body is the file bytes.
+   * Header values are bytes and browsers refuse anything above U+00FF
+   * (`報告.pdf`, emoji), so the name is percent-encoded and flagged with
+   * `X-Filename-Encoding: percent`; the server decodes it.
+   *
+   * Transport split: the Tauri shell MUST use the Rust-proxied plugin
+   * fetch (WebView2 enforces CORS on XHR and the API serves no CORS
+   * headers — same reason `req` uses transportFetch). Plain browsers use
+   * XHR for upload-progress events. The plugin path offers no progress
+   * surface, so shell uploads report indeterminate progress.
+   */
+  async uploadAttachment(
+    conversationId: string,
+    file: File,
+    onProgress?: (loaded: number, total: number) => void,
+  ): Promise<AttachmentBody> {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      throw new ApiError(
+        413,
+        'payload_too_large',
+        `attachment exceeds ${MAX_ATTACHMENT_BYTES} bytes`,
+      );
+    }
+    const headers: Record<string, string> = {
+      'content-type': 'application/octet-stream',
+      'x-filename': encodeURIComponent(file.name),
+      'x-filename-encoding': 'percent',
+      'x-mime-type': guessUploadMime(file),
+    };
+    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const url = `${this.base}/v1/conversations/${conversationId}/attachments`;
+    if (!isTauriShell()) {
+      return this.uploadViaXhr(url, headers, file, onProgress);
+    }
+    // Shell: plugin fetch serializes the body through the Rust bridge
+    // (no progress events); the staged UI shows indeterminate motion.
+    const res = await transportFetch(url, {
+      method: 'POST',
+      headers,
+      body: file,
+    });
+    if (!res.ok) throw await parseError(res);
+    return (await res.json()) as AttachmentBody;
+  }
+
+  /** Browser-only upload path with progress events (same-origin, no CORS issue). */
+  private uploadViaXhr(
+    url: string,
+    headers: Record<string, string>,
+    file: File,
+    onProgress?: (loaded: number, total: number) => void,
+  ): Promise<AttachmentBody> {
+    return new Promise<AttachmentBody>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      for (const [name, value] of Object.entries(headers)) {
+        xhr.setRequestHeader(name, value);
+      }
+      if (xhr.upload && onProgress) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress(event.loaded, event.total);
+        };
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText) as AttachmentBody);
+          } catch {
+            reject(new ApiError(xhr.status, 'request_failed', 'bad upload response'));
+          }
+        } else {
+          let code = 'request_failed';
+          let message = `request failed (${xhr.status})`;
+          try {
+            const body = JSON.parse(xhr.responseText) as {
+              error?: { code?: string; message?: string };
+            };
+            if (body?.error?.code) code = body.error.code;
+            if (body?.error?.message) message = body.error.message;
+          } catch {
+            // Keep the generic message when the body is not JSON.
+          }
+          reject(new ApiError(xhr.status, code, message));
+        }
+      };
+      xhr.onerror = () =>
+        reject(new ApiError(0, 'request_failed', 'upload failed'));
+      xhr.send(file);
+    });
+  }
+
+  /** Download an attachment's original bytes as a Blob. */
+  async downloadAttachment(id: string): Promise<{ blob: Blob; filename: string; mime: string }> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const res = await transportFetch(
+      `${this.base}/v1/attachments/${encodeURIComponent(id)}`,
+      { headers },
+    );
+    if (!res.ok) throw await parseError(res);
+    const blob = await res.blob();
+    const filename = dispositionFilename(res.headers.get('content-disposition') ?? '') ?? 'download';
+    return {
+      blob,
+      filename,
+      mime: res.headers.get('content-type') ?? 'application/octet-stream',
+    };
   }
 
   listWorkspaces(): Promise<WorkspaceBody[]> {

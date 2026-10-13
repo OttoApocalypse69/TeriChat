@@ -26,6 +26,7 @@ export const PlusIcon = (p: IconProps) => <Icon {...p}><path d="M8 3v10M3 8h10" 
 export const LogoutIcon = (p: IconProps) => <Icon {...p}><path d="M6.5 13.5h-3v-11h3M10 11l3-3-3-3M13 8H6" /></Icon>;
 export const PeopleIcon = (p: IconProps) => <Icon {...p}><circle cx="6" cy="5.5" r="2.3" /><path d="M2 13c.4-2.3 2-3.6 4-3.6s3.6 1.3 4 3.6" /><path d="M10.5 3.4a2.2 2.2 0 0 1 0 4.2M11.8 9.6c1.2.4 2 1.6 2.2 3.4" /></Icon>;
 export const StatsIcon = (p: IconProps) => <Icon {...p}><path d="M2.5 13.5h11M4.5 11V8M8 11V4.5M11.5 11V6.5" /></Icon>;
+export const PaperclipIcon = (p: IconProps) => <Icon {...p}><path d="M13 7.6 8 12.6a3.2 3.2 0 0 1-4.6-4.6l5.3-5.3a2.1 2.1 0 0 1 3 3L6.5 10.9a1 1 0 0 1-1.5-1.5L10 4.5" /></Icon>;
 export const LinkIcon = (p: IconProps) => <Icon {...p}><path d="M6.8 9.2a2.6 2.6 0 0 0 3.7 0l2.2-2.2a2.6 2.6 0 0 0-3.7-3.7l-.9.9" /><path d="M9.2 6.8a2.6 2.6 0 0 0-3.7 0L3.3 9a2.6 2.6 0 0 0 3.7 3.7l.9-.9" /></Icon>;
 export const EyeIcon = ({ crossed = false, ...p }: IconProps & { crossed?: boolean }) => (
   <Icon {...p}><path d="M1.8 8S4 3.8 8 3.8 14.2 8 14.2 8 12 12.2 8 12.2 1.8 8 1.8 8Z" /><circle cx="8" cy="8" r="2" />{crossed && <path d="m2.8 2.3 10.4 11.4" />}</Icon>

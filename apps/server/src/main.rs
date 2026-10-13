@@ -28,12 +28,20 @@ async fn main() {
     let pool = bootstrap::connect_pool(&config).await;
 
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    bootstrap::spawn_workers(pool.as_ref(), &hub);
+    let state = AppState::new(pool, hub, config.attachments_dir.clone());
+    // Attachments are served only with a database; a bare boot skips this.
+    if state.pool.is_some() {
+        if let Err(err) = state.storage.ensure_writable() {
+            eprintln!("attachment storage unusable: {err}");
+            std::process::exit(1);
+        }
+    }
+    bootstrap::spawn_workers(state.pool.as_ref(), &state.hub, &state.storage);
 
     let addr = SocketAddr::from((config.bind_addr, config.port));
     let listener = bootstrap::bind_listener(addr).await;
     tracing::info!(%addr, "terichat-server listening");
-    axum::serve(listener, build_router(AppState { pool, hub }))
+    axum::serve(listener, build_router(state))
         .with_graceful_shutdown(bootstrap::shutdown_signal())
         .await
         .expect("serve axum router");

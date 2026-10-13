@@ -72,12 +72,21 @@ pub async fn connect_pool(config: &Config) -> Option<sqlx::PgPool> {
 /// Spawn the background workers when a database is configured.
 ///
 /// At-least-once fan-out; the next boot re-claims anything unmarked.
-pub fn spawn_workers(pool: Option<&sqlx::PgPool>, hub: &broadcast::Sender<messaging::OutboxEntry>) {
+pub fn spawn_workers(
+    pool: Option<&sqlx::PgPool>,
+    hub: &broadcast::Sender<messaging::OutboxEntry>,
+    storage: &std::sync::Arc<crate::attachments::FilesystemAttachmentStorage>,
+) {
     if let Some(pool) = pool {
         // At-least-once fan-out; the next boot re-claims anything unmarked.
         tokio::spawn(messaging::outbox_worker(pool.clone(), hub.clone()));
         // Stats fold: at-least-once too, deduped on the outbox event id.
         tokio::spawn(stats::stats_worker(pool.clone()));
+        // Deleted attachments' bytes, whichever path deleted the row.
+        tokio::spawn(crate::attachments::blob_gc_worker(
+            pool.clone(),
+            storage.clone(),
+        ));
     }
 }
 

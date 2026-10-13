@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { decodeOpaqueText } from '../lib/api';
+import { chatPreviewText } from '../lib/api';
 import { avatarGradient } from '../lib/avatar';
 import {
   avatarInitial,
@@ -132,7 +132,7 @@ export default function ConversationList({
           const loaded = messagesByConversation.get(c.id) ?? [];
           const last = loaded.length > 0 ? loaded[loaded.length - 1] : null;
           const preview = last
-            ? truncatePreview(decodeOpaqueText(last.ciphertext_b64))
+            ? truncatePreview(chatPreviewText(last.ciphertext_b64))
             : c.last_seq != null
               ? `seq ${c.last_seq}`
               : 'No messages yet';

@@ -1,26 +1,81 @@
 //! Shared application state and request identity.
 //!
-//! [`AppState`] is the pool/hub pair every handler receives (`pool: None`
-//! means the probes-only boot). [`Bearer`] extracts the caller's session from
-//! the `Authorization` header for handlers that need identity.
+//! [`AppState`] is the pool/hub/storage triple every handler receives
+//! (`pool: None` means the probes-only boot). [`Bearer`] extracts the
+//! caller's session from the `Authorization` header for handlers that need
+//! identity.
 
 use axum::{
     extract::FromRequestParts,
     http::{header, request::Parts},
 };
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::{broadcast, Semaphore};
 use uuid::Uuid;
 
+use crate::attachments::FilesystemAttachmentStorage;
 use crate::auth;
 use crate::errors::AppError;
 use crate::messaging;
 
-/// Shared server state: the optional database pool plus the realtime fan-out
-/// hub. `pool: None` means the probes-only boot (no `DATABASE_URL`).
+/// Shared server state: the optional database pool, the realtime fan-out
+/// hub, and the attachment byte store. `pool: None` means the probes-only
+/// boot (no `DATABASE_URL`).
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Option<sqlx::PgPool>,
     pub hub: broadcast::Sender<messaging::OutboxEntry>,
+    /// Attachment bytes. Filesystem-backed by default (`ATTACHMENTS_DIR`);
+    /// the trait keeps a later S3 move handler-local.
+    pub storage: Arc<FilesystemAttachmentStorage>,
+    /// Upload slots ([`MAX_CONCURRENT_UPLOADS`]): bounds how many 10 MiB
+    /// bodies are buffered at once across all requests.
+    pub upload_slots: Arc<Semaphore>,
+    /// Download slots ([`MAX_CONCURRENT_DOWNLOADS`]): each permit lives
+    /// with its response body, so slow readers cannot pile up blobs.
+    pub download_slots: Arc<Semaphore>,
+}
+
+/// Uploads buffered concurrently. Each holds at most 10 MiB plus the
+/// storage copy, so the aggregate stays near 160 MiB under any load.
+pub const MAX_CONCURRENT_UPLOADS: usize = 8;
+
+/// Downloads in flight. Each holds at most one 10 MiB blob until its
+/// response is sent or dropped, so the aggregate stays near 160 MiB.
+pub const MAX_CONCURRENT_DOWNLOADS: usize = 16;
+
+impl AppState {
+    /// Production constructor: filesystem storage rooted at `attachments_dir`.
+    #[must_use]
+    pub fn new(
+        pool: Option<sqlx::PgPool>,
+        hub: broadcast::Sender<messaging::OutboxEntry>,
+        attachments_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            pool,
+            hub,
+            storage: Arc::new(FilesystemAttachmentStorage::new(attachments_dir)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            download_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
+        }
+    }
+
+    /// Test constructor: filesystem storage rooted at `dir`.
+    #[must_use]
+    pub fn test(
+        pool: sqlx::PgPool,
+        hub: broadcast::Sender<messaging::OutboxEntry>,
+        dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            pool: Some(pool),
+            hub,
+            storage: Arc::new(FilesystemAttachmentStorage::new(dir)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            download_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
+        }
+    }
 }
 
 /// Hub capacity: live burst buffer. Overflow drops to resume (`Lagged`

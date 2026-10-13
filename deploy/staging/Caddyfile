@@ -5,6 +5,18 @@
 # NOTE: the box's :80 belongs to the SPICE edge Caddy, so compose publishes
 # this on host :8080 — but the site stays portless (:80 in-container) so the
 # host port remains a publish detail and :443 migration stays trivial.
+# Upstream errors log the request through the default logger, outside the
+# site's access-log filter below; strip attachment filenames there too.
+{
+    log default {
+        output stderr
+        format filter {
+            wrap json
+            request>headers>X-Filename delete
+        }
+    }
+}
+
 http://{$STAGING_HOST}, http://chat.unknownchat.xyz {
     # API + gateway WebSocket (upgrade handled automatically).
     # Health/readiness must preserve API status, never SPA's misleading 200.
@@ -27,5 +39,13 @@ http://{$STAGING_HOST}, http://chat.unknownchat.xyz {
 
     log {
         output stdout
+        # Attachment filenames are user content: drop the upload header and
+        # the download disposition from access logs (percent encoding is
+        # reversible, and Caddy only redacts credential headers by default).
+        format filter {
+            wrap json
+            request>headers>X-Filename delete
+            resp_headers>Content-Disposition delete
+        }
     }
 }

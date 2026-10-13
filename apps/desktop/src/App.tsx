@@ -19,8 +19,11 @@ import {
   ApiClient,
   ApiError,
   apiBaseUrl,
+  encodeChatContent,
   encodeOpaqueText,
+  MAX_ATTACHMENTS_PER_MESSAGE,
   newClientMsgId,
+  type AttachmentRef,
   type MemberProfileBody,
 } from './lib/api';
 import { GatewayClient, type GatewayOutboxEvent, type GatewayStatus } from './lib/gateway';
@@ -715,6 +718,79 @@ function AuthenticatedApp({ session, onLogout }: {
     }
   }
 
+  /**
+   * Upload files then send one message carrying their refs. Uploads run
+   * sequentially so progress is honest; the message embeds the versioned
+   * envelope in the existing transport (no protocol change). Progress is
+   * aggregated across files: completed bytes plus the in-flight file.
+   */
+  async function sendAttachments(
+    files: File[],
+    onProgress?: (loaded: number, total: number) => void,
+  ): Promise<void> {
+    if (!selected) return;
+    const conversationId = selected.id;
+    const capped = files.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+    const total = capped.reduce((sum, file) => sum + file.size, 0);
+    setSending(true);
+    try {
+      const refs: AttachmentRef[] = [];
+      let done = 0;
+      for (const file of capped) {
+        const uploaded = await api.uploadAttachment(
+          conversationId,
+          file,
+          (loaded, fileTotal) => onProgress?.(done + loaded, total || fileTotal),
+        );
+        done += file.size;
+        onProgress?.(done, total);
+        refs.push({
+          id: uploaded.id,
+          filename: uploaded.filename,
+          mime: uploaded.mime,
+          size_bytes: uploaded.size_bytes,
+          sha256: uploaded.sha256,
+        });
+      }
+      if (refs.length === 0) throw new Error('no attachments uploaded');
+      const sent = await api.sendMessage({
+        conversation_id: conversationId,
+        client_msg_id: newClientMsgId(),
+        ciphertext_b64: encodeOpaqueText(encodeChatContent('', refs)),
+      });
+      if (!live.current) return;
+      storeRef.current.mergeOutgoing(toChatMessage(sent));
+      bump();
+    } finally {
+      if (live.current) setSending(false);
+    }
+  }
+
+  /** Download an attachment to disk via an object URL + anchor click. */
+  async function downloadAttachment(ref: AttachmentRef): Promise<void> {
+    // The ref carries the sender's exact name; the header is a fallback.
+    const { blob, filename: served } = await api.downloadAttachment(ref.id);
+    const filename = ref.filename || served;
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } finally {
+      // Revoke on a tick so the download has started before release.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  /** Fetch attachment bytes for inline image previews. */
+  async function fetchAttachmentBytes(ref: AttachmentRef): Promise<Blob> {
+    const { blob } = await api.downloadAttachment(ref.id);
+    return blob;
+  }
+
   useEffect(() => {
     if (selectedId) void refreshHistory(selectedId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -973,6 +1049,9 @@ function AuthenticatedApp({ session, onLogout }: {
             sending={sending}
             error={error}
             onSend={send}
+            onSendAttachments={sendAttachments}
+            onDownload={downloadAttachment}
+            fetchAttachmentBytes={fetchAttachmentBytes}
             title={selected?.kind === 'channel' ? channelTitle : null}
             unreadAfterSeq={unreadSnapshot.key === viewKey ? unreadSnapshot.seq : null}
             onTailVisibleChange={handleTailVisible}

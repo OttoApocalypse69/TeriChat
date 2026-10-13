@@ -491,10 +491,11 @@ mod tests {
             .unwrap()
             .token;
         let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
-        let app = crate::routes::build_router(AppState {
-            pool: Some(pool.clone()),
+        let app = crate::routes::build_router(AppState::new(
+            Some(pool.clone()),
             hub,
-        });
+            std::env::temp_dir().join("terichat-test-attachments"),
+        ));
         for suffix in ["", "/channels"] {
             let uri = format!("/v1/workspaces/{workspace}/stats/me{suffix}");
             assert_eq!(

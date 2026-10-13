@@ -219,15 +219,17 @@ async fn two_clients_exchange_and_resume() {
     let (alice_token, bob_token, bob_id, dm_id) = ws_fixture(&pool, &stamp).await;
 
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: hub.clone(),
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        hub.clone(),
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     // HTTP posts only need the pool; each oneshot call builds its own router.
-    let http_state = AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
-    };
+    let http_state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");
@@ -339,10 +341,11 @@ async fn gateway_replay_drains_all_pages_and_quiet_conversation() {
             .unwrap();
     }
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    let state = AppState {
-        pool: Some(pool.clone()),
+    let state = AppState::new(
+        Some(pool.clone()),
         hub,
-    };
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -393,10 +396,11 @@ async fn gateway_live_delivers_reversed_commits() {
     }
     second.commit().await.unwrap();
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: hub.clone(),
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        hub.clone(),
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -431,10 +435,11 @@ async fn gateway_lag_recovers_more_than_one_page() {
         .unwrap()
         .id;
     let (hub, _) = broadcast::channel(1);
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: hub.clone(),
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        hub.clone(),
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -476,10 +481,11 @@ async fn gateway_identify_has_a_deadline() {
         .unwrap()
         .to_string();
     let (_, token, _, _) = ws_fixture(&pool, &tag).await;
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(1).0,
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(1).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -548,14 +554,16 @@ async fn gateway_channel_guest_and_ban() {
         .expect("create channel");
 
     let (hub, _) = broadcast::channel(HUB_CAPACITY);
-    let state = AppState {
-        pool: Some(pool.clone()),
-        hub: hub.clone(),
-    };
-    let http_state = AppState {
-        pool: Some(pool.clone()),
-        hub: broadcast::channel(HUB_CAPACITY).0,
-    };
+    let state = AppState::new(
+        Some(pool.clone()),
+        hub.clone(),
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
+    let http_state = AppState::new(
+        Some(pool.clone()),
+        broadcast::channel(HUB_CAPACITY).0,
+        std::env::temp_dir().join("terichat-test-attachments"),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");

@@ -16,10 +16,17 @@ const message = (seq: number, sender: string, sentAt: string): ChatMessage => ({
   client_msg_id: `c${seq}`, ciphertext_b64: btoa(`body-${seq}`),
 });
 
+// Attachment callbacks are unused by tests that never render an attachment.
+const noAttachments = {
+  onSendAttachments: async () => {},
+  onDownload: async () => {},
+  fetchAttachmentBytes: async () => new Blob(),
+};
+
 async function render(messages: ChatMessage[], conversation: ChatConversation = dm, title: string | null = null, unreadAfterSeq: number | null = null, onTailVisibleChange?: (visible: boolean) => void) {
   await act(async () => root.render(
     <ConversationView conversation={conversation} messages={messages} meId="me" meHandle="me"
-      loading={false} sending={false} error={null} onSend={async () => {}} title={title} unreadAfterSeq={unreadAfterSeq}
+      loading={false} sending={false} error={null} onSend={async () => {}} {...noAttachments} title={title} unreadAfterSeq={unreadAfterSeq}
       onTailVisibleChange={onTailVisibleChange} />,
   ));
 }
@@ -147,7 +154,7 @@ it('says who is typing without naming a crowd', async () => {
   const typing = async (names: string[]) => {
     await act(async () => root.render(
       <ConversationView conversation={dm} messages={[]} meId="me" meHandle="me"
-        loading={false} sending={false} error={null} onSend={async () => {}} typingNames={names} />,
+        loading={false} sending={false} error={null} onSend={async () => {}} {...noAttachments} typingNames={names} />,
     ));
     return host.querySelector('.typing-indicator')?.textContent;
   };
@@ -157,3 +164,95 @@ it('says who is typing without naming a crowd', async () => {
   expect(await typing(['Ana', '@bo', 'Kai'])).toBe('Several people are typing…');
 });
 
+
+const attachmentMessage = (seq: number, refs: { id: string; filename: string; mime: string }[]): ChatMessage => ({
+  ...message(seq, 'peer', '2026-09-24T14:00:00Z'),
+  ciphertext_b64: btoa(JSON.stringify({
+    v: 1, kind: 'attachments', text: '',
+    attachments: refs.map(ref => ({ ...ref, size_bytes: 2048, sha256: 'c3ludGhldGlj' })),
+  })),
+});
+
+it('renders attachment rows and downloads the clicked file', async () => {
+  const onDownload = vi.fn(async () => {});
+  await act(async () => root.render(
+    <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+      onSend={async () => {}} {...noAttachments} onDownload={onDownload}
+      messages={[attachmentMessage(1, [
+        { id: 'a1', filename: 'report.pdf', mime: 'application/pdf' },
+        { id: 'a2', filename: 'cat.gif', mime: 'image/gif' },
+      ])]} />,
+  ));
+  const rows = [...host.querySelectorAll<HTMLButtonElement>('.attachment-row')];
+  expect(rows.map(row => row.textContent)).toEqual(['report.pdf2.0 KB', 'cat.gif: show preview2.0 KB']);
+  // The envelope never leaks into the history as raw JSON.
+  expect(host.querySelector('.message-text')).toBeNull();
+  await act(async () => rows[0].click());
+  expect(onDownload).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1', filename: 'report.pdf' }));
+});
+
+it('shows a failed download on the row instead of rejecting unhandled', async () => {
+  const onDownload = vi.fn(async () => { throw new Error('attachment not found'); });
+  await act(async () => root.render(
+    <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+      onSend={async () => {}} {...noAttachments} onDownload={onDownload}
+      messages={[attachmentMessage(1, [{ id: 'a1', filename: 'report.pdf', mime: 'application/pdf' }])]} />,
+  ));
+  await act(async () => host.querySelector<HTMLButtonElement>('.attachment-row')!.click());
+  expect(onDownload).toHaveBeenCalledTimes(1);
+  expect(host.querySelector('.attachment-error')?.textContent)
+    .toBe('Could not download report.pdf: attachment not found');
+});
+
+it('revokes a preview that arrives after its row unmounted', async () => {
+  let resolveBytes!: (blob: Blob) => void;
+  const fetchAttachmentBytes = vi.fn(() => new Promise<Blob>(resolve => { resolveBytes = resolve; }));
+  const create = vi.fn(() => 'blob:late');
+  const revoke = vi.fn();
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+  try {
+    await act(async () => root.render(
+      <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+        onSend={async () => {}} {...noAttachments} fetchAttachmentBytes={fetchAttachmentBytes}
+        messages={[attachmentMessage(1, [{ id: 'a2', filename: 'cat.gif', mime: 'image/gif' }])]} />,
+    ));
+    await act(async () => host.querySelector<HTMLButtonElement>('.attachment-row')!.click());
+    expect(fetchAttachmentBytes).toHaveBeenCalledTimes(1);
+    // Switching away unmounts the row while the fetch is still in flight.
+    await act(async () => root.render(
+      <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+        onSend={async () => {}} {...noAttachments} messages={[]} />,
+    ));
+    await act(async () => resolveBytes(new Blob(['gif'])));
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith('blob:late');
+  } finally {
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+  }
+});
+
+it('revokes an undecodable preview right away, not at unmount', async () => {
+  const create = vi.fn(() => 'blob:broken');
+  const revoke = vi.fn();
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+  try {
+    await act(async () => root.render(
+      <ConversationView conversation={dm} meId="me" meHandle="me" loading={false} sending={false} error={null}
+        onSend={async () => {}} {...noAttachments} fetchAttachmentBytes={async () => new Blob(['not a gif'])}
+        messages={[attachmentMessage(1, [{ id: 'a2', filename: 'cat.gif', mime: 'image/gif' }])]} />,
+    ));
+    await act(async () => host.querySelector<HTMLButtonElement>('.attachment-row')!.click());
+    const img = host.querySelector('img');
+    expect(img?.getAttribute('src')).toBe('blob:broken');
+    await act(async () => img!.dispatchEvent(new Event('error')));
+    expect(revoke).toHaveBeenCalledWith('blob:broken');
+    expect(host.querySelector('img')).toBeNull();
+    expect(host.querySelector('.attachment-row')?.textContent).toContain('preview failed');
+  } finally {
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+  }
+});

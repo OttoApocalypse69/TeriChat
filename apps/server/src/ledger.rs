@@ -1252,10 +1252,11 @@ mod tests {
             .unwrap();
         mint(&pool, alice_id, 100, Uuid::now_v7()).await.unwrap();
         let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
-        let app = crate::build_router(crate::AppState {
-            pool: Some(pool.clone()),
+        let app = crate::build_router(crate::AppState::new(
+            Some(pool.clone()),
             hub,
-        });
+            std::env::temp_dir().join("terichat-test-attachments"),
+        ));
         // `/wallet`-equivalent API returns the correct derived balance.
         let (status, bytes) = http_call(app.clone(), "GET", "/v1/wallet", &alice_token, None).await;
         assert_eq!(status, StatusCode::OK);
@@ -1377,10 +1378,11 @@ mod tests {
             .unwrap()
             .token;
         let (hub, _) = tokio::sync::broadcast::channel(crate::HUB_CAPACITY);
-        let app = crate::build_router(crate::AppState {
-            pool: Some(pool.clone()),
+        let app = crate::build_router(crate::AppState::new(
+            Some(pool.clone()),
             hub,
-        });
+            std::env::temp_dir().join("terichat-test-attachments"),
+        ));
         (pool, app, alice, alice_token, bob, bob_token)
     }
 

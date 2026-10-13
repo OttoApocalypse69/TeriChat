@@ -1,5 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { decodeOpaqueText, type MemberProfileBody } from '../lib/api';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  isAllowedAttachment,
+  parseChatContent,
+  type AttachmentRef,
+  type MemberProfileBody,
+} from '../lib/api';
 import { avatarGradient } from '../lib/avatar';
 import {
   avatarInitial,
@@ -13,7 +20,7 @@ import {
   type ChatConversation,
   type ChatMessage,
 } from '../lib/store';
-import { BrandMark, OpenLockIcon, PeopleIcon, SendIcon } from './icons';
+import { BrandMark, OpenLockIcon, PaperclipIcon, PeopleIcon, SendIcon } from './icons';
 
 interface Props {
   conversation: ChatConversation | null;
@@ -24,6 +31,12 @@ interface Props {
   sending: boolean;
   error: string | null;
   onSend: (text: string) => Promise<void>;
+  onSendAttachments: (
+    files: File[],
+    onProgress?: (loaded: number, total: number) => void,
+  ) => Promise<void>;
+  onDownload: (ref: AttachmentRef) => Promise<void>;
+  fetchAttachmentBytes: (ref: AttachmentRef) => Promise<Blob>;
   title?: string | null;
   isActivePane?: boolean;
   headerActions?: ReactNode;
@@ -69,6 +82,9 @@ export default function ConversationView({
   sending,
   error,
   onSend,
+  onSendAttachments,
+  onDownload,
+  fetchAttachmentBytes,
   title,
   isActivePane = true,
   headerActions,
@@ -81,6 +97,10 @@ export default function ConversationView({
   const [draft, setDraft] = useState('');
   const draftRevision = useRef(0);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [staged, setStaged] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Switching conversations (DM <-> DM, DM <-> channel, channel <-> channel)
@@ -89,6 +109,8 @@ export default function ConversationView({
   useEffect(() => {
     setDraft('');
     setSendError(null);
+    setStaged([]);
+    setUploadProgress(null);
   }, [conversationId]);
 
   // The first message from someone else after the opening marker.
@@ -151,15 +173,62 @@ export default function ConversationView({
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    if (sending || !draft.trim()) return;
+    if (sending || uploading || (!draft.trim() && staged.length === 0)) return;
     const revision = draftRevision.current;
     setSendError(null);
     try {
+      if (staged.length > 0) {
+        // Keep the selection mounted through the whole upload: the progress
+        // row renders from `staged`, and a failure must leave the files
+        // staged so retry doesn't force re-picking everything.
+        const files = staged;
+        setUploading(true);
+        // Indeterminate until the transport reports bytes (the shell's
+        // plugin fetch reports only per finished file).
+        setUploadProgress(null);
+        try {
+          await onSendAttachments(files, (loaded, total) =>
+            setUploadProgress(total > 0 ? loaded / total : 0),
+          );
+        } catch (err) {
+          setSendError(err instanceof Error ? err.message : 'send failed');
+          return;
+        } finally {
+          setUploading(false);
+          setUploadProgress(null);
+        }
+        setStaged([]);
+        // Text alongside staged files goes as its own message below.
+        if (!draft.trim()) {
+          if (draftRevision.current === revision) setDraft('');
+          return;
+        }
+      }
       await onSend(draft.trim());
       if (draftRevision.current === revision) setDraft('');
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'send failed');
     }
+  }
+
+  function stageFiles(list: FileList | null): void {
+    if (!list) return;
+    setSendError(null);
+    const picked = Array.from(list).slice(0, MAX_ATTACHMENTS_PER_MESSAGE - staged.length);
+    const oversize = picked.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+    const unsupported = picked.filter((f) => !isAllowedAttachment(f));
+    if (oversize.length > 0) {
+      setSendError(
+        `${oversize[0].name} exceeds 10 MiB and was not staged`,
+      );
+    } else if (unsupported.length > 0) {
+      setSendError(`${unsupported[0].name} is not a supported file type and was not staged`);
+    }
+    setStaged((prev) =>
+      [...prev, ...picked.filter((f) => f.size <= MAX_ATTACHMENT_BYTES && isAllowedAttachment(f))]
+        .slice(0, MAX_ATTACHMENTS_PER_MESSAGE),
+    );
+    if (fileInput.current) fileInput.current.value = '';
   }
 
   if (!conversation) {
@@ -230,6 +299,7 @@ export default function ConversationView({
             dayKey(m.sent_at) !== lastDay ? dayLabel(m.sent_at) : null;
           lastDay = dayKey(m.sent_at);
           const mine = m.sender_id === meId;
+          const content = parseChatContent(m.ciphertext_b64);
           const author = senderLabel(meId, m.sender_id, conversation, directory);
           const isFirstNew = m.id === firstNewId;
           const follow = !divider && !isFirstNew && continuesGroup(messages[index - 1], m);
@@ -261,9 +331,19 @@ export default function ConversationView({
                     <time dateTime={m.sent_at ?? undefined}>{clock}</time>
                     <span className="message-sequence">#{m.seq}</span>
                   </p>
-                  <p className="message-text whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                    {decodeOpaqueText(m.ciphertext_b64)}
-                  </p>
+                  {content.text && (
+                    <p className="message-text whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                      {content.text}
+                    </p>
+                  )}
+                  {content.attachments.map((attachment) => (
+                    <AttachmentRow
+                      key={attachment.id}
+                      attachment={attachment}
+                      onDownload={() => onDownload(attachment)}
+                      fetchBytes={() => fetchAttachmentBytes(attachment)}
+                    />
+                  ))}
                 </div>
               </div>
             </div>
@@ -284,7 +364,44 @@ export default function ConversationView({
             <span className="truncate">{typingText(typingNames)}</span>
           </>}
         </div>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          hidden
+          aria-label="Attach files"
+          accept="image/*,audio/*,video/*,.pdf,.zip"
+          onChange={(e) => stageFiles(e.target.files)}
+        />
         <div className="composer-field">
+          {staged.length > 0 && (
+            <div className="staged-files" aria-label="Staged files">
+              {staged.map((file, index) => (
+                <p key={`${file.name}-${index}`} className="staged-file">
+                  <PaperclipIcon size={13} />
+                  <span className="truncate">{file.name}</span>
+                  <span className="meta-mono">{formatBytes(file.size)}</span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-icon"
+                    aria-label={`Remove ${file.name}`}
+                    disabled={uploading}
+                    onClick={() => setStaged((prev) => prev.filter((_, i) => i !== index))}
+                  >
+                    ✕
+                  </button>
+                </p>
+              ))}
+              {uploading && (
+                <div className="upload-progress" role="progressbar" aria-label="Upload progress">
+                  <div
+                    className={uploadProgress === null ? 'upload-progress-indeterminate' : undefined}
+                    style={{ width: `${Math.round((uploadProgress ?? 1) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
           <input
             aria-label="Message"
             placeholder="Message (demo plaintext → opaque envelope)"
@@ -296,11 +413,21 @@ export default function ConversationView({
             }}
           />
           <div className="composer-toolbar">
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon attach-button"
+              aria-label="Attach files"
+              title="Attach files (images, GIFs, audio, video, PDF, ZIP; max 10 MiB each)"
+              disabled={sending || uploading || staged.length >= MAX_ATTACHMENTS_PER_MESSAGE}
+              onClick={() => fileInput.current?.click()}
+            >
+              <PaperclipIcon size={15} />
+            </button>
             <span className="composer-trust"><OpenLockIcon size={13} /><span className="truncate">Alpha demo · plaintext messages</span></span>
             <span className="composer-hint"><kbd className="kbd">Enter</kbd> to send</span>
             <button
               type="submit"
-              disabled={sending || !draft.trim()}
+              disabled={sending || uploading || (!draft.trim() && staged.length === 0)}
               className="send-button"
             >
               {sending ? '…' : <><SendIcon size={15} /><span className="sr-only">Send</span></>}
@@ -310,4 +437,148 @@ export default function ConversationView({
       </form>
     </div>
   );
+}
+
+/** Format a byte count for staged-file rows. */
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/**
+ * One attachment inside a message bubble. Images render an inline preview
+ * (fetched on click to keep history scrolls cheap); other files render a
+ * download row. The preview's object URL is revoked when it is replaced or
+ * the row unmounts, and a fetch that resolves after unmount is revoked at
+ * once instead of leaking up to 10 MiB per abandoned preview.
+ */
+function AttachmentRow({
+  attachment,
+  onDownload,
+  fetchBytes,
+}: {
+  attachment: AttachmentRef;
+  onDownload: () => Promise<void>;
+  fetchBytes: () => Promise<Blob>;
+}) {
+  const [thumb, setThumb] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const mounted = useRef(true);
+  const isImage = attachment.mime.toLowerCase().startsWith('image/');
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (thumb) URL.revokeObjectURL(thumb);
+    };
+  }, [thumb]);
+
+  async function showPreview(): Promise<void> {
+    if (loadingPreview || thumb) return;
+    setLoadingPreview(true);
+    try {
+      const blob = await fetchBytes();
+      const url = URL.createObjectURL(blob);
+      if (!mounted.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      setThumb(url);
+    } catch {
+      if (mounted.current) setFailed(true);
+    } finally {
+      if (mounted.current) setLoadingPreview(false);
+    }
+  }
+
+  // A rejected download (access revoked, blob missing, network) surfaces
+  // on the row instead of becoming an unhandled rejection.
+  async function download(): Promise<void> {
+    setDownloadError(null);
+    try {
+      await onDownload();
+    } catch (err) {
+      if (mounted.current) {
+        setDownloadError(err instanceof Error ? err.message : 'download failed');
+      }
+    }
+  }
+
+  const control = renderControl();
+  return (
+    <>
+      {control}
+      {downloadError && (
+        <p role="alert" className="attachment-error">
+          {`Could not download ${attachment.filename}: ${downloadError}`}
+        </p>
+      )}
+    </>
+  );
+
+  function renderControl() {
+    const size = <span className="meta-mono">{formatBytes(attachment.size_bytes)}</span>;
+    if (!isImage) {
+      return (
+        <button type="button" onClick={() => void download()} className="attachment-row">
+          <PaperclipIcon size={14} />
+          <span className="truncate">{attachment.filename}</span>
+          {size}
+        </button>
+      );
+    }
+    if (thumb && !failed) {
+      return (
+        <button type="button" onClick={() => void download()} className="attachment-preview" title={`Download ${attachment.filename}`}>
+          <img
+            src={thumb}
+            alt={attachment.filename}
+            onError={() => {
+              // Undecodable bytes: clearing `thumb` runs the revoke effect
+              // now instead of holding the blob until the row unmounts.
+              setThumb(null);
+              setFailed(true);
+            }}
+          />
+        </button>
+      );
+    }
+    // A failed preview keeps the row actionable: the label promises a
+    // download, so a click downloads instead of dead-ending on a disabled
+    // control after a transient failure.
+    if (failed) {
+      return (
+        <button type="button" onClick={() => void download()} className="attachment-row">
+          <PaperclipIcon size={14} />
+          <span className="truncate">{`${attachment.filename} (preview failed, click to download)`}</span>
+          {size}
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        disabled={loadingPreview}
+        onClick={() => void showPreview()}
+        className="attachment-row"
+      >
+        <PaperclipIcon size={14} />
+        <span className="truncate">
+          {loadingPreview
+            ? `${attachment.filename}: loading preview…`
+            : `${attachment.filename}: show preview`}
+        </span>
+        {size}
+      </button>
+    );
+  }
 }
