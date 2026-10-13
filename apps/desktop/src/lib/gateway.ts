@@ -4,6 +4,10 @@
 // server replies {"op":"ready",...}, replays missed
 // {"op":"event","event":{"event_id","topic","payload"}} frames, then streams
 // live ones. Delivery is at-least-once: callers MUST dedup by event id.
+// Ephemeral {"op":"typing","conversation_id","user_id","last_seq"} frames carry
+// no event id, are never replayed and never touch dedup or the resume position.
+// `last_seq` is the conversation's highest message seq when the signal was
+// sent, so a signal overtaken by the typist's next message can be dropped.
 
 export type GatewayStatus =
   | 'disconnected'
@@ -23,6 +27,7 @@ export type ParsedGatewayFrame =
   | { kind: 'event'; event: GatewayOutboxEvent }
   | { kind: 'heartbeat_ack'; seq: number }
   | { kind: 'error'; code: string }
+  | { kind: 'typing'; conversation_id: string; user_id: string; last_seq: number }
   | { kind: 'unknown' };
 
 /** Exponential backoff: baseMs * 2^attempt, capped at capMs. Pure/tested. */
@@ -91,6 +96,22 @@ export function parseGatewayFrame(raw: string): ParsedGatewayFrame {
       code: typeof obj.code === 'string' ? obj.code : 'unknown',
     };
   }
+  if (op === 'typing') {
+    if (
+      typeof obj.conversation_id === 'string'
+      && typeof obj.user_id === 'string'
+      && Number.isSafeInteger(obj.last_seq)
+      && (obj.last_seq as number) >= 0
+    ) {
+      return {
+        kind: 'typing',
+        conversation_id: obj.conversation_id,
+        user_id: obj.user_id,
+        last_seq: obj.last_seq as number,
+      };
+    }
+    return { kind: 'unknown' };
+  }
   return { kind: 'unknown' };
 }
 
@@ -146,6 +167,8 @@ export interface GatewayOptions {
   /** Redelivery is not proof that application effects completed. Optional retry
    * notification; onEvent retains its existing transport-deduplicated contract. */
   onDuplicateEvent?: (event: GatewayOutboxEvent) => void;
+  /** Someone else is typing; best effort, never deduplicated or replayed. */
+  onTyping?: (signal: { conversationId: string; userId: string; lastSeq: number }) => void;
   onStatus: (status: GatewayStatus) => void;
   wsFactory?: WsFactory;
   baseMs?: number;
@@ -226,6 +249,12 @@ export class GatewayClient {
           this.seenEventIds.delete(this.seenEventIds.values().next().value!);
         }
         this.opts.onEvent(frame.event);
+      } else if (frame.kind === 'typing') {
+        this.opts.onTyping?.({
+          conversationId: frame.conversation_id,
+          userId: frame.user_id,
+          lastSeq: frame.last_seq,
+        });
       }
       // heartbeat_ack / error / unknown: stay connected, nothing to do.
     };

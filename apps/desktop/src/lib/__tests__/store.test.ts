@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { channelToConversation } from '../workspaces';
 import {
   avatarInitial,
   ChatStore,
@@ -10,9 +11,13 @@ import {
   gatewayEventInfo,
   lastActivityAt,
   mergeMessages,
+  parseMemberHandles,
+  readableThrough,
   senderLabel,
   sortConversations,
   truncatePreview,
+  unreadBadge,
+  unreadCount,
   upsertConversation,
   type ChatConversation,
   type ChatMessage,
@@ -202,3 +207,155 @@ describe('gateway event routing', () => {
     ).toBeNull();
   });
 });
+
+describe('group rosters', () => {
+  const profile = (user_id: string, handle: string, display_name = '') => ({ user_id, handle, display_name });
+  const group = (profiles = [profile('me', 'teri', 'Teri'), profile('u1', 'ana', 'Ana'), profile('u2', 'bo')]): ChatConversation => ({
+    id: 'g', kind: 'group', members: profiles.map(p => p.user_id), member_profiles: profiles,
+  });
+
+  it('names a group by its other members, never the caller or raw ids', () => {
+    expect(conversationLabel(group(), 'me')).toBe('Ana, @bo');
+    expect(conversationSublabel(group())).toBe('3 members');
+    const big = group(['me', 'a', 'b', 'c', 'd', 'e'].map(id => profile(id, `h${id}`, `N${id}`)));
+    expect(conversationLabel(big, 'me')).toBe('Na, Nb, Nc +2');
+  });
+
+  it('falls back to a member count when the server sent no roster', () => {
+    const legacy: ChatConversation = { id: 'g', kind: 'group', members: ['me', 'u1', 'u2'] };
+    expect(conversationLabel(legacy, 'me')).toBe('Group · 3 members');
+    expect(conversationSublabel(legacy)).toBeNull();
+  });
+
+  it('labels group senders from the roster', () => {
+    expect(senderLabel('me', 'u1', group())).toBe('Ana');
+    expect(senderLabel('me', 'u2', group())).toBe('@bo');
+    expect(senderLabel('me', 'me', group())).toBe('you');
+    expect(senderLabel('me', 'stranger-id-1234', group())).toBe('stranger');
+  });
+
+  it('parses member handles: separators, @ prefixes, duplicates and self', () => {
+    // Commas and new lines separate; spaces can be part of a handle.
+    expect(parseMemberHandles(' @ana, mary jane,,@ana\n@teri ', 'teri')).toEqual(['ana', 'mary jane']);
+    expect(parseMemberHandles(' , @ ', 'teri')).toEqual([]);
+    // Only the display "@" is stripped: a handle may itself start with "@".
+    expect(parseMemberHandles('@@odd')).toEqual(['@odd']);
+    // Handles are case-insensitive server-side: one person, and never yourself.
+    expect(parseMemberHandles('Ana, ana, ANA')).toEqual(['ana']);
+    expect(parseMemberHandles('@TERI, bo', 'teri')).toEqual(['bo']);
+    expect(parseMemberHandles('@teri', 'Teri')).toEqual([]);
+  });
+});
+
+describe('private unread state', () => {
+  const msg = (seq: number, sender = 'peer'): ChatMessage => ({
+    id: `m${seq}`, conversation_id: 'c', sender_id: sender, seq, ciphertext_b64: '', client_msg_id: `c${seq}`, sent_at: '',
+  });
+  const conv = (over: Partial<ChatConversation> = {}): ChatConversation => ({
+    id: 'c', kind: 'dm', members: ['me', 'peer'], last_seq: 5, last_read_seq: 2, ...over,
+  });
+  const five = [1, 2, 3, 4, 5].map(seq => msg(seq, seq === 4 ? 'me' : 'peer'));
+
+  it('counts only other people’s messages after the marker', () => {
+    expect(unreadCount(conv(), five, 'me')).toBe(2);
+    expect(unreadCount(conv({ last_read_seq: 5 }), five, 'me')).toBe(0);
+  });
+
+  it('counts server-reported positions that history has not loaded yet', () => {
+    expect(unreadCount(conv({ last_seq: 9 }), [msg(3)], 'me')).toBe(7);
+    expect(unreadCount(conv(), undefined, 'me')).toBe(3);
+  });
+
+  it('keeps a gap below your own loaded reply unread', () => {
+    // Peer's seq 3 failed to load; the caller's reply (seq 4) did.
+    const loaded = [msg(1), msg(2), msg(4, 'me')];
+    expect(unreadCount(conv({ last_seq: 4 }), loaded, 'me')).toBe(1);
+    expect(unreadCount(conv({ last_seq: 4, last_read_seq: 4 }), loaded, 'me')).toBe(0);
+  });
+
+  it('never guesses when the server sent no marker', () => {
+    expect(unreadCount(conv({ last_read_seq: undefined }), five, 'me')).toBe(0);
+    expect(unreadCount(conv({ last_read_seq: null }), five, 'me')).toBe(0);
+  });
+
+  it('caps the badge at 99+', () => {
+    expect(unreadBadge(99)).toBe('99');
+    expect(unreadBadge(100)).toBe('99+');
+  });
+
+  it('moves markers forward only, and never invents one', () => {
+    const store = new ChatStore();
+    store.addConversation(conv());
+    store.addConversation({ id: 'legacy', kind: 'dm', members: [] });
+    store.setReadMarker('c', 4);
+    store.setReadMarker('c', 3);
+    store.setReadMarker('legacy', 9);
+    store.setReadMarker('missing', 1);
+    expect(store.conversations.find(c => c.id === 'c')?.last_read_seq).toBe(4);
+    expect(store.conversations.find(c => c.id === 'legacy')?.last_read_seq).toBeUndefined();
+  });
+});
+
+describe('unread review regressions', () => {
+  const conv = (over: Partial<ChatConversation> = {}): ChatConversation => ({
+    id: 'c', kind: 'dm', members: ['me', 'peer'], last_seq: 5, last_read_seq: 5, ...over,
+  });
+
+  it('never lets a stale list response rewind a read marker or position', () => {
+    const store = new ChatStore();
+    store.addConversation(conv());
+    store.addConversation(conv({ last_read_seq: 3, last_seq: 4 }));
+    expect(store.conversations[0]).toMatchObject({ last_read_seq: 5, last_seq: 5 });
+    store.addConversation(conv({ last_read_seq: 7, last_seq: 9 }));
+    expect(store.conversations[0]).toMatchObject({ last_read_seq: 7, last_seq: 9 });
+  });
+
+  it('records a live event position before history arrives', () => {
+    const store = new ChatStore();
+    store.addConversation(conv({ last_seq: 2, last_read_seq: 2 }));
+    store.applyGatewayEvent({ id: 'e7', topic: 'message.created', payload: { conversation_id: 'c', data: { message_id: 'm7', seq: 7 } } });
+    const row = store.conversations.find(c => c.id === 'c')!;
+    expect(row.last_seq).toBe(7);
+    expect(unreadCount(row, undefined, 'me')).toBe(5);
+  });
+
+  it('initializes an absent marker only when told the server supports them', () => {
+    const store = new ChatStore();
+    store.addConversation({ id: 'n', kind: 'channel', members: [] });
+    store.setReadMarker('n', 3);
+    expect(store.conversations[0].last_read_seq).toBeUndefined();
+    store.setReadMarker('n', 3, true);
+    expect(store.conversations[0].last_read_seq).toBe(3);
+  });
+
+  it('forgets removed conversations with their history', () => {
+    const store = new ChatStore();
+    store.addConversation(conv());
+    store.addConversation(conv({ id: 'keep' }));
+    store.mergeHistoryPage('c', [{ id: 'm1', conversation_id: 'c', sender_id: 'peer', seq: 1, ciphertext_b64: '', client_msg_id: 'x', sent_at: '' }]);
+    store.removeConversations(['c']);
+    expect(store.conversations.map(c => c.id)).toEqual(['keep']);
+    expect(store.messages.has('c')).toBe(false);
+    expect(store.historyCursor('c')).toBe(0);
+  });
+});
+
+describe('unread review regressions, round 3', () => {
+  const msg = (seq: number, sender = 'peer'): ChatMessage => ({
+    id: `m${seq}`, conversation_id: 'c', sender_id: sender, seq, ciphertext_b64: '', client_msg_id: `c${seq}`, sent_at: '',
+  });
+
+  it('keeps positions when a partial row (e.g. a channel from the channel list) is merged', () => {
+    const store = new ChatStore();
+    store.addConversation({ id: 'ch', kind: 'channel', members: [], last_seq: 5, last_read_seq: 3 });
+    store.addConversation(channelToConversation({ id: 'x', workspace_id: 'w', conversation_id: 'ch', name: 'general', kind: 'text', created_by: 'u', created_at: '' }));
+    expect(store.conversations[0]).toMatchObject({ last_seq: 5, last_read_seq: 3 });
+  });
+
+  it('never reads across an unloaded position', () => {
+    expect(readableThrough([msg(1), msg(3, 'me')], 0)).toBe(1);
+    expect(readableThrough([msg(1), msg(2), msg(3)], 1)).toBe(3);
+    expect(readableThrough(undefined, 4)).toBe(4);
+  });
+});
+

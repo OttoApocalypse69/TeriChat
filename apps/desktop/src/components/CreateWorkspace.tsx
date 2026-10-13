@@ -32,22 +32,22 @@ export default function CreateWorkspace({ onCreate }: {
   }
 
   return (
-    <div className="border-b border-zinc-800 p-2">
+    <div>
       <form onSubmit={create} className="flex gap-1" aria-label="Create workspace">
         <input
           aria-label="Workspace name"
           placeholder="new workspace name"
-          className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          className="field field-sm flex-1"
           value={name}
           disabled={busy}
           onChange={event => setName(event.target.value)}
         />
         <button type="submit" disabled={busy || !name.trim()}
-          className="rounded bg-zinc-700 px-2 py-1 text-xs font-semibold disabled:opacity-40">
+          className="btn btn-primary shrink-0">
           {busy ? 'Creating…' : 'Create'}
         </button>
       </form>
-      {error && <p role="alert" className="mt-1 text-xs text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-alert mt-1">{error}</p>}
     </div>
   );
 }

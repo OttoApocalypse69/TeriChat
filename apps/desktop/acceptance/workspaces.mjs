@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
+import { openWorkspaceDetails } from './ui-navigation.mjs';
 
 const desktop = fileURLToPath(new URL('../', import.meta.url));
 const backend = process.argv[2];
@@ -76,6 +77,7 @@ try {
   await login(a, names.owner);
   await a.getByLabel('Workspace name', { exact: true }).fill(workspaceName);
   await a.getByRole('form', { name: 'Create workspace', exact: true }).getByRole('button', { name: 'Create', exact: true }).click();
+  await openWorkspaceDetails(a);
   await a.getByText('Members · you are owner', { exact: true }).waitFor();
   const workspaces = await request('GET', '/v1/workspaces', accounts.owner.token);
   const workspace = workspaces.find(row => row.name === workspaceName);
@@ -88,6 +90,7 @@ try {
   await addForm.getByRole('button', { name: 'Add', exact: true }).click();
   await a.locator(`li[data-member-id="${accounts.member.user_id}"]`).waitFor();
   await login(b, names.member);
+  await openWorkspaceDetails(b);
   await b.getByText('Members · you are member', { exact: true }).waitFor();
   await b.locator(`li[data-member-id="${accounts.owner.user_id}"]`).waitFor();
   await request('GET', `/v1/workspaces/${workspace.id}/audit`, accounts.member.token, undefined, 403);
@@ -118,6 +121,7 @@ try {
   check('created channel and message survive client reload; security state stays honest');
   await a.screenshot({ path: path.join(artifact, 'workspace.png'), fullPage: true });
 
+  await openWorkspaceDetails(a);
   const memberRow = a.locator(`li[data-member-id="${accounts.member.user_id}"]`);
   await memberRow.getByRole('combobox').selectOption('moderator');
   await memberRow.getByRole('button', { name: 'Set role', exact: true }).click();

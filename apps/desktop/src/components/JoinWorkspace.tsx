@@ -40,27 +40,27 @@ export default function JoinWorkspace({ onJoin }: Props) {
   const joining = state.phase === 'joining';
 
   return (
-    <div className="p-2">
-      <h2 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+    <div className="flex flex-col gap-1.5">
+      <h2 className="label-mono">
         Join with code
       </h2>
       {state.phase === 'joined' ? (
-        <div className="space-y-1">
-          <p className="text-xs text-emerald-400">
+        <div className="flex flex-col items-start gap-1.5">
+          <p className="text-success">
             Joined workspace — you are in.
           </p>
           <button
             type="button"
             onClick={reset}
-            className="rounded bg-zinc-800 px-2 py-1 text-xs"
+            className="btn btn-sm btn-secondary"
           >
             Join another
           </button>
         </div>
       ) : (
-        <form onSubmit={submit} className="space-y-1">
+        <form onSubmit={submit} className="flex flex-col gap-1">
           <input
-            className="w-full rounded bg-zinc-800 px-2 py-1.5 font-mono text-sm"
+            className="field field-sm field-mono"
             placeholder="paste invite code"
             value={code}
             onChange={(e) => setCode(e.target.value)}
@@ -70,12 +70,12 @@ export default function JoinWorkspace({ onJoin }: Props) {
           <button
             type="submit"
             disabled={joining || !code.trim()}
-            className="w-full rounded bg-zinc-700 py-1 text-xs font-semibold disabled:opacity-40"
+            className="btn btn-secondary btn-block"
           >
             {joining ? 'Joining…' : 'Join workspace'}
           </button>
           {state.phase === 'error' && (
-            <p className="text-xs text-red-400">{state.message}</p>
+            <p className="text-alert">{state.message}</p>
           )}
         </form>
       )}

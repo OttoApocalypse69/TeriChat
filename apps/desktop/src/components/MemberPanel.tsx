@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiClient, type WorkspaceMemberBody } from '../lib/api';
+import { avatarGradient } from '../lib/avatar';
 import {
   friendlyMemberError, gateBan, gateGrant, gateKick, gateSetRole,
   grantableRoles, normalizeRole, roleHas, roleOrGuest, ROLE_NAMES, type RoleName,
 } from '../lib/members';
+
+// Permission roles reuse the community tag palette; the word always shows.
+const ROLE_TAG: Record<RoleName, string> = {
+  owner: 'tag-uv', admin: 'tag-sky', moderator: 'tag-amber', member: '', guest: 'tag-line',
+};
 
 interface Props {
   api: ApiClient;
@@ -105,27 +111,27 @@ function MemberDirectoryPanel({ api, workspaceId, myRole, meId, onLeft, onMyRole
     }
   }
 
-  const buttonClass = 'rounded bg-zinc-800 px-1.5 py-1 text-[11px] disabled:opacity-40';
+  const buttonClass = 'btn btn-sm btn-secondary';
   return (
-    <section aria-label="Workspace members" className="border-b border-zinc-800 p-2">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+    <section aria-label="Workspace members" className="panel-section">
+      <div className="panel-section-head">
+        <h2 className="label-mono">
           Members · you are {actor}
         </h2>
         <button type="button" disabled={busy} onClick={() => void load()}
-          className={buttonClass}>Refresh members</button>
+          className="btn btn-sm btn-ghost">Refresh members</button>
       </div>
-      {error && <p role="alert" className="mb-1 text-xs text-red-400">{error}</p>}
-      {loadError && <div role="alert" className="mb-1 text-xs text-red-400">
+      {error && <p role="alert" className="text-alert">{error}</p>}
+      {loadError && <div role="alert" className="text-alert flex flex-col items-start gap-2">
         <p>{loadError}</p>
         <button type="button" disabled={busy} className={buttonClass}
           onClick={() => void load(failedCursor.current)}>Retry members</button>
       </div>}
-      {loading && <p role="status" className="text-xs text-zinc-400">Loading members…</p>}
+      {loading && <p role="status" className="text-muted">Loading members…</p>}
       {!loading && !loadError && members.length === 0 &&
-        <p className="text-xs text-zinc-400">No current members.</p>}
+        <p className="text-muted">No current members.</p>}
       {grantable.length > 0 && (
-        <form aria-label="Add member" className="mb-2 flex gap-1" onSubmit={event => {
+        <form aria-label="Add member" className="flex gap-1" onSubmit={event => {
           event.preventDefault();
           const handle = addHandle.trim();
           if (!handle) return;
@@ -136,18 +142,18 @@ function MemberDirectoryPanel({ api, workspaceId, myRole, meId, onLeft, onMyRole
         }}>
           <input aria-label="Member handle" placeholder="handle → add" value={addHandle}
             disabled={busy} onChange={event => setAddHandle(event.target.value)}
-            className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 text-sm" />
+            className="field field-sm flex-1" />
           <select aria-label="New member role" value={addRole} disabled={busy}
             onChange={event => setAddRole(event.target.value as RoleName)}
-            className="rounded bg-zinc-800 px-1 text-sm">
+            className="field field-sm w-auto">
             {grantable.map(role => <option key={role}>{role}</option>)}
           </select>
-          <button type="submit" disabled={busy || !addHandle.trim()} className={buttonClass}>
+          <button type="submit" disabled={busy || !addHandle.trim()} className="btn btn-secondary shrink-0">
             {busyKey === 'add' ? 'Adding…' : 'Add'}
           </button>
         </form>
       )}
-      <ul aria-label="Current members" className="space-y-1.5">
+      <ul aria-label="Current members" className="flex flex-col gap-1.5">
         {members.map(member => {
           const uid = member.user_id;
           const self = uid === meId;
@@ -156,20 +162,23 @@ function MemberDirectoryPanel({ api, workspaceId, myRole, meId, onLeft, onMyRole
           const setGate = gateSetRole(actor, role, next);
           const kickGate = gateKick(actor, role);
           const banGate = gateBan(actor, role);
-          return <li key={uid} data-member-id={uid} className="rounded bg-zinc-900 p-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className="min-w-0 flex-1 truncate text-sm" title={uid}>
-                {member.display_name || member.handle} <span className="text-zinc-500">@{member.handle}</span>
-                {self && <span className="ml-1 text-[10px] uppercase text-zinc-500">you</span>}
+          return <li key={uid} data-member-id={uid} className="panel-row">
+            <div className="flex items-center gap-2">
+              <span aria-hidden className="avatar avatar-24" style={{ background: avatarGradient(member.handle) }}>
+                {(member.display_name || member.handle).slice(0, 1).toUpperCase()}
               </span>
-              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
+              <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" title={uid}>
+                {member.display_name || member.handle} <span className="font-normal text-ink-3">@{member.handle}</span>
+                {self && <span className="meta-mono ml-1.5">you</span>}
+              </span>
+              <span className={`tag ${ROLE_TAG[role ?? 'guest']}`}>
                 {member.role}
               </span>
             </div>
-            {!self && <div className="mt-1 flex flex-wrap items-center gap-1">
+            {!self && <div className="mt-2 flex flex-wrap items-center gap-1">
               <select aria-label={`Role for ${member.handle}`} value={next}
                 disabled={busy || !gateSetRole(actor, role, role ?? 'guest').ok}
-                className="rounded bg-zinc-800 px-1 py-1 text-xs"
+                className="field field-sm w-auto"
                 onChange={event => setDrafts(previous => ({ ...previous, [uid]: event.target.value as RoleName }))}>
                 {ROLE_NAMES.map(option => <option key={option}>{option}</option>)}
               </select>
@@ -181,17 +190,17 @@ function MemberDirectoryPanel({ api, workspaceId, myRole, meId, onLeft, onMyRole
                 className={buttonClass}>Kick</button>
               <button type="button" disabled={busy || !banGate.ok} title={banGate.reason}
                 onClick={() => void run(`ban:${uid}`, () => api.banMember(workspaceId, uid), () => setUnbanId(uid))}
-                className={`${buttonClass} text-red-300`}>Ban</button>
+                className="btn btn-sm btn-danger">Ban</button>
             </div>}
           </li>;
         })}
       </ul>
       {nextCursor !== null && <button type="button" disabled={busy || loadError !== null}
-        className={`mt-2 ${buttonClass}`} onClick={() => void load(nextCursor)}>Load more members</button>}
-      <p className="mt-1 text-[11px] text-zinc-500">
+        className={`self-start ${buttonClass}`} onClick={() => void load(nextCursor)}>Load more members</button>}
+      <p className="meta-mono">
         {members.length} loaded{nextCursor !== null ? ' · more available' : ''}. Refresh to check for changes.
       </p>
-      {roleHas(actor, 'BanMembers') && <form aria-label="Unban member" className="mt-2 flex gap-1"
+      {roleHas(actor, 'BanMembers') && <form aria-label="Unban member" className="flex gap-1"
         onSubmit={event => {
           event.preventDefault();
           const uid = unbanId.trim();
@@ -199,12 +208,12 @@ function MemberDirectoryPanel({ api, workspaceId, myRole, meId, onLeft, onMyRole
         }}>
         <input aria-label="User ID to unban" placeholder="user id → unban" value={unbanId} disabled={busy}
           onChange={event => setUnbanId(event.target.value)}
-          className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1.5 font-mono text-xs" />
-        <button type="submit" disabled={busy || !unbanId.trim()} className={buttonClass}>Unban</button>
+          className="field field-sm field-mono flex-1" />
+        <button type="submit" disabled={busy || !unbanId.trim()} className="btn btn-secondary shrink-0">Unban</button>
       </form>}
       <button type="button" disabled={busy}
         onClick={() => void run('leave', () => api.leaveWorkspace(workspaceId), () => onLeft(workspaceId))}
-        className="mt-2 w-full rounded bg-zinc-800 py-1 text-xs text-red-300 disabled:opacity-40"
+        className="btn btn-danger btn-block"
         title="Leave this workspace (last owner cannot leave)">
         {busyKey === 'leave' ? 'Leaving…' : 'Leave workspace'}
       </button>

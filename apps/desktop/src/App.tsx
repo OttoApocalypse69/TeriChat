@@ -12,13 +12,19 @@ import WorkspaceList from './components/WorkspaceList';
 import SessionPanel from './components/SessionPanel';
 import WorkspaceActivity from './components/WorkspaceActivity';
 import {
+  BrandMark, ChatIcon, DevicesIcon, LogoutIcon, OpenLockIcon, PanelIcon, SearchIcon,
+} from './components/icons';
+import { avatarGradient } from './lib/avatar';
+import {
   ApiClient,
+  ApiError,
   apiBaseUrl,
   encodeChatContent,
   encodeOpaqueText,
   MAX_ATTACHMENTS_PER_MESSAGE,
   newClientMsgId,
   type AttachmentRef,
+  type MemberProfileBody,
 } from './lib/api';
 import { GatewayClient, type GatewayOutboxEvent, type GatewayStatus } from './lib/gateway';
 import {
@@ -29,9 +35,16 @@ import {
 } from './lib/notifications';
 import {
   ChatStore,
+  MAX_GROUP_MEMBERS,
   gatewayEventInfo,
+  latestSeqFrom,
+  parseMemberHandles,
+  readableThrough,
+  senderLabel,
   sortConversations,
   toChatMessage,
+  unreadBadge,
+  unreadCount,
 } from './lib/store';
 import {
   WorkspaceStore,
@@ -43,6 +56,55 @@ interface Session {
   token: string;
   meId: string;
   handle: string;
+}
+
+/** Someone is here: the window has focus and the tab is visible. */
+function isPresent(): boolean {
+  return document.visibilityState !== 'hidden' && document.hasFocus();
+}
+
+/** Tracks a CSS media query; environments without matchMedia count as matching. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => typeof window.matchMedia !== 'function' || window.matchMedia(query).matches);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const list = window.matchMedia(query);
+    const update = () => setMatches(list.matches);
+    update();
+    list.addEventListener('change', update);
+    return () => list.removeEventListener('change', update);
+  }, [query]);
+  return matches;
+}
+
+// A read request that neither succeeds nor fails in this time stops blocking
+// retries for the same position (half-open connection, stalled server).
+const READ_REQUEST_TIMEOUT_MS = 15_000;
+
+// Typing is shown for this long after the last signal (senders re-send while
+// typing), and announced at most this often per conversation.
+const TYPING_TTL_MS = 6_000;
+const TYPING_RESEND_MS = 3_000;
+
+// Channel authors and typists are named from the workspace member list,
+// fetched when a name is missing: at most this often, and this many pages.
+const DIRECTORY_RETRY_MS = 30_000;
+const DIRECTORY_MAX_PAGES = 20;
+
+/** A typist: shown until `until`, as of message seq `after`. */
+interface Typist { until: number; after: number }
+type Typers = Record<string, Record<string, Typist>>;
+
+/** Drop expired typists (and empty rooms); unchanged state stays identical. */
+function pruneTypers(current: Typers, now: number): Typers {
+  let changed = false;
+  const next: Typers = {};
+  for (const [conversation, room] of Object.entries(current)) {
+    const live = Object.entries(room).filter(([, typist]) => typist.until > now);
+    if (live.length !== Object.keys(room).length) changed = true;
+    if (live.length > 0) next[conversation] = Object.fromEntries(live);
+  }
+  return changed ? next : current;
 }
 
 export default function App() {
@@ -80,6 +142,36 @@ function AuthenticatedApp({ session, onLogout }: {
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
+  // Who is typing where: conversation -> account -> expiry and watermark.
+  const [typers, setTypers] = useState<Typers>({});
+  // Signals and messages travel independently: a signal sent before a message
+  // this typist has since sent (it may arrive after it) is stale.
+  const noteTyping = useCallback((conversationId: string, userId: string, after: number) => {
+    if (latestSeqFrom(storeRef.current.messages.get(conversationId), userId) > after) return;
+    setTypers(current => pruneTypers({
+      ...current,
+      [conversationId]: { ...current[conversationId], [userId]: { until: Date.now() + TYPING_TTL_MS, after } },
+    }, Date.now()));
+  }, []);
+  // Their message landed: they are no longer typing it. A signal sent after
+  // that message (a replayed older row, a new draft) stays.
+  const noteSent = useCallback((conversationId: string, userId: string, seq: number) => {
+    setTypers(current => {
+      const typist = current[conversationId]?.[userId];
+      if (!typist || typist.after >= seq) return current;
+      const room = { ...current[conversationId] };
+      delete room[userId];
+      return pruneTypers({ ...current, [conversationId]: room }, Date.now());
+    });
+  }, []);
+  // One timer for the soonest expiry keeps the indicator honest without polling.
+  useEffect(() => {
+    const soonest = Math.min(...Object.values(typers).flatMap(room => Object.values(room).map(t => t.until)));
+    if (!Number.isFinite(soonest)) return;
+    const timer = setTimeout(() => setTypers(current => pruneTypers(current, Date.now())), Math.max(0, soonest - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [typers]);
+
 
   const [status, setStatus] = useState<GatewayStatus>('disconnected');
   // null means never opened. Hiding an opened inventory keeps pending
@@ -91,6 +183,7 @@ function AuthenticatedApp({ session, onLogout }: {
     if (sessionsOpen) sessionsRegion.current?.focus();
   }, [sessionsOpen]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [navigationQuery, setNavigationQuery] = useState('');
   // Presentation only: hiding a pane must not unmount its composer or panels.
   const [pane, setPane] = useState<'navigation' | 'conversation' | 'details'>('navigation');
   const navigationRef = useRef<HTMLElement>(null);
@@ -101,7 +194,11 @@ function AuthenticatedApp({ session, onLogout }: {
     if (pane === 'navigation') (navigationRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]') ?? navigationRef.current)?.focus();
     if (pane === 'details') detailsRef.current?.focus();
   }, [pane, selectedId]);
+  // Bumped on every conversation selection change, so slow async work can
+  // tell whether the user navigated elsewhere while it was pending.
+  const navigationRevision = useRef(0);
   function openConversation(id: string) {
+    navigationRevision.current += 1;
     setSelectedId(id);
     setPane('conversation');
   }
@@ -200,12 +297,30 @@ function AuthenticatedApp({ session, onLogout }: {
     [api, bump],
   );
 
+  // Channel access can end server-side (kick, ban): the server drops the
+  // participation, so the channel disappears from the next list. Each row
+  // remembers the latest list request that confirmed it; only the newest
+  // request's answer may prune, and only rows confirmed before it was issued.
+  const listRevision = useRef(0);
+  const confirmedAt = useRef(new Map<string, number>());
   const refreshConversations = useCallback(async () => {
     if (!live.current) return;
+    const revision = ++listRevision.current;
     try {
       const rows = await api.listConversations();
       if (!live.current) return;
-      for (const row of rows) storeRef.current.addConversation(row);
+      for (const row of rows) {
+        storeRef.current.addConversation(row);
+        confirmedAt.current.set(row.id, Math.max(confirmedAt.current.get(row.id) ?? 0, revision));
+      }
+      if (revision === listRevision.current) {
+        const listed = new Set(rows.map(row => row.id));
+        const revoked = storeRef.current.conversations
+          .filter(c => c.kind === 'channel' && !listed.has(c.id) && (confirmedAt.current.get(c.id) ?? Infinity) < revision)
+          .map(c => c.id);
+        storeRef.current.removeConversations(revoked);
+        for (const id of revoked) confirmedAt.current.delete(id);
+      }
       bump();
     } catch (err) {
       if (live.current) setError(err instanceof Error ? err.message : 'conversations failed');
@@ -282,6 +397,11 @@ function AuthenticatedApp({ session, onLogout }: {
       // Snapshot focus at arrival: a DM that lands while the window is
       // unfocused earns one toast after its text loads (see below).
       const wasUnfocused = isWindowUnfocused();
+      // An event for a conversation this client has never listed (a group or
+      // DM someone just created with us) needs the list to name and show it.
+      const eventConversation = gatewayEventInfo(event)?.conversationId;
+      const unknown = eventConversation !== undefined
+        && !storeRef.current.conversations.some(c => c.id === eventConversation);
       const fresh = storeRef.current.applyGatewayEvent(event);
       const replay = fresh ? null : gatewayEventInfo(event);
       // Deduplicate event effects, not an unfinished history fetch.
@@ -292,17 +412,29 @@ function AuthenticatedApp({ session, onLogout }: {
       );
       bump();
       if (info) {
+        const conv = storeRef.current.conversations.find(
+          c => c.id === info.conversationId,
+        );
+        // Rows this client cannot classify yet (never listed, or a DM without
+        // its peer) need the list before anything, a toast included, uses them.
+        const unresolved = unknown || (conv?.kind === 'dm' && !conv.peer_handle);
+        const listed = unresolved ? refreshConversations() : Promise.resolve();
         // Events carry ids only; use the same serialized page drain as selection.
-        void refreshHistory(info.conversationId).then(() => {
+        void Promise.all([refreshHistory(info.conversationId), listed]).then(() => {
+          if (!live.current) return;
+          const row = (storeRef.current.messages.get(info.conversationId) ?? [])
+            .find((m) => m.id === info.messageId);
+          if (row) noteSent(info.conversationId, row.sender_id, row.seq);
           // Exactly one toast per incoming message: only first-seen events
           // (`fresh`) notify, never redeliveries, and only the fetched row
           // matching this event (never a neighbor's text).
-          if (!live.current || !wasUnfocused || !fresh) return;
+          if (!wasUnfocused || !fresh) return;
           const arrived = storeRef.current.conversations.find(
             (c) => c.id === info.conversationId,
           ) ?? null;
-          const row = (storeRef.current.messages.get(info.conversationId) ?? [])
-            .find((m) => m.id === info.messageId);
+          // A placeholder the list never resolved has no real kind (it may be
+          // a group): never toast it as a DM.
+          if (!arrived || arrived.members.length === 0) return;
           if (!row) return;
           const content = buildDmNotification(meId, arrived, row);
           if (!content) return;
@@ -313,10 +445,6 @@ function AuthenticatedApp({ session, onLogout }: {
           // refreshHistory handles fetch errors internally; this guards the
           // toast tail against unexpected throws without breaking messaging.
         });
-        const conv = storeRef.current.conversations.find(
-          c => c.id === info.conversationId,
-        );
-        if (conv?.kind === 'dm' && !conv.peer_handle) void refreshConversations();
       }
     };
 
@@ -341,6 +469,9 @@ function AuthenticatedApp({ session, onLogout }: {
       },
       onEvent,
       onDuplicateEvent: onEvent,
+      onTyping: ({ conversationId, userId, lastSeq }) => {
+        if (live.current) noteTyping(conversationId, userId, lastSeq);
+      },
     });
     gatewayRef.current = gw;
     gw.connect();
@@ -348,7 +479,7 @@ function AuthenticatedApp({ session, onLogout }: {
       gw.close();
       gatewayRef.current = null;
     };
-  }, [api, bump, token, refreshHistory, refreshConversations]);
+  }, [api, bump, token, refreshHistory, refreshConversations, noteTyping, noteSent]);
 
   // Load conversations + workspaces once per login so DMs survive reload
   // with peer names (not UUIDs).
@@ -389,6 +520,23 @@ function AuthenticatedApp({ session, onLogout }: {
     await refreshHistory(conv.id);
   }
 
+  /** Create a group from free-form handles, then land in it with names resolved. */
+  async function createGroup(memberInput: string): Promise<void> {
+    const handles = parseMemberHandles(memberInput, handle);
+    if (handles.length < 2) throw new Error('A group needs at least two other people’s handles. For one person, open a DM.');
+    if (handles.length > MAX_GROUP_MEMBERS) throw new Error(`A group can start with at most ${MAX_GROUP_MEMBERS} other people.`);
+    const revision = navigationRevision.current;
+    const conv = await api.createGroup(handles);
+    if (!live.current) return;
+    storeRef.current.addConversation(conv);
+    // Never yank a user (and their draft) out of a conversation they opened
+    // while the group was being created; the new group is listed either way.
+    if (navigationRevision.current === revision) openConversation(conv.id);
+    bump();
+    await refreshConversations();
+    await refreshHistory(conv.id);
+  }
+
   function selectWorkspace(id: string): void {
     wsStoreRef.current.selectWorkspace(id);
     bump();
@@ -405,6 +553,7 @@ function AuthenticatedApp({ session, onLogout }: {
       ...wsStoreRef.current.workspaces.filter(workspace => workspace.id !== created.id), created,
     ]);
     wsStoreRef.current.selectWorkspace(created.id);
+    navigationRevision.current += 1;
     setSelectedId(null);
     bump();
     // The discarded initial list may contain other memberships not yet loaded.
@@ -440,6 +589,11 @@ function AuthenticatedApp({ session, onLogout }: {
   /** Drop a left workspace from local state and clear its selection. */
   function handleLeftWorkspace(workspaceId: string): void {
     if (!live.current) return;
+    // Its channels are no longer reachable: drop them (and their unread
+    // counts) instead of keeping ghost rows until reload.
+    storeRef.current.removeConversations(
+      wsStoreRef.current.channelsFor(workspaceId).map(channel => channel.conversation_id),
+    );
     workspaceListRevision.current += 1;
     setWsLoading(false);
     wsStoreRef.current.setWorkspaces(
@@ -476,12 +630,70 @@ function AuthenticatedApp({ session, onLogout }: {
       openConversation(channel.conversation_id);
       bump();
       await refreshHistory(channel.conversation_id);
+      // History made us a participant; the summary now carries the marker.
+      await refreshConversations();
     } catch (err) {
       // Let ChannelList render the friendly (403-aware) message; rethrow so
       // its form error path triggers.
       throw new Error(friendlyChannelError(err));
     }
   }
+
+  // Announce typing at most every TYPING_RESEND_MS per conversation. Servers
+  // without the route answer 404 once; stop asking for this login then.
+  const typingSentAt = useRef(new Map<string, number>());
+  const typingSupported = useRef(true);
+  function announceTyping(): void {
+    if (!selected || !typingSupported.current) return;
+    const id = selected.id;
+    const now = Date.now();
+    if (now - (typingSentAt.current.get(id) ?? -Infinity) < TYPING_RESEND_MS) return;
+    typingSentAt.current.set(id, now);
+    void api.sendTyping(id).catch(err => {
+      if (err instanceof ApiError && err.status === 404) typingSupported.current = false;
+    });
+  }
+  // Channels list no roster, so their authors and typists are named from the
+  // workspace member list, fetched (paged, bounded) when a name is missing.
+  const [directory, setDirectory] = useState<Record<string, MemberProfileBody>>({});
+  const directoryFetchedAt = useRef(new Map<string, number>());
+  const typistIds = selected
+    ? Object.entries(typers[selected.id] ?? {})
+      .filter(([, typist]) => typist.until > Date.now())
+      .map(([userId]) => userId)
+    : [];
+  const typingNames = typistIds.map(userId => senderLabel(meId, userId, selected, directory));
+  const channelWorkspaceId = selected?.kind === 'channel'
+    && wsStore.selectedChannelConversationId() === selected.id
+    ? wsStore.selectedWorkspaceId
+    : null;
+  const unnamed = channelWorkspaceId
+    ? [...new Set([...typistIds, ...messages.map(m => m.sender_id)])]
+      .filter(id => id !== meId && !directory[id])
+      .sort()
+      .join(',')
+    : '';
+  useEffect(() => {
+    if (!channelWorkspaceId || !unnamed) return;
+    const fetchedAt = directoryFetchedAt.current.get(channelWorkspaceId) ?? -Infinity;
+    if (Date.now() - fetchedAt < DIRECTORY_RETRY_MS) return;
+    directoryFetchedAt.current.set(channelWorkspaceId, Date.now());
+    void (async () => {
+      const found: Record<string, MemberProfileBody> = {};
+      let after: string | undefined;
+      for (let page = 0; page < DIRECTORY_MAX_PAGES; page += 1) {
+        const { members, next_cursor } = await api.listMembers(channelWorkspaceId, after);
+        for (const { user_id, handle, display_name } of members) {
+          found[user_id] = { user_id, handle, display_name };
+        }
+        if (!next_cursor) break;
+        after = next_cursor;
+      }
+      if (live.current) setDirectory(current => ({ ...current, ...found }));
+    })().catch(() => {
+      // Names fall back to short ids; a later unknown name retries.
+    });
+  }, [api, channelWorkspaceId, unnamed]);
 
   async function send(text: string): Promise<void> {
     if (!selected) return;
@@ -494,6 +706,12 @@ function AuthenticatedApp({ session, onLogout }: {
       });
       if (!live.current) return;
       storeRef.current.mergeOutgoing(toChatMessage(sent));
+      // The next keystroke starts a new message: announce it right away.
+      typingSentAt.current.delete(sent.conversation_id);
+      // Mirror the server: a caught-up sender's marker steps over their own
+      // message; a sender with unread messages keeps them unread.
+      const sentIn = storeRef.current.conversations.find(c => c.id === sent.conversation_id);
+      if (sentIn?.last_read_seq === sent.seq - 1) storeRef.current.setReadMarker(sent.conversation_id, sent.seq);
       bump();
     } finally {
       if (live.current) setSending(false);
@@ -550,7 +768,9 @@ function AuthenticatedApp({ session, onLogout }: {
 
   /** Download an attachment to disk via an object URL + anchor click. */
   async function downloadAttachment(ref: AttachmentRef): Promise<void> {
-    const { blob, filename } = await api.downloadAttachment(ref.id);
+    // The ref carries the sender's exact name; the header is a fallback.
+    const { blob, filename: served } = await api.downloadAttachment(ref.id);
+    const filename = ref.filename || served;
     const url = URL.createObjectURL(blob);
     try {
       const anchor = document.createElement('a');
@@ -576,53 +796,209 @@ function AuthenticatedApp({ session, onLogout }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
+  // ---- Private unread state (never shared with other members) ----
+  const unreadByConversation = new Map(
+    store.conversations.map(c => [c.id, unreadCount(c, store.messages.get(c.id), meId)]),
+  );
+  const unreadWorkspaceIds = new Set(wsStore.workspaces
+    .filter(w => wsStore.channelsFor(w.id).some(ch => (unreadByConversation.get(ch.conversation_id) ?? 0) > 0))
+    .map(w => w.id));
+
+  // Whether the conversation pane is on screen, by the same rules as the CSS:
+  // phones show one pane, the details pane replaces it below 1200px, and the
+  // sessions overlay hides the whole layout.
+  const wideLayout = useMediaQuery('(min-width: 768px)');
+  const fullLayout = useMediaQuery('(min-width: 1200px)');
+  const conversationShown = !sessionsOpen && (wideLayout
+    ? !(pane === 'details' && !fullLayout)
+    : pane === 'conversation');
+  const [shown, setShown] = useState({ now: conversationShown, epoch: 0 });
+  if (shown.now !== conversationShown) {
+    setShown({ now: conversationShown, epoch: conversationShown ? shown.epoch + 1 : shown.epoch });
+  }
+
+  // Whether someone is actually here: window focused and tab visible. Each
+  // return counts like reopening the conversation (a new NEW snapshot).
+  const [presence, setPresence] = useState(() => ({ here: isPresent(), epoch: 0 }));
+  useEffect(() => {
+    const update = () => setPresence(current => {
+      const here = isPresent();
+      return here === current.here ? current : { here, epoch: here ? current.epoch + 1 : current.epoch };
+    });
+    window.addEventListener('focus', update);
+    window.addEventListener('blur', update);
+    document.addEventListener('visibilitychange', update);
+    return () => {
+      window.removeEventListener('focus', update);
+      window.removeEventListener('blur', update);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, []);
+
+  // The "new" divider sits where the marker was when the conversation was
+  // opened, shown again or returned to, and moves only when something new is
+  // unread then; reading does not move it. Derived during render (not in an
+  // effect) so the divider exists in the very first commit, before any read.
+  const viewKey = `${selectedId ?? ''}:${shown.epoch}:${presence.epoch}`;
+  const [unreadSnapshot, setUnreadSnapshot] = useState<{ key: string | null; id: string | null; seq: number | null }>({ key: null, id: null, seq: null });
+  if (unreadSnapshot.key !== viewKey) {
+    const seq = selected?.last_read_seq;
+    const unread = selectedId ? (unreadByConversation.get(selectedId) ?? 0) : 0;
+    const kept = unreadSnapshot.id === selectedId ? unreadSnapshot.seq : null;
+    setUnreadSnapshot({ key: viewKey, id: selectedId, seq: seq != null && unread > 0 ? seq : kept });
+  }
+
+  // Whether the history is scrolled to its end. Written synchronously by the
+  // conversation's layout effect so a read never outruns the scroll position.
+  const tailVisible = useRef(true);
+  const [tailTick, setTailTick] = useState(0);
+  const handleTailVisible = useCallback((visible: boolean) => {
+    if (tailVisible.current === visible) return;
+    tailVisible.current = visible;
+    setTailTick(tick => tick + 1);
+  }, []);
+
+  // Re-check visibility when the window regains focus or the tab is shown.
+  const [attentionTick, setAttentionTick] = useState(0);
+  useEffect(() => {
+    const poke = () => setAttentionTick(tick => tick + 1);
+    window.addEventListener('focus', poke);
+    document.addEventListener('visibilitychange', poke);
+    return () => {
+      window.removeEventListener('focus', poke);
+      document.removeEventListener('visibilitychange', poke);
+    };
+  }, []);
+
+  // A conversation is read only while someone can see it: its pane has
+  // layout, the tab is visible, the window has focus and sessions are closed.
+  // Unread messages count as seen only once the history's end is on screen.
+  const readInFlight = useRef(new Map<string, number>());
+  // A server that returned any marker supports them, so a conversation added
+  // this session without one (e.g. a new channel) can still be marked read.
+  const markersSupported = store.conversations.some(c => typeof c.last_read_seq === 'number');
+  const knownMarker = selected ? (selected.last_read_seq ?? (markersSupported ? 0 : null)) : null;
+  // Only history loaded without holes from the marker counts as seen.
+  const readableSeq = selectedId && knownMarker != null
+    ? readableThrough(store.messages.get(selectedId), knownMarker)
+    : 0;
+  useEffect(() => {
+    if (!selected) return;
+    const known = knownMarker;
+    if (known == null || readableSeq <= known) return;
+    if (sessionsOpen || document.visibilityState === 'hidden' || !document.hasFocus()) return;
+    if ((conversationRef.current?.getClientRects().length ?? 0) === 0) return;
+    if (!tailVisible.current) return;
+    const id = selected.id;
+    const target = readableSeq;
+    if ((readInFlight.current.get(id) ?? -1) >= target) return;
+    readInFlight.current.set(id, target);
+    const release = () => {
+      if (readInFlight.current.get(id) === target) readInFlight.current.delete(id);
+    };
+    // A stalled request is aborted, not abandoned: it cannot pile up behind
+    // retries, and it stops suppressing them.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+      release();
+    }, READ_REQUEST_TIMEOUT_MS);
+    void api.markRead(id, target, controller.signal).then(marker => {
+      if (!live.current) return;
+      // The server just proved membership; a list issued earlier must not prune it.
+      confirmedAt.current.set(id, listRevision.current);
+      storeRef.current.setReadMarker(id, marker.last_read_seq, true);
+      bump();
+    }, () => {
+      // Unconfirmed: the next message, focus change or selection retries.
+    }).finally(() => {
+      clearTimeout(timeout);
+      release();
+    });
+  }, [api, bump, selected, knownMarker, readableSeq, sessionsOpen, pane, attentionTick, tailTick]);
+
+  const baseTitle = useRef(document.title);
+  const totalUnread = [...unreadByConversation.values()].reduce((sum, n) => sum + n, 0);
+  useEffect(() => {
+    document.title = totalUnread > 0 ? `(${unreadBadge(totalUnread)}) ${baseTitle.current}` : baseTitle.current;
+  }, [totalUnread]);
+  useEffect(() => {
+    const base = baseTitle.current;
+    return () => { document.title = base; };
+  }, []);
+
+  const closeSessions = () => { setSessionsOpen(false); sessionsButton.current?.focus(); };
   return (
-    <div className="chat-shell flex h-full flex-col bg-zinc-950 text-zinc-100" data-pane={pane}>
-      <header className="app-header flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
-        <span className="min-w-0 text-sm font-semibold">
-          <span className="brand-name">UnknownChat</span> <span className="account-handle block truncate text-xs font-normal text-zinc-400">@{handle}</span>
+    <div className="chat-shell" data-pane={pane} data-sessions-open={sessionsOpen === true}>
+      <header className="app-header">
+        <span className="topbar-brand">
+          <span className="topbar-mark"><BrandMark /></span>
+          <span className="brand-name">UnknownChat</span>
+          <span className="topbar-phase tag tag-line">Alpha 0</span>
         </span>
-        <span className="flex items-center gap-3">
-          <ConnectionIndicator status={status} />
+        <span className="topbar-actions">
           <button ref={sessionsButton} type="button" aria-expanded={sessionsOpen ?? false} aria-controls="account-sessions"
-            className="rounded bg-zinc-800 px-2 py-1 text-xs" onClick={() => setSessionsOpen(open => !open)}>Sessions</button>
+            className="btn btn-ghost" onClick={() => setSessionsOpen(open => !open)}><DevicesIcon />Sessions</button>
           <button
             type="button"
             onClick={logout}
-            className="rounded bg-zinc-800 px-2 py-1 text-xs"
+            className="btn btn-ghost"
           >
-            Log out
+            <LogoutIcon />Log out
           </button>
+          <span className="topbar-divider" aria-hidden />
+          <span className="topbar-account">
+            <span className="avatar avatar-28" aria-hidden style={{ background: avatarGradient(handle) }}>{handle.slice(0, 1).toUpperCase()}</span>
+            <span className="account-handle">@{handle}</span>
+          </span>
         </span>
       </header>
       {sessionsOpen !== null && <div id="account-sessions" hidden={!sessionsOpen} ref={sessionsRegion} tabIndex={-1}
-        className="max-h-[60dvh] shrink-0 overflow-y-auto border-b border-zinc-700" onKeyDown={event => {
-          if (event.key === 'Escape') { setSessionsOpen(false); sessionsButton.current?.focus(); }
+        onKeyDown={event => {
+          if (event.key === 'Escape') closeSessions();
         }}>
-        <button className="nav-action mx-4 mt-3" onClick={() => { setSessionsOpen(false); sessionsButton.current?.focus(); }}>Close sessions</button>
+        <button className="nav-action" onClick={closeSessions}>Close sessions</button>
         <SessionPanel api={api} onSessionEnded={sessionEnded} />
       </div>}
-      <div className="chat-layout flex min-h-0 flex-1">
-        <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation flex shrink-0 flex-col border-r border-zinc-800">
-          <h1 className="px-4 pb-2 pt-4 text-lg font-semibold">Conversations</h1>
-          {selectedWorkspace && <button type="button" className="details-toggle nav-action mx-3 mb-2" onClick={() => setPane('details')}>Workspace details</button>}
-          {selected && <button type="button" className="mobile-only nav-action mx-3 mb-2" onClick={() => setPane('conversation')}>Return to conversation</button>}
-          <div className="shrink-0">
-            <WorkspaceList
-              workspaces={wsStore.workspaces}
-              selectedWorkspaceId={selectedWorkspaceId}
-              loading={wsLoading}
-              error={wsError}
-              onSelect={selectWorkspace}
-              onRetry={() => void refreshWorkspaces()}
-            />
+      <div className="chat-layout">
+        <nav className="workspace-rail" aria-label="Workspace switcher">
+          <button type="button" className="rail-tile rail-home" title="Conversations" aria-label="Show conversations" onClick={() => setPane('navigation')}>
+            <span className="rail-tile-rim" aria-hidden />
+            <span className="rail-tile-face" aria-hidden><ChatIcon size={20} /></span>
+          </button>
+          <span className="rail-divider" aria-hidden />
+          <WorkspaceList
+            workspaces={wsStore.workspaces}
+            unreadWorkspaceIds={unreadWorkspaceIds}
+            selectedWorkspaceId={selectedWorkspaceId}
+            loading={wsLoading}
+            error={wsError}
+            onSelect={id => { selectWorkspace(id); setPane('navigation'); }}
+            onRetry={() => void refreshWorkspaces()}
+          />
+          <span className="rail-version rail-label" title="Alpha demo">α0</span>
+        </nav>
+        <aside ref={navigationRef} tabIndex={-1} aria-label="Conversations and workspaces" className="chat-navigation">
+          <div className="navigation-heading">
+            <h1>
+              <span className="display-m">{selectedWorkspace?.name ?? 'Conversations'}</span>
+              {selectedWorkspace && <span className="navigation-kind">WORKSPACE</span>}
+            </h1>
+            <span className="meta-mono">{selectedWorkspace ? `you are ${selectedWorkspace.my_role}` : 'Direct messages'}</span>
           </div>
-          <CreateWorkspace onCreate={createWorkspace} />
-          <div className="shrink-0 border-b border-zinc-800">
-            <JoinWorkspace onJoin={joinByCode} />
-          </div>
+          {wsError && <p role="alert" className="text-alert mx-4 mt-3">{wsError}</p>}
+          <label className="navigation-search">
+            <SearchIcon size={14} />
+            <input type="search" aria-label="Filter conversations and channels" placeholder="Find a conversation…" value={navigationQuery} onChange={event => setNavigationQuery(event.target.value)} />
+          </label>
+          {(selectedWorkspace || selected) && <div className="navigation-shortcuts">
+            {selectedWorkspace && <button type="button" className="details-toggle nav-row" aria-controls="workspace-details" onClick={() => setPane('details')}><PanelIcon />Workspace details</button>}
+            {selected && <button type="button" className="mobile-only nav-action" onClick={() => setPane('conversation')}>Return to conversation</button>}
+          </div>}
           <div className="shrink-0">
             <ChannelList
+              filter={navigationQuery}
+              unreadByConversation={unreadByConversation}
               key={selectedWorkspaceId ?? 'no-workspace'}
               workspaceName={selectedWorkspace?.name ?? null}
               channels={channels}
@@ -635,25 +1011,40 @@ function AuthenticatedApp({ session, onLogout }: {
           </div>
           <div className="shrink-0">
             <ConversationList
+              filter={navigationQuery}
+              meId={meId}
               conversations={dmConversations}
               messagesByConversation={store.messages}
               selectedId={selectedId}
               onSelect={openConversation}
               onOpenDm={openDm}
+              onCreateGroup={createGroup}
             />
           </div>
-        </aside>
-        <main ref={conversationRef} tabIndex={-1} aria-label="Conversation" className="chat-main min-w-0 flex-1" key={selectedId ?? 'none'}>
-          <div className="pane-toolbar">
-            <button type="button" className="mobile-only nav-action" onClick={() => setPane('navigation')}>← Back to conversations</button>
-            {selectedWorkspace && <button type="button" className="details-toggle nav-action" aria-controls="workspace-details" onClick={() => setPane('details')}>Workspace details</button>}
+          <div className="workspace-actions">
+            <h2 className="label-mono px-2">Make room for your people</h2>
+            <div className="workspace-actions-card">
+              <CreateWorkspace onCreate={createWorkspace} />
+              <JoinWorkspace onJoin={joinByCode} />
+            </div>
           </div>
+          <div className="navigation-account">
+            <span className="avatar avatar-32" aria-hidden style={{ background: avatarGradient(handle) }}>{handle.slice(0, 1).toUpperCase()}</span>
+            <span className="min-w-0"><strong className="block truncate">@{handle}</strong><span className="meta-mono">Alpha 0 · It sends bro</span></span>
+          </div>
+        </aside>
+        <main ref={conversationRef} tabIndex={-1} aria-label="Conversation" className="chat-main" key={selectedId ?? 'none'}>
           <ConversationView
+            headerActions={<div className="pane-toolbar">
+            <button type="button" className="mobile-only nav-action" onClick={() => setPane('navigation')}>← Back to conversations</button>
+            {selectedWorkspace && <button type="button" className="details-toggle btn btn-ghost" aria-controls="workspace-details" aria-expanded={pane === 'details'}
+              onClick={() => setPane(pane === 'details' ? 'conversation' : 'details')}><PanelIcon />Workspace details</button>}
+          </div>}
             isActivePane={pane === 'conversation'}
             conversation={selected}
             messages={messages}
             meId={meId}
-            status={status}
+            meHandle={handle}
             loading={loading}
             sending={sending}
             error={error}
@@ -662,15 +1053,19 @@ function AuthenticatedApp({ session, onLogout }: {
             onDownload={downloadAttachment}
             fetchAttachmentBytes={fetchAttachmentBytes}
             title={selected?.kind === 'channel' ? channelTitle : null}
+            unreadAfterSeq={unreadSnapshot.key === viewKey ? unreadSnapshot.seq : null}
+            onTailVisibleChange={handleTailVisible}
+            typingNames={typingNames}
+            onDraftActivity={announceTyping}
+            directory={directory}
           />
         </main>
         {selectedWorkspace && (
-          <aside ref={detailsRef} tabIndex={-1} id="workspace-details" aria-label="Workspace details" className="workspace-details shrink-0 overflow-y-auto border-l border-zinc-800">
-            <button type="button" className="details-toggle nav-action m-3" onClick={() => setPane(selected ? 'conversation' : 'navigation')}>← Back</button>
-            <div className="border-b border-zinc-800 p-2">
-              <h2 className="truncate text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-                {selectedWorkspace.name} · {selectedWorkspace.my_role}
-              </h2>
+          <aside ref={detailsRef} tabIndex={-1} id="workspace-details" aria-label="Workspace details" className="workspace-details">
+            <div className="details-header">
+              <button type="button" className="details-toggle nav-action" onClick={() => setPane(selected ? 'conversation' : 'navigation')}>← Back</button>
+              <h2 className="truncate">{selectedWorkspace.name}</h2>
+              <span className="tag tag-line ml-auto">{selectedWorkspace.my_role}</span>
             </div>
             <MemberPanel
               key={`members-${selectedWorkspace.id}`}
@@ -691,6 +1086,11 @@ function AuthenticatedApp({ session, onLogout }: {
           </aside>
         )}
       </div>
+      <footer className="system-bar">
+        <ConnectionIndicator status={status} />
+        <span className="system-bar-trust"><OpenLockIcon size={13} /><strong>Not end-to-end encrypted</strong><span className="system-bar-detail"> · demo plaintext</span></span>
+        <span className="system-bar-end">Alpha 0 · It sends bro</span>
+      </footer>
     </div>
   );
 }

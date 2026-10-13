@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { decodeOpaqueText } from '../lib/api';
+import { avatarGradient } from '../lib/avatar';
 import {
   avatarInitial,
   conversationLabel,
@@ -8,28 +9,58 @@ import {
   lastActivityAt,
   sortConversations,
   truncatePreview,
+  unreadBadge,
+  unreadCount,
   type ChatConversation,
   type ChatMessage,
 } from '../lib/store';
+import { PeopleIcon, PlusIcon } from './icons';
 
 interface Props {
+  filter?: string;
+  meId?: string;
   conversations: ChatConversation[];
   messagesByConversation: Map<string, ChatMessage[]>;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onOpenDm: (peerHandle: string) => Promise<void>;
+  /** Resolves once the group exists; rejects with a user-facing message. */
+  onCreateGroup?: (memberInput: string) => Promise<void>;
 }
 
 export default function ConversationList({
+  filter = '',
+  meId,
   conversations,
   messagesByConversation,
   selectedId,
   onSelect,
   onOpenDm,
+  onCreateGroup,
 }: Props) {
   const [peer, setPeer] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [groupMembers, setGroupMembers] = useState('');
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [groupBusy, setGroupBusy] = useState(false);
+
+  async function createGroup(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    if (!onCreateGroup || groupBusy || !groupMembers.trim()) return;
+    setGroupError(null);
+    setGroupBusy(true);
+    try {
+      await onCreateGroup(groupMembers);
+      setGroupMembers('');
+      setGroupOpen(false);
+    } catch (err) {
+      setGroupError(err instanceof Error ? err.message : 'group creation failed');
+    } finally {
+      setGroupBusy(false);
+    }
+  }
 
   async function open(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -48,14 +79,40 @@ export default function ConversationList({
 
   // Newest activity first; quiet conversations fall back to the
   // server-reported last position so reloads keep a stable order.
-  const ordered = sortConversations(conversations, messagesByConversation);
+  const ordered = sortConversations(conversations, messagesByConversation).filter(c =>
+    `${conversationLabel(c, meId)} ${conversationSublabel(c)}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()),
+  );
 
   return (
     <div className="conversation-list flex flex-col">
-      <h2 className="px-3 pb-1 pt-4 text-xs font-semibold uppercase tracking-wide text-zinc-400">Direct messages</h2>
-      <form onSubmit={open} className="space-y-2 p-3">
+      <div className="nav-section-head">
+        <h2 className="label-mono">Direct messages</h2>
+        {onCreateGroup && <button type="button" className="btn btn-sm btn-ghost" aria-expanded={groupOpen}
+          aria-controls="new-group-form" onClick={() => { setGroupOpen(open => !open); setGroupError(null); }}>
+          <PlusIcon size={13} />New group
+        </button>}
+      </div>
+      {onCreateGroup && groupOpen && (
+        <form id="new-group-form" aria-label="New group" onSubmit={createGroup} className="flex flex-col gap-1 pb-1">
+          <input
+            className="field field-sm"
+            aria-label="Group member handles"
+            placeholder="handles, comma-separated"
+            value={groupMembers}
+            disabled={groupBusy}
+            onChange={(e) => setGroupMembers(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button type="submit" disabled={groupBusy || !groupMembers.trim()} className="btn btn-primary btn-block">
+            {groupBusy ? 'Creating…' : 'Create group'}
+          </button>
+          {groupError && <p role="alert" className="text-alert">{groupError}</p>}
+        </form>
+      )}
+      <form onSubmit={open} className="nav-inline-form">
         <input
-          className="w-full rounded bg-zinc-800 px-2 py-1.5 text-sm"
+          className="field field-sm flex-1"
           aria-label="Peer handle"
           placeholder="peer handle → open DM"
           value={peer}
@@ -64,13 +121,13 @@ export default function ConversationList({
         <button
           type="submit"
           disabled={busy || !peer.trim()}
-          className="w-full rounded bg-zinc-700 py-1 text-xs font-semibold disabled:opacity-40"
+          className="btn btn-secondary shrink-0"
         >
           {busy ? '…' : 'Open DM'}
         </button>
-        {error && <p className="text-xs text-red-400">{error}</p>}
       </form>
-      <ul className="flex-1 overflow-y-auto p-1">
+      {error && <p className="text-alert px-1 pt-1">{error}</p>}
+      <ul className="pt-1">
         {ordered.map((c) => {
           const loaded = messagesByConversation.get(c.id) ?? [];
           const last = loaded.length > 0 ? loaded[loaded.length - 1] : null;
@@ -83,48 +140,42 @@ export default function ConversationList({
             lastActivityAt(c, loaded.length > 0 ? loaded : undefined),
           );
           const sub = conversationSublabel(c);
+          const unread = meId ? unreadCount(c, loaded, meId) : 0;
           return (
             <li key={c.id}>
               <button
                 type="button"
                 onClick={() => onSelect(c.id)}
                 aria-current={c.id === selectedId ? 'page' : undefined}
-                className={`conversation-row flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
-                  c.id === selectedId
-                    ? 'bg-emerald-950 font-semibold'
-                    : 'hover:bg-zinc-800'
-                }`}
+                aria-describedby={unread > 0 ? `unread-${c.id}` : undefined}
+                className={`conversation-row${unread > 0 ? ' conversation-row--unread' : ''}`}
               >
-                <span
-                  aria-hidden
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold text-zinc-200"
-                >
-                  {avatarInitial(c)}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-baseline justify-between gap-2">
-                    <span className="truncate">{conversationLabel(c)}</span>
-                    {when && (
-                      <span className="shrink-0 text-[10px] font-normal text-zinc-400">
-                        {when}
-                      </span>
-                    )}
+                {c.kind === 'group'
+                  ? <span aria-hidden className="tile h-8 w-8"><PeopleIcon /></span>
+                  : <span aria-hidden className="avatar avatar-32" style={{ background: avatarGradient(c.peer_handle ?? c.id) }}>
+                    {avatarInitial(c)}
+                  </span>}
+                <span className="conversation-row-body">
+                  <span className="conversation-row-top">
+                    <span className="conversation-row-name">{conversationLabel(c, meId)}</span>
+                    {when && <span className="conversation-row-time">{when}</span>}
                   </span>
-                  <span className="block truncate text-xs font-normal text-zinc-400">
-                    {sub ? `${sub} · ` : ''}
-                    {preview}
+                  <span className="conversation-row-bottom">
+                    <span className="conversation-row-preview">
+                      {sub && <span className="conversation-row-sub">{sub} · </span>}
+                      {preview}
+                    </span>
+                    {unread > 0 && <span className="unread-badge" aria-hidden>{unreadBadge(unread)}</span>}
                   </span>
                 </span>
-                <span className="shrink-0 rounded bg-zinc-800 px-1 text-[10px] uppercase text-zinc-400">
-                  {c.kind}
-                </span>
+                {unread > 0 && <span id={`unread-${c.id}`} hidden>{unread} unread</span>}
               </button>
             </li>
           );
         })}
         {ordered.length === 0 && (
-          <li className="px-2 py-4 text-xs text-zinc-400">
-            No conversations yet — open a DM above.
+          <li className="navigation-no-results">
+            {filter.trim() ? 'No matching conversations.' : 'No conversations yet — open a DM above.'}
           </li>
         )}
       </ul>

@@ -51,6 +51,13 @@ export interface ConversationBody {
   members: string[];
 }
 
+/** A DM/group co-member as returned by GET /v1/conversations. */
+export interface MemberProfileBody {
+  user_id: string;
+  handle: string;
+  display_name: string;
+}
+
 /** GET /v1/conversations entry: caller-scoped, with the DM peer resolved. */
 export interface ConversationSummaryBody {
   id: string;
@@ -60,6 +67,16 @@ export interface ConversationSummaryBody {
   peer_display_name: string | null;
   last_seq: number | null;
   last_sent_at: string | null;
+  /** DM/group roster; older servers omit it and channels return it empty. */
+  member_profiles?: MemberProfileBody[];
+  /** The caller's private read marker; older servers omit it. */
+  last_read_seq?: number;
+}
+
+/** POST /v1/conversations/{id}/read response: the stored, monotonic marker. */
+export interface ReadMarkerBody {
+  conversation_id: string;
+  last_read_seq: number;
 }
 
 export interface MessageBody {
@@ -365,6 +382,7 @@ export class ApiClient {
     method: string,
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
@@ -374,6 +392,7 @@ export class ApiClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
     if (!res.ok) throw await parseError(res);
     // Add-member / ban return 201 with an empty body, and several member
@@ -435,6 +454,16 @@ export class ApiClient {
     return this.req<ConversationBody>('POST', '/v1/conversations', {
       member_handles,
     });
+  }
+
+  /** Tell the conversation's other members you are typing (ephemeral). */
+  sendTyping(conversationId: string): Promise<void> {
+    return this.req<void>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/typing`);
+  }
+
+  /** Advance the caller's private read marker (never moves backwards). */
+  markRead(conversationId: string, seq: number, signal?: AbortSignal): Promise<ReadMarkerBody> {
+    return this.req<ReadMarkerBody>('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/read`, { seq }, signal);
   }
 
   /** Caller-scoped conversation list with DM peers + last positions. */

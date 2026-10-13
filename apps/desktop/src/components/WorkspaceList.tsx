@@ -2,6 +2,8 @@ import type { WorkspaceBody } from '../lib/api';
 
 interface Props {
   workspaces: WorkspaceBody[];
+  /** Workspaces with unread channels among those loaded this session. */
+  unreadWorkspaceIds?: Set<string>;
   selectedWorkspaceId: string | null;
   loading: boolean;
   error: string | null;
@@ -11,6 +13,7 @@ interface Props {
 
 export default function WorkspaceList({
   workspaces,
+  unreadWorkspaceIds,
   selectedWorkspaceId,
   loading,
   error,
@@ -18,48 +21,44 @@ export default function WorkspaceList({
   onRetry,
 }: Props) {
   return (
-    <div className="border-b border-zinc-800 p-2">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-          Workspaces
-        </h2>
-        {loading && <span className="text-[11px] text-zinc-500">…</span>}
-      </div>
+    <div className="rail-workspaces">
+      <h2 className="sr-only">
+        Workspaces
+      </h2>
+      <span className="rail-label" aria-hidden>{loading ? '···' : 'SPACES'}</span>
       {error && (
-        <div className="mb-1">
-          <p className="text-xs text-red-400">{error}</p>
+        <div className="flex flex-col items-center gap-1">
+          <p className="rail-error" title={error}>!</p>
           <button
             type="button"
             onClick={onRetry}
-            className="mt-1 rounded bg-zinc-800 px-2 py-0.5 text-xs"
+            className="btn btn-sm btn-secondary"
           >
             Retry
           </button>
         </div>
       )}
       {!loading && !error && workspaces.length === 0 && (
-        <p className="px-1 py-1 text-xs text-zinc-500">
-          No workspaces yet — create one below or join with an invite.
+        <p className="rail-empty" title="No workspaces yet — create one in the sidebar or join with an invite.">
+          —
         </p>
       )}
-      <ul className="max-h-32 space-y-0.5 overflow-y-auto">
+      <ul>
         {workspaces.map((w) => (
           <li key={w.id}>
             <button
               type="button"
               onClick={() => onSelect(w.id)}
               aria-pressed={w.id === selectedWorkspaceId}
-              className={`w-full truncate rounded px-2 py-1.5 text-left text-sm ${
-                w.id === selectedWorkspaceId
-                  ? 'bg-zinc-700 font-semibold'
-                  : 'hover:bg-zinc-800'
-              }`}
+              aria-label={`${w.name} ${w.my_role}`}
+              aria-describedby={unreadWorkspaceIds?.has(w.id) ? `unread-ws-${w.id}` : undefined}
+              className={`rail-tile rail-workspace${unreadWorkspaceIds?.has(w.id) ? ' rail-workspace--unread' : ''}`}
               title={`${w.name} (${w.my_role})`}
             >
-              {w.name}
-              <span className="ml-1 text-[10px] uppercase text-zinc-500">
-                {w.my_role}
-              </span>
+              <span className="rail-tile-rim" aria-hidden />
+              <span className="rail-tile-face" aria-hidden>{w.name.trim().slice(0, 2).toUpperCase()}</span>
+              <span className="sr-only">{w.name} {w.my_role}</span>
+              {unreadWorkspaceIds?.has(w.id) && <span id={`unread-ws-${w.id}`} hidden>Unread messages</span>}
             </button>
           </li>
         ))}

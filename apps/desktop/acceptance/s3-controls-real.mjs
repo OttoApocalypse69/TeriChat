@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { openWorkspaceDetails } from './ui-navigation.mjs';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
@@ -129,6 +130,7 @@ async function login(page, handle, password) {
 }
 async function selectWorkspace(page, workspace, role) {
   await page.locator(`button[title="${workspace.name} (${role})"]`).click();
+  await openWorkspaceDetails(page);
   const toggle = page.getByRole('button', { name: 'Your activity', exact: true });
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
   return page.getByRole('region', { name: 'Your workspace activity', exact: true });
@@ -199,6 +201,7 @@ try {
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   assert.equal((await sent).status(), 201);
   await until(async () => (await request('GET', statsRoute(workspace.id), alice.token)).message_count === 2, 'browser message projection');
+  await openWorkspaceDetails(page);
   let activity = page.getByRole('region', { name: 'Your workspace activity', exact: true });
   await activity.getByRole('button', { name: 'Refresh activity' }).click();
   await total(activity, 2);

@@ -1,0 +1,304 @@
+/* Security center: sessions are real objects, so they earn bordered cards. */
+.session-panel {
+  width: 100%;
+  max-width: 840px;
+  min-width: 0;
+  margin-inline: auto;
+  padding: clamp(20px, 4vw, 40px) clamp(20px, 4vw, 48px) 48px;
+  color: var(--ink-1);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.session-panel__header {
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.session-panel__eyebrow {
+  margin: 0 0 10px;
+  color: var(--uv-400);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.session-panel__eyebrow span {
+  margin-inline: 8px;
+  color: var(--ink-3);
+}
+
+.session-panel__title {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.session-panel__intro,
+.session-panel__description,
+.session-panel__pagination-note {
+  margin: 0;
+  color: var(--ink-3);
+}
+
+.session-panel__intro { font-size: 13px; }
+
+.session-panel__section-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.session-panel__section-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.session-panel__section-heading svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--uv-500);
+}
+
+.session-panel__description {
+  margin-bottom: 16px;
+  font-size: 12.5px;
+}
+
+.session-panel__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-panel__card {
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 1px var(--line-default);
+}
+
+.session-panel__card--current {
+  box-shadow: inset 0 0 0 1px var(--uv-line-42);
+}
+
+.session-panel__card-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.session-panel__card-heading h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.session-panel__session-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: 6px;
+  background: #16161e;
+  box-shadow: inset 0 0 0 1px var(--line-default);
+  color: var(--ink-2);
+}
+
+.session-panel__session-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.session-panel__card--current .session-panel__session-icon {
+  background: var(--uv-wash-12);
+  box-shadow: none;
+  color: var(--uv-300);
+}
+
+.session-panel__current-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-xs);
+  background: rgb(154 120 255 / 14%);
+  color: var(--uv-300);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.session-panel__identifiers {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.session-panel__identifiers p,
+.session-panel__timestamps p {
+  min-width: 0;
+  margin: 0;
+}
+
+.session-panel__identifiers code {
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.session-panel__card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.session-panel__timestamps {
+  display: grid;
+  gap: 2px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.session-panel__timestamps span {
+  color: var(--ink-2);
+}
+
+.session-panel__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-overlay);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-1);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color var(--t-instant) var(--ease), box-shadow var(--t-instant) var(--ease);
+}
+
+.session-panel__button:hover:not(:disabled) {
+  background: #21212c;
+  box-shadow: inset 0 0 0 1px #3a3a4e;
+}
+
+.session-panel__button:disabled {
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px #1f1f2a;
+  color: #5e5b72;
+  cursor: not-allowed;
+}
+
+/* Destructive: rose wash + ring, the verb on the button. */
+.session-panel__button--end {
+  background: rgb(242 86 111 / 14%);
+  box-shadow: inset 0 0 0 1px rgb(242 86 111 / 35%);
+  color: var(--rose-text);
+}
+
+.session-panel__button--end:hover:not(:disabled) {
+  background: rgb(242 86 111 / 22%);
+  box-shadow: inset 0 0 0 1px rgb(242 86 111 / 50%);
+  color: #ffa3b1;
+}
+
+.session-panel__button--end:focus-visible { outline-color: var(--rose); }
+
+.session-panel__button--end:disabled {
+  background: rgb(242 86 111 / 5%);
+  box-shadow: none;
+  color: #6e4a55;
+}
+
+.session-panel__feedback,
+.session-panel__empty {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 1px var(--line-default);
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+
+.session-panel__feedback p {
+  margin: 0 0 10px;
+}
+
+.session-panel__feedback--error {
+  background: rgb(242 86 111 / 8%);
+  box-shadow: inset 0 0 0 1px rgb(242 86 111 / 35%);
+  color: var(--ink-1);
+}
+
+.session-panel__empty {
+  padding-block: 24px;
+  background: transparent;
+  box-shadow: none;
+  border: 1px dashed var(--line-heavy);
+  text-align: center;
+}
+
+.session-panel__pagination-note {
+  margin: 14px 0 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+@media (max-width: 767px) {
+  .session-panel__button { min-height: 44px; }
+}
+
+@media (max-width: 520px) {
+  .session-panel__card {
+    padding: 14px;
+  }
+
+  .session-panel__card-footer > .session-panel__button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-panel__button {
+    transition: none;
+  }
+}

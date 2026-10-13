@@ -2,7 +2,7 @@
 // Dedup keys: message `id` and per-conversation `client_msg_id` (the send
 // idempotency key). Gateway event ids are tracked separately for resume.
 
-import type { ConversationBody, MessageBody } from './api';
+import type { ConversationBody, MemberProfileBody, MessageBody } from './api';
 import type { GatewayOutboxEvent } from './gateway';
 
 export interface ChatMessage {
@@ -28,6 +28,48 @@ export interface ChatConversation {
   last_seq?: number | null;
   /** `sent_at` of that last message, when the server reported activity. */
   last_sent_at?: string | null;
+  /** DM/group roster with handles; absent from older servers and channels. */
+  member_profiles?: MemberProfileBody[];
+  /** The caller's private read marker; absent when the server predates it. */
+  last_read_seq?: number | null;
+}
+
+/**
+ * Messages from other people after the caller's read marker. Unknown markers
+ * (older servers) count as zero rather than guessing. Every position after
+ * the marker that history has not loaded still counts, including gaps below
+ * a loaded message (e.g. a peer's message whose fetch failed just before
+ * the caller's own reply loaded).
+ */
+export function unreadCount(
+  conv: ChatConversation,
+  messages: ChatMessage[] | undefined,
+  meId: string,
+): number {
+  const read = conv.last_read_seq;
+  if (read == null) return 0;
+  const after = (messages ?? []).filter(m => m.seq > read);
+  const latest = after.reduce((max, m) => Math.max(max, m.seq), Math.max(conv.last_seq ?? 0, read));
+  const fromOthers = after.filter(m => m.sender_id !== meId).length;
+  const missing = Math.max(0, latest - read - new Set(after.map(m => m.seq)).size);
+  return fromOthers + missing;
+}
+
+/**
+ * The highest seq that can honestly be marked read: loaded history must be
+ * gapless from the current marker up to it. A later loaded message (say, the
+ * caller's own reply) never carries the marker across an unloaded one.
+ */
+export function readableThrough(messages: ChatMessage[] | undefined, marker: number): number {
+  const loaded = new Set((messages ?? []).map(m => m.seq));
+  let through = marker;
+  while (loaded.has(through + 1)) through += 1;
+  return through;
+}
+
+/** Badge text: exact up to 99. */
+export function unreadBadge(count: number): string {
+  return count > 99 ? '99+' : String(count);
 }
 
 export function toChatMessage(m: MessageBody): ChatMessage {
@@ -83,8 +125,21 @@ export function upsertConversation(
 ): ChatConversation[] {
   // Spread the whole row: summary entries carry peer/last-message fields
   // that must survive reload-driven list merges, not just id/kind/members.
+  // Positions only move forward: a list response captured before a newer
+  // read or event must not rewind them.
   const next = list.some((c) => c.id === conv.id)
-    ? list.map((c) => (c.id === conv.id ? { ...c, ...conv } : c))
+    ? list.map((c) => {
+      if (c.id !== conv.id) return c;
+      const merged: ChatConversation = { ...c, ...conv };
+      const incoming = conv as ChatConversation;
+      if (c.last_read_seq != null && incoming.last_read_seq != null) {
+        merged.last_read_seq = Math.max(c.last_read_seq, incoming.last_read_seq);
+      }
+      if (c.last_seq != null && incoming.last_seq != null) {
+        merged.last_seq = Math.max(c.last_seq, incoming.last_seq);
+      }
+      return merged;
+    })
     : [...list, { ...(conv as ChatConversation) }];
   return [...next].sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -113,7 +168,7 @@ export function gatewayEventInfo(
 }
 
 /** Primary row title: peer name for DMs, never a raw UUID. */
-export function conversationLabel(conv: ChatConversation): string {
+export function conversationLabel(conv: ChatConversation, meId?: string): string {
   if (conv.kind === 'dm') {
     if (conv.peer_display_name) return conv.peer_display_name;
     if (conv.peer_handle) return `@${conv.peer_handle}`;
@@ -121,6 +176,12 @@ export function conversationLabel(conv: ChatConversation): string {
   }
   if (conv.kind === 'channel') return 'Channel';
   if (conv.kind === 'group') {
+    // Groups are named by their other members once the roster is known.
+    const others = (conv.member_profiles ?? []).filter(p => p.user_id !== meId).map(profileName);
+    if (others.length > 0) {
+      const shown = others.slice(0, 3).join(', ');
+      return others.length > 3 ? `${shown} +${others.length - 3}` : shown;
+    }
     return conv.members.length > 0
       ? `Group · ${conv.members.length} members`
       : 'Group';
@@ -128,12 +189,43 @@ export function conversationLabel(conv: ChatConversation): string {
   return conv.kind || 'Conversation';
 }
 
-/** Secondary row line for DMs: the handle behind the display name. */
+/** Secondary row line: the handle behind a DM name, or a named group's size. */
 export function conversationSublabel(conv: ChatConversation): string | null {
   if (conv.kind === 'dm' && conv.peer_display_name && conv.peer_handle) {
     return `@${conv.peer_handle}`;
   }
+  if (conv.kind === 'group' && (conv.member_profiles?.length ?? 0) > 0) {
+    return `${conv.members.length} members`;
+  }
   return null;
+}
+
+function profileName(profile: MemberProfileBody): string {
+  return profile.display_name.trim() || `@${profile.handle}`;
+}
+
+/** The roster entry for a sender, when the server resolved one. */
+export function memberProfile(conv: ChatConversation | null, userId: string): MemberProfileBody | null {
+  return conv?.member_profiles?.find(p => p.user_id === userId) ?? null;
+}
+
+/** Other people a single request may start a group with (server-enforced). */
+export const MAX_GROUP_MEMBERS = 50;
+
+/**
+ * Parse group member input ("@ana, mary jane") into unique handles, dropping
+ * the caller's own handle (the server adds the creator anyway). Handles may
+ * contain spaces, so only commas and new lines separate them; one leading
+ * "@" is the display prefix. Handles are case-insensitive server-side.
+ */
+export function parseMemberHandles(input: string, ownHandle?: string): string[] {
+  const own = ownHandle?.trim().toLowerCase();
+  const seen = new Set<string>();
+  for (const raw of input.split(/[,\n]+/)) {
+    const handle = raw.trim().replace(/^@/, '').trim().toLowerCase();
+    if (handle && handle !== own) seen.add(handle);
+  }
+  return [...seen];
 }
 
 /** Single avatar letter from the peer name (or kind fallback). */
@@ -145,18 +237,31 @@ export function avatarInitial(conv: ChatConversation): string {
   return (src.charAt(0) || '?').toUpperCase();
 }
 
-/** Sender tag under a message: `you` for self, peer name for DMs. */
+/** Sender tag under a message: `you` for self, else the DM peer or roster name. */
 export function senderLabel(
   meId: string,
   senderId: string,
   conv: ChatConversation | null,
+  directory?: Readonly<Record<string, MemberProfileBody>>,
 ): string {
   if (senderId === meId) return 'you';
   if (conv?.kind === 'dm') {
     if (conv.peer_display_name) return conv.peer_display_name;
     if (conv.peer_handle) return `@${conv.peer_handle}`;
   }
+  // Channels carry no roster; their names come from the workspace directory.
+  const profile = memberProfile(conv, senderId) ?? directory?.[senderId];
+  if (profile) return profileName(profile);
   return senderId.slice(0, 8);
+}
+
+/** Highest loaded seq sent by `userId` (0 when none has loaded). */
+export function latestSeqFrom(messages: ChatMessage[] | undefined, userId: string): number {
+  let latest = 0;
+  for (const m of messages ?? []) {
+    if (m.sender_id === userId && m.seq > latest) latest = m.seq;
+  }
+  return latest;
 }
 
 /** `YYYY-MM-DD` (UTC) day bucket for divider grouping; '' when invalid. */
@@ -281,6 +386,30 @@ export class ChatStore {
     this.historySeq.set(conversationId, cursor);
   }
 
+  /** Advance the caller's read marker; markers never move backwards. */
+  /**
+   * Advance the caller's read marker; markers never move backwards. An absent
+   * marker is only created when `initialize` says the server supports them
+   * (e.g. a channel added this session, answered by the read endpoint).
+   */
+  setReadMarker(conversationId: string, seq: number, initialize = false): void {
+    const conv = this.conversations.find(c => c.id === conversationId);
+    if (!conv) return;
+    if (conv.last_read_seq == null ? !initialize : seq <= conv.last_read_seq) return;
+    this.conversations = upsertConversation(this.conversations, { ...conv, last_read_seq: seq });
+  }
+
+  /** Forget conversations the caller can no longer reach (e.g. a left workspace). */
+  removeConversations(ids: Iterable<string>): void {
+    const gone = new Set(ids);
+    if (gone.size === 0) return;
+    this.conversations = this.conversations.filter(c => !gone.has(c.id));
+    for (const id of gone) {
+      this.messages.delete(id);
+      this.historySeq.delete(id);
+    }
+  }
+
   maxSeq(conversationId: string): number {
     const list = this.messages.get(conversationId) ?? [];
     return list.reduce((m, x) => Math.max(m, x.seq), 0);
@@ -298,7 +427,12 @@ export class ChatStore {
     this.lastEventId = event.id;
     const info = gatewayEventInfo(event);
     if (!info) return null;
-    this.ensureConversation(info.conversationId);
+    const conv = this.ensureConversation(info.conversationId);
+    // Record the position now, so unread state survives a failed or slow
+    // history fetch for the message this event announces.
+    if ((conv.last_seq ?? 0) < info.seq) {
+      this.conversations = upsertConversation(this.conversations, { ...conv, last_seq: info.seq });
+    }
     return info;
   }
 }

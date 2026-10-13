@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#101214"/>
-  <rect x="1.5" y="1.5" width="61" height="61" rx="12.5" fill="none" stroke="#34d399" stroke-opacity="0.3" stroke-width="2"/>
-  <text x="32" y="42" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="26" font-weight="800" letter-spacing="0.5" fill="#34d399">UC</text>
+  <rect width="64" height="64" rx="12" fill="#07070A"/>
+  <path d="M22 9H55V42L42 55H9V22Z" fill="none" stroke="#9A78FF" stroke-width="3.5" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="12.5" fill="#C9B5FF"/>
+  <circle cx="36.3" cy="28.4" r="11.1" fill="#07070A"/>
 </svg>

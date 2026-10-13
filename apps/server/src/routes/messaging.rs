@@ -4,7 +4,7 @@
 //! `crate::workspaces`). No behavior changes from the former `routes.rs`.
 
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     routing::post,
     Json, Router,
@@ -13,6 +13,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use std::collections::HashSet;
 
 use crate::auth;
 use crate::errors::AppError;
@@ -63,6 +65,17 @@ struct ConversationSummaryBody {
     peer_display_name: Option<String>,
     last_seq: Option<i64>,
     last_sent_at: Option<DateTime<Utc>>,
+    /// The caller's own read marker; never another member's.
+    last_read_seq: i64,
+    /// `dm`/`group` rosters so clients can name senders; empty for channels.
+    member_profiles: Vec<MemberProfileBody>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemberProfileBody {
+    user_id: Uuid,
+    handle: String,
+    display_name: String,
 }
 
 impl From<messaging::ConversationSummary> for ConversationSummaryBody {
@@ -75,6 +88,16 @@ impl From<messaging::ConversationSummary> for ConversationSummaryBody {
             peer_display_name: row.peer_display_name,
             last_seq: row.last_seq,
             last_sent_at: row.last_sent_at,
+            last_read_seq: row.last_read_seq,
+            member_profiles: row
+                .member_profiles
+                .into_iter()
+                .map(|profile| MemberProfileBody {
+                    user_id: profile.user_id,
+                    handle: profile.handle,
+                    display_name: profile.display_name,
+                })
+                .collect(),
         }
     }
 }
@@ -141,20 +164,37 @@ async fn create_dm(
     ))
 }
 
+/// Other members a single group-creation request may name. Matches the
+/// client's `MAX_GROUP_MEMBERS`; a group DM is small, not a workspace.
+const MAX_GROUP_HANDLES: usize = 50;
+
 async fn create_group(
     State(state): State<AppState>,
     bearer: Bearer,
     Json(body): Json<GroupBody>,
 ) -> Result<(StatusCode, Json<ConversationBody>), AppError> {
     let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
-    if body.member_handles.is_empty() {
-        return Err(AppError::BadRequest(
-            "group needs at least one member".to_owned(),
-        ));
+    // Bound the work (one lookup per handle) before doing any of it.
+    if body.member_handles.len() > MAX_GROUP_HANDLES {
+        return Err(AppError::BadRequest(format!(
+            "a group can start with at most {MAX_GROUP_HANDLES} other members"
+        )));
     }
+    // Handles are case-insensitive, so `Ana`/`ana`/`@CREATOR` spellings can
+    // resolve to the same account: dedupe by id and never count the creator.
+    let mut seen = HashSet::with_capacity(body.member_handles.len());
     let mut members = Vec::with_capacity(body.member_handles.len());
     for handle in &body.member_handles {
-        members.push(auth::user_id_by_handle(pool, handle).await?);
+        let id = auth::user_id_by_handle(pool, handle).await?;
+        if id != bearer.user_id() && seen.insert(id) {
+            members.push(id);
+        }
+    }
+    // A group DM has 3+ participants; two people talk in a DM.
+    if members.len() < 2 {
+        return Err(AppError::BadRequest(
+            "a group needs at least two other members; use a DM for one".to_owned(),
+        ));
     }
     let conversation =
         messaging::create_conversation(pool, bearer.user_id(), "group", &members).await?;
@@ -258,7 +298,82 @@ async fn message_history(
     ))
 }
 
-/// Messaging routes: conversations plus send/history.
+/// `POST /v1/conversations/{id}/read` request: the highest seq now read.
+#[derive(Debug, Deserialize)]
+struct ReadBody {
+    seq: i64,
+}
+
+/// The caller's stored (monotonic, clamped) read marker.
+#[derive(Debug, Serialize)]
+struct ReadMarkerBody {
+    conversation_id: Uuid,
+    last_read_seq: i64,
+}
+
+async fn mark_read(
+    State(state): State<AppState>,
+    bearer: Bearer,
+    Path(conversation_id): Path<Uuid>,
+    Json(body): Json<ReadBody>,
+) -> Result<Json<ReadMarkerBody>, AppError> {
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    // Same read gate as history: workspace members may mark channels read,
+    // strangers get the membership wall rather than a participant oracle.
+    if let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id).await? {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
+            .await?;
+    }
+    let last_read_seq =
+        messaging::mark_read(pool, bearer.user_id(), conversation_id, body.seq).await?;
+    Ok(Json(ReadMarkerBody {
+        conversation_id,
+        last_read_seq,
+    }))
+}
+
+/// Relay "I am typing" to the conversation's other live members. Gated
+/// exactly like sending: a channel needs workspace membership and SEND, any
+/// other conversation needs participation. Ephemeral: nothing is stored.
+///
+/// Admission comes first and costs no query: a repeat inside the throttle
+/// interval is answered 204 and dropped without a lookup (so, while an
+/// account's own earlier attempt is still pending, even a refused one). An
+/// attempt that fails authorization releases its slot.
+async fn typing(
+    State(state): State<AppState>,
+    Extension(bus): Extension<crate::typing::TypingBus>,
+    bearer: Bearer,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let Some(admission) = bus.admit(bearer.user_id(), conversation_id) else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    let pool = state.pool.as_ref().ok_or(AppError::NoDatabase)?;
+    if let Some(channel) = workspaces::channel_by_conversation(pool, conversation_id).await? {
+        let (_workspace, _role) =
+            workspaces::get_workspace(pool, bearer.user_id(), channel.workspace_id).await?;
+        workspaces::ensure_channel_participation(pool, channel.workspace_id, bearer.user_id())
+            .await?;
+        if !workspaces::can_send(pool, channel.id, bearer.user_id()).await? {
+            return Err(AppError::Denied("not permitted in this channel".to_owned()));
+        }
+    }
+    messaging::publish_typing(
+        pool,
+        conversation_id,
+        bearer.user_id(),
+        |recipients, last_seq| {
+            admission.publish(recipients.into(), last_seq);
+        },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Messaging routes: conversations plus send/history and read markers.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/conversations/dm", post(create_dm))
@@ -266,5 +381,7 @@ pub fn router() -> Router<AppState> {
             "/v1/conversations",
             post(create_group).get(list_conversations),
         )
+        .route("/v1/conversations/{id}/read", post(mark_read))
+        .route("/v1/conversations/{id}/typing", post(typing))
         .route("/v1/messages", post(send_message).get(message_history))
 }

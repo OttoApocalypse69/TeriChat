@@ -88,10 +88,29 @@ pub struct ConversationSummary {
     pub last_seq: Option<i64>,
     /// `sent_at` of that last message, if any message exists.
     pub last_sent_at: Option<DateTime<Utc>>,
+    /// The caller's own read position (highest seq they have read). Private:
+    /// never another member's marker.
+    pub last_read_seq: i64,
+    /// Handle and display name of every member of a `dm` or `group`, so
+    /// clients can label senders. Empty for `channel`: workspace membership
+    /// has its own gated, paged directory.
+    pub member_profiles: Vec<MemberProfile>,
 }
 
-/// One row of the conversation list query: id, kind, last seq, last time.
-type ConversationListRow = (Uuid, String, Option<i64>, Option<DateTime<Utc>>);
+/// Public identity of a conversation member, as seen by co-members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberProfile {
+    /// Member account id.
+    pub user_id: Uuid,
+    /// Unique handle.
+    pub handle: String,
+    /// Display name.
+    pub display_name: String,
+}
+
+/// One row of the conversation list query: id, kind, last seq, last time,
+/// and the caller's read marker.
+type ConversationListRow = (Uuid, String, Option<i64>, Option<DateTime<Utc>>, i64);
 
 /// List the caller's conversations (dm/group/channel rows where the caller
 /// is a participant), newest activity first.
@@ -114,7 +133,8 @@ pub async fn list_conversations(
     let rows: Vec<ConversationListRow> = sqlx::query_as(
         r"SELECT c.id, c.kind,
             (SELECT MAX(m.seq) FROM messages m WHERE m.conversation_id = c.id),
-            (SELECT MAX(m.sent_at) FROM messages m WHERE m.conversation_id = c.id)
+            (SELECT MAX(m.sent_at) FROM messages m WHERE m.conversation_id = c.id),
+            p.last_read_seq
           FROM conversations c
           JOIN conversation_participants p ON p.conversation_id = c.id
           WHERE p.user_id = $1
@@ -145,26 +165,25 @@ pub async fn list_conversations(
         members_by_conv.entry(conv_id).or_default().push(member_id);
     }
 
-    // Peer candidates: the non-caller member of two-member DMs only.
-    let peer_ids: Vec<Uuid> = rows
+    // Profiles for every member of the caller's dm/group rows (channels are
+    // excluded; their membership is the workspace directory's concern).
+    let has_profiles = |kind: &str| kind == "dm" || kind == "group";
+    let mut profile_ids: Vec<Uuid> = rows
         .iter()
-        .filter(|row| row.1 == "dm")
-        .filter_map(|row| {
-            let members = members_by_conv.get(&row.0)?;
-            if members.len() == 2 {
-                members.iter().find(|id| **id != user_id).copied()
-            } else {
-                None
-            }
-        })
+        .filter(|row| has_profiles(&row.1))
+        .filter_map(|row| members_by_conv.get(&row.0))
+        .flatten()
+        .copied()
         .collect();
-    let peer_rows: Vec<(Uuid, String, String)> =
+    profile_ids.sort_unstable();
+    profile_ids.dedup();
+    let profile_rows: Vec<(Uuid, String, String)> =
         sqlx::query_as("SELECT id, handle, display_name FROM users WHERE id = ANY($1)")
-            .bind(&peer_ids)
+            .bind(&profile_ids)
             .fetch_all(pool)
             .await
             .map_err(MessagingError::Database)?;
-    let peers: std::collections::HashMap<Uuid, (String, String)> = peer_rows
+    let profiles: std::collections::HashMap<Uuid, (String, String)> = profile_rows
         .into_iter()
         .map(|row| (row.0, (row.1, row.2)))
         .collect();
@@ -173,14 +192,32 @@ pub async fn list_conversations(
         .into_iter()
         .map(|row| {
             let members = members_by_conv.remove(&row.0).unwrap_or_default();
+            // Peer: the non-caller member of a two-member DM only.
             let peer = if row.1 == "dm" && members.len() == 2 {
                 members
                     .iter()
                     .find(|id| **id != user_id)
-                    .and_then(|id| peers.get(id))
+                    .and_then(|id| profiles.get(id))
             } else {
                 None
             };
+            let mut member_profiles: Vec<MemberProfile> = if has_profiles(&row.1) {
+                members
+                    .iter()
+                    .filter_map(|id| {
+                        profiles
+                            .get(id)
+                            .map(|(handle, display_name)| MemberProfile {
+                                user_id: *id,
+                                handle: handle.clone(),
+                                display_name: display_name.clone(),
+                            })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            member_profiles.sort_by(|a, b| a.handle.cmp(&b.handle));
             ConversationSummary {
                 id: row.0,
                 kind: row.1,
@@ -189,6 +226,8 @@ pub async fn list_conversations(
                 peer_display_name: peer.map(|p| p.1.clone()),
                 last_seq: row.2,
                 last_sent_at: row.3,
+                last_read_seq: row.4,
+                member_profiles,
             }
         })
         .collect())
@@ -391,6 +430,52 @@ pub async fn find_or_create_dm(
     Ok(conversation)
 }
 
+/// Authorize a typing signal and capture its audience under the typist's
+/// participant row lock, handing both to `publish` before the lock is
+/// released. A concurrent kick's DELETE waits for this (as it does for a
+/// send), so a signal is either published before a removal or refused after
+/// it: never authorized before a kick and captured after it. `publish` gets
+/// every participant plus the conversation's highest message seq.
+///
+/// # Errors
+///
+/// Returns [`MessagingError::NotMember`] when `user_id` is not a participant
+/// and [`MessagingError::Database`] on database failure.
+pub async fn publish_typing(
+    pool: &sqlx::PgPool,
+    conversation_id: Uuid,
+    user_id: Uuid,
+    publish: impl FnOnce(Vec<Uuid>, i64),
+) -> Result<(), MessagingError> {
+    let mut tx = pool.begin().await.map_err(MessagingError::Database)?;
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM conversation_participants
+         WHERE conversation_id = $1 AND user_id = $2 FOR SHARE",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(MessagingError::Database)?;
+    if member.is_none() {
+        return Err(MessagingError::NotMember);
+    }
+    let recipients: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM conversation_participants WHERE conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(MessagingError::Database)?;
+    let last_seq: i64 = sqlx::query_scalar("SELECT next_seq - 1 FROM conversations WHERE id = $1")
+        .bind(conversation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(MessagingError::Database)?;
+    publish(recipients, last_seq);
+    tx.commit().await.map_err(MessagingError::Database)
+}
+
 /// Membership check. `false` covers both non-members and missing rows.
 ///
 /// # Errors
@@ -496,8 +581,53 @@ pub async fn send_message(
         seq,
     )
     .await?;
+    // Your own message is never unread for you, but only when you were
+    // already caught up: if someone else's message took the previous seq and
+    // you have not marked it read, stepping over it would hide it. The
+    // participant row is locked above, so this cannot race a marker update.
+    sqlx::query(
+        "UPDATE conversation_participants SET last_read_seq = $3
+         WHERE conversation_id = $1 AND user_id = $2 AND last_read_seq = $3 - 1",
+    )
+    .bind(conversation_id)
+    .bind(sender_id)
+    .bind(seq)
+    .execute(&mut *tx)
+    .await
+    .map_err(MessagingError::Database)?;
     tx.commit().await.map_err(MessagingError::Database)?;
     Ok((message, true))
+}
+
+/// Advance the caller's private read marker to `seq`, returning the stored
+/// marker. Markers only move forward and never past the last assigned
+/// sequence, so a stale or oversized request cannot rewind or skip ahead.
+///
+/// # Errors
+///
+/// [`MessagingError::NotMember`] when the caller is not a participant;
+/// [`MessagingError::Database`] on query failure.
+pub async fn mark_read(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    seq: i64,
+) -> Result<i64, MessagingError> {
+    let marker: Option<i64> = sqlx::query_scalar(
+        r"UPDATE conversation_participants p
+             SET last_read_seq = GREATEST(p.last_read_seq, LEAST($3, c.next_seq - 1)),
+                 last_read_at = now()
+            FROM conversations c
+           WHERE c.id = p.conversation_id AND p.conversation_id = $1 AND p.user_id = $2
+       RETURNING p.last_read_seq",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .bind(seq.max(0))
+    .fetch_optional(pool)
+    .await
+    .map_err(MessagingError::Database)?;
+    marker.ok_or(MessagingError::NotMember)
 }
 
 /// Insert the sequenced message row plus its outbox event inside the caller's
@@ -986,6 +1116,87 @@ mod tests {
             .expect("list mallory");
         assert!(!mallory_listed.iter().any(|row| row.id == dm.id));
         assert!(!mallory_listed.iter().any(|row| row.id == group.id));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn list_conversations_member_profiles_scope() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("SKIPPED: list_conversations_member_profiles_scope (DATABASE_URL unset)");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        crate::MIGRATOR.run(&pool).await.expect("apply migrations");
+
+        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let mut users = Vec::new();
+        for (name, display) in [
+            ("mpada", "Profile Ada"),
+            ("mpbob", "Profile Bob"),
+            ("mpcat", "Profile Cat"),
+            ("mpdan", "Profile Dan"),
+        ] {
+            users.push(
+                crate::auth::create_user(
+                    &pool,
+                    &format!("{name}{stamp}"),
+                    &format!("{name}{stamp}@example.com"),
+                    display,
+                    "pw-profile-1",
+                )
+                .await
+                .expect("register"),
+            );
+        }
+        let (ada, bob, cat, dan) = (&users[0], &users[1], &users[2], &users[3]);
+
+        let group = create_conversation(&pool, ada.id, "group", &[bob.id, cat.id])
+            .await
+            .expect("create group");
+        let dm = find_or_create_dm(&pool, ada.id, bob.id)
+            .await
+            .expect("create dm");
+        // Channel participants never leak through this list.
+        let channel = create_conversation(&pool, ada.id, "channel", &[dan.id])
+            .await
+            .expect("create channel conversation");
+
+        let listed = list_conversations(&pool, ada.id).await.expect("list ada");
+        let row = |id: Uuid| listed.iter().find(|row| row.id == id).expect("row");
+
+        let group_profiles = &row(group.id).member_profiles;
+        assert_eq!(
+            group_profiles
+                .iter()
+                .map(|p| p.user_id)
+                .collect::<std::collections::HashSet<_>>(),
+            [ada.id, bob.id, cat.id].into_iter().collect(),
+            "every group member, including the caller"
+        );
+        let cat_profile = group_profiles
+            .iter()
+            .find(|p| p.user_id == cat.id)
+            .expect("cat");
+        assert_eq!(cat_profile.handle, cat.handle);
+        assert_eq!(cat_profile.display_name, cat.display_name);
+        assert!(group_profiles
+            .windows(2)
+            .all(|pair| pair[0].handle <= pair[1].handle));
+
+        assert_eq!(row(dm.id).member_profiles.len(), 2);
+        assert!(row(channel.id).member_profiles.is_empty());
+        assert!(!listed
+            .iter()
+            .flat_map(|row| &row.member_profiles)
+            .any(|p| p.user_id == dan.id));
+
+        // A non-member sees neither the group nor its roster.
+        let dan_listed = list_conversations(&pool, dan.id).await.expect("list dan");
+        assert!(!dan_listed.iter().any(|row| row.id == group.id));
         pool.close().await;
     }
 }
