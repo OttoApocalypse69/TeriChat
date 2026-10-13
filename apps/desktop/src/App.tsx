@@ -27,7 +27,9 @@ import { GatewayClient, type GatewayOutboxEvent, type GatewayStatus } from './li
 import {
   buildDmNotification,
   isWindowUnfocused,
+  loadMutedConversations,
   notifyDm,
+  setConversationMuted,
   watchNotificationClick,
 } from './lib/notifications';
 import {
@@ -380,6 +382,14 @@ function AuthenticatedApp({ session, onLogout }: {
     [api, bump, token],
   );
 
+  // Per-conversation mute: private to this device, silences toasts only.
+  const [muted, setMuted] = useState(() => loadMutedConversations(meId));
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  const toggleMuted = (conversationId: string) => {
+    setMuted(current => setConversationMuted(meId, current, conversationId, !current.has(conversationId)));
+  };
+
   // Toast clicks focus the main window (registered once per session).
   useEffect(() => {
     void watchNotificationClick();
@@ -433,6 +443,7 @@ function AuthenticatedApp({ session, onLogout }: {
           // a group): never toast it as a DM.
           if (!arrived || arrived.members.length === 0) return;
           if (!row) return;
+          if (mutedRef.current.has(arrived.id)) return;
           const content = buildDmNotification(meId, arrived, row);
           if (!content) return;
           void notifyDm(content, { unfocused: wasUnfocused }).catch(() => {
@@ -963,6 +974,8 @@ function AuthenticatedApp({ session, onLogout }: {
             <button type="button" className="mobile-only nav-action" onClick={() => setPane('navigation')}>← Back to conversations</button>
             {selectedWorkspace && <button type="button" className="details-toggle btn btn-ghost" aria-controls="workspace-details" aria-expanded={pane === 'details'}
               onClick={() => setPane(pane === 'details' ? 'conversation' : 'details')}><PanelIcon />Workspace details</button>}
+            {selected?.kind === 'dm' && <button type="button" className="btn btn-ghost" aria-pressed={muted.has(selected.id)}
+              onClick={() => toggleMuted(selected.id)}>{muted.has(selected.id) ? 'Unmute notifications' : 'Mute notifications'}</button>}
           </div>}
             isActivePane={pane === 'conversation'}
             conversation={selected}

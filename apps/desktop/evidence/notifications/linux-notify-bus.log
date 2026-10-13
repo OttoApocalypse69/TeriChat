@@ -1,0 +1,37 @@
+signal time=1791928058.426207 sender=org.freedesktop.DBus -> destination=:1.0 serial=2 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
+   string ":1.0"
+signal time=1791928058.426243 sender=org.freedesktop.DBus -> destination=:1.0 serial=4 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost
+   string ":1.0"
+method call time=1791928118.535399 sender=:1.10 -> destination=org.freedesktop.Notifications serial=2 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=Notify
+   string "terichat-desktop"
+   uint32 0
+   string "terichat-desktop"
+   string "Smoke Bee"
+   string "unfocused hello from Bee"
+   array [
+   ]
+   array [
+   ]
+   int32 -1
+method call time=1791928134.038286 sender=:1.17 -> destination=org.freedesktop.Notifications serial=4 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=Notify
+   string "terichat-desktop"
+   uint32 0
+   string "terichat-desktop"
+   string "Smoke Bee"
+   string "second while away"
+   array [
+   ]
+   array [
+   ]
+   int32 -1
+method call time=1791928156.194508 sender=:1.22 -> destination=org.freedesktop.Notifications serial=6 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=Notify
+   string "terichat-desktop"
+   uint32 0
+   string "terichat-desktop"
+   string "Smoke Bee"
+   string "unmuted again"
+   array [
+   ]
+   array [
+   ]
+   int32 -1

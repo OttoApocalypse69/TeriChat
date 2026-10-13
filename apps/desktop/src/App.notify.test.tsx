@@ -185,3 +185,43 @@ it('toasts a brand-new DM with its real peer name once the list resolves it', as
   expect(plugin.sendNotification).toHaveBeenCalledWith({ title: 'New Peer', body: 'body-1' });
 });
 
+
+it('a muted DM stays silent, keeps its message, and unmuting restores toasts', async () => {
+  window.localStorage.clear();
+  await login();
+  const socket = await readySocket();
+  await click('@Peer');
+  const history = vi.mocked(ApiClient.prototype.history);
+  history.mockClear();
+  history.mockResolvedValue([peerMessage(1)]);
+  await click('Mute notifications');
+  expect(host.querySelector('button[aria-pressed="true"]')?.textContent).toBe('Unmute notifications');
+  expect(window.localStorage.getItem('terichat.notifications.muted.v1:a')).toBe('["dm"]');
+  unfocused(false);
+  await flush(() => socket.event(1));
+  await flush();
+  expect(plugin.sendNotification).not.toHaveBeenCalled();
+  expect([...host.querySelectorAll('main p.whitespace-pre-wrap')].map(p => p.textContent)).toEqual(['body-1']);
+
+  await click('Unmute notifications');
+  expect(window.localStorage.getItem('terichat.notifications.muted.v1:a')).toBeNull();
+  history.mockResolvedValue([peerMessage(1), peerMessage(2)]);
+  await flush(() => socket.event(2));
+  await flush();
+  expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
+  expect(plugin.sendNotification).toHaveBeenCalledWith({ title: 'Peer', body: 'body-2' });
+});
+
+it('a mute saved earlier on this device applies right after login', async () => {
+  window.localStorage.setItem('terichat.notifications.muted.v1:a', '["dm"]');
+  await login();
+  const socket = await readySocket();
+  await click('@Peer');
+  vi.mocked(ApiClient.prototype.history).mockResolvedValue([peerMessage(1)]);
+  unfocused(false);
+  await flush(() => socket.event(1));
+  await flush();
+  expect(plugin.sendNotification).not.toHaveBeenCalled();
+  expect(host.querySelector('button[aria-pressed="true"]')?.textContent).toBe('Unmute notifications');
+  window.localStorage.clear();
+});
