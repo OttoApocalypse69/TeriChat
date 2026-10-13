@@ -237,7 +237,9 @@ async fn two_clients_exchange_and_resume() {
             .await
             .expect("serve test app");
     });
-    let _worker = tokio::spawn(messaging::outbox_worker(pool.clone(), hub));
+    // Held for the whole test: dropping the sender stops the worker.
+    let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let _worker = tokio::spawn(messaging::outbox_worker(pool.clone(), hub, stop_rx));
 
     let _alice_ws = connect_identified(&addr, &alice_token, None).await;
     let mut bob_ws = connect_identified(&addr, &bob_token, None).await;
@@ -565,7 +567,9 @@ async fn gateway_channel_guest_and_ban() {
             .await
             .expect("serve test app");
     });
-    let _worker = tokio::spawn(messaging::outbox_worker(pool.clone(), hub));
+    // Held for the whole test: dropping the sender stops the worker.
+    let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let _worker = tokio::spawn(messaging::outbox_worker(pool.clone(), hub, stop_rx));
 
     http_send(
         &http_state,

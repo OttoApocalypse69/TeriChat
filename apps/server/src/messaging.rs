@@ -808,9 +808,14 @@ pub async fn events_after(
 }
 
 /// Background outbox worker: claim → broadcast → mark, every 500 ms.
-/// At-least-once by design; `main` aborts it on shutdown and the next boot
-/// re-claims anything unmarked.
-pub async fn outbox_worker(pool: sqlx::PgPool, hub: broadcast::Sender<OutboxEntry>) {
+/// At-least-once by design. Returns between batches once `stop` reads true;
+/// if shutdown has to abort it mid-batch, the next boot re-claims anything
+/// unmarked.
+pub async fn outbox_worker(
+    pool: sqlx::PgPool,
+    hub: broadcast::Sender<OutboxEntry>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         match claim_outbox(&pool, OUTBOX_BATCH).await {
             Err(err) => {
@@ -828,7 +833,12 @@ pub async fn outbox_worker(pool: sqlx::PgPool, hub: broadcast::Sender<OutboxEntr
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Stop only between batches: a claimed batch is always sent and
+        // marked. Err means every stop sender is gone, which is also a stop.
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = stop.wait_for(|stopped| *stopped) => return,
+        }
     }
 }
 
